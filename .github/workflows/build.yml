@@ -1,4 +1,6 @@
 # TamaiOS — Tamagotchi ON / Meets emulator for iPhone (bring your own ROM).
+# Optional: put your own dump at firmware/<anything>.bin in this repo (keep the
+# repo PRIVATE) and it is built into the app, which then opens straight to it.
 # Upload this file to .github/workflows/build.yml in a GitHub repo.
 # Every push (or "Run workflow" on the Actions tab) builds an unsigned
 # TamaiOS.ipa, downloadable from the run's "Artifacts" section.
@@ -13,6 +15,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
+      - name: Get your repo (for the firmware/ folder)
+        uses: actions/checkout@v4
+
       - name: Write the app's source files
         run: |
           mkdir -p ffi ffi/src ios ios/TamaiOS ios/TamaiOS/Assets.xcassets ios/TamaiOS/Assets.xcassets/AppIcon.appiconset ios/TamaiOS/Assets.xcassets/LaunchColor.colorset tools
@@ -70,6 +75,7 @@ jobs:
           pub const F_CALL: u32 = 2;
           pub const F_SLEPT: u32 = 4;
           pub const F_WOKE: u32 = 8;
+          pub const F_SYNCED: u32 = 16;
 
           /// Tunables the console can change at runtime.
           #[derive(Clone)]
@@ -106,6 +112,10 @@ jobs:
               params: Params,
               last_speed: f64,
               boot_note: String,
+              /// The phone's local time as toy-clock seconds, and the game time it was read at.
+              wall: Option<(f64, f64)>,
+              auto_sync: bool,
+              last_drift: f64,
           }
 
           fn log_line(e: &mut Emu, s: String) {
@@ -344,6 +354,9 @@ jobs:
                   params: Params::default(),
                   last_speed: 1.0,
                   boot_note: String::new(),
+                  wall: None,
+                  auto_sync: true,
+                  last_drift: 0.0,
               }
           }
 
@@ -507,7 +520,43 @@ jobs:
                   e.flags |= F_FRAME;
               }
               e.was_asleep = asleep;
+              if asleep {
+                  auto_sync(e);
+              }
               TG_OK
+          }
+
+          /// While the toy sleeps, keep its clock chip on the phone's time (the game
+          /// reads it when it next wakes). The wake alarm moves with it, so the
+          /// once-a-minute wake-ups carry on as before.
+          fn auto_sync(e: &mut Emu) {
+              let (wall, at) = match e.wall {
+                  Some(w) => w,
+                  None => return,
+              };
+              let m = &mut e.m;
+              let want = ((wall + (m.sys.game_time - at)) * 32768.0) as i64;
+              let diff = want - m.sys.rtc.ticks(m.sys.game_time);
+              e.last_drift = diff as f64 / 32768.0;
+              if !e.auto_sync || diff.abs() < 30 * 32768 {
+                  return;
+              }
+              m.sys.rtc.base_ticks += diff;
+              if let Some(alarm) = m.sys.rtc.alarm_ticks() {
+                  let a = (alarm + diff).max(0) as u64;
+                  for i in 0..6 {
+                      m.sys.rtc.regs[0x20 + i] = (a >> (8 * i)) as u8;
+                  }
+              }
+              let msg = format!("clock synced to phone (was off by {:.0} s)", diff as f64 / 32768.0);
+              log_line(e, msg);
+              e.flags |= F_SYNCED;
+          }
+
+          /// The phone's local time now, as tg_rtc_seconds gives it. Call about once a second.
+          #[no_mangle]
+          pub extern "C" fn tg_set_wall_clock(e: *mut Emu, rtc_now: f64) {
+              with(e, |e| e.wall = Some((rtc_now, e.m.sys.game_time)))
           }
 
           fn reset_timing(e: &mut Emu) {
@@ -750,8 +799,8 @@ jobs:
                   let m = &e.m;
                   let p = &e.params;
                   format!(
-                      "boot: {}\nstopped: {:?}\nasleep: {} alarm_wake: {}\npc: {:08X} fault: {:?}\nexecuted: {} ({:.1} s emulated)\ngame_time: {:.1}\nirqs: {} frames: {}\nidle_skip: {} skipped: {} probes: {:?}\nnever_sleep: {} idle_counter: {:?}\nflash writes: {}\nrtc ticks: {} alarm: {:?}\nturbo: {:.2}\nbluetooth_used: {} ble_failed: {}\nparams: max_step={} max_behind={} max_catchup={} min_hold={} rewind_gap={}\naudio queued: {}",
-                      e.boot_note, e.stopped, m.sys.powered_off, m.alarm_wake, m.cpu.pc(), m.fault(), m.executed, m.now(), m.sys.game_time,
+                      "boot: {}\nclock drift vs phone: {:.0} s (auto_sync {})\nstopped: {:?}\nasleep: {} alarm_wake: {}\npc: {:08X} fault: {:?}\nexecuted: {} ({:.1} s emulated)\ngame_time: {:.1}\nirqs: {} frames: {}\nidle_skip: {} skipped: {} probes: {:?}\nnever_sleep: {} idle_counter: {:?}\nflash writes: {}\nrtc ticks: {} alarm: {:?}\nturbo: {:.2}\nbluetooth_used: {} ble_failed: {}\nparams: max_step={} max_behind={} max_catchup={} min_hold={} rewind_gap={}\naudio queued: {}",
+                      e.boot_note, e.last_drift, e.auto_sync, e.stopped, m.sys.powered_off, m.alarm_wake, m.cpu.pc(), m.fault(), m.executed, m.now(), m.sys.game_time,
                       m.irqs, m.sys.lcd.frames, m.idle_skip, m.idle_skipped, m.probe_stats, m.never_sleep, m.idle_counter,
                       m.sys.flash.writes, m.sys.rtc.ticks(m.sys.game_time), m.sys.rtc.alarm_ticks(), e.last_speed,
                       m.bluetooth_used, m.ble_failed, p.max_step, p.max_behind, p.max_catchup, p.min_hold, p.rewind_gap, e.audio.len()
@@ -786,6 +835,7 @@ jobs:
                       "never_sleep" => e.m.never_sleep = v != 0.0,
                       "stop_on_bluetooth" => e.m.stop_on_bluetooth = v != 0.0,
                       "unstop" => e.stopped = None,
+                      "auto_sync" => e.auto_sync = v != 0.0,
                       _ => return 0,
                   }
                   1
@@ -854,68 +904,204 @@ jobs:
               })
               .unwrap_or(0)
           }
+
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn sync_moves_clock_and_alarm_while_asleep() {
+                  let mut img = vec![0u8; FLASH_SIZE];
+                  img[..4].copy_from_slice(b"SPII");
+                  let image = Arc::new(img);
+                  let m = Machine::new(image.clone(), &image, 1000.0);
+                  let mut e = new_emu(m, image);
+                  e.m.sys.rtc.regs[0x40] = 2; // alarm armed
+                  let alarm: u64 = 1060 * 32768;
+                  for i in 0..6 {
+                      e.m.sys.rtc.regs[0x20 + i] = (alarm >> (8 * i)) as u8;
+                  }
+                  e.wall = Some((5000.0, e.m.sys.game_time));
+                  // awake: nothing changes
+                  auto_sync(&mut e);
+                  let t = e.m.sys.rtc.ticks(e.m.sys.game_time);
+                  assert!(((t as f64 / 32768.0) - 5000.0).abs() < 1.0);
+                  // alarm stays 60 s ahead
+                  let a = e.m.sys.rtc.alarm_ticks().unwrap();
+                  assert!(((a - t) as f64 / 32768.0 - 60.0).abs() < 1.0);
+                  assert!(e.flags & F_SYNCED != 0);
+                  // small drift is left alone
+                  e.flags = 0;
+                  e.wall = Some((5010.0, e.m.sys.game_time));
+                  auto_sync(&mut e);
+                  assert_eq!(e.flags & F_SYNCED, 0);
+              }
+          }
           TAMA_EOF
           cat > tools/icon.py <<'TAMA_EOF'
-          # Draws the TamaiOS app icon (1024x1024, no alpha).
-          import sys
+          # Draws the TamaiOS app icon: the same cartoon shell the app shows.
+          # Usage: icon.py OUT.png [size] [preview]   ("preview" = toy only on white, for layout checks)
+          import sys, math
           from PIL import Image, ImageDraw, ImageFilter
-          S = 1024
-          def lerp(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
-          img = Image.new("RGB", (S, S))
-          d = ImageDraw.Draw(img)
-          top, bot = (255, 200, 222), (190, 150, 250)
-          for y in range(S):
-              d.line([(0, y), (S, y)], fill=lerp(top, bot, y / S))
-          # egg
-          def egg(scale, cx, cy):
+
+          OUT = sys.argv[1]
+          SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 1024
+          PREVIEW = len(sys.argv) > 3
+          SS = 3                      # supersample for smooth edges
+          S = SIZE * SS
+
+          INK = (43, 28, 61)
+          TOP, BOT = (255, 187, 214), (245, 115, 168)          # Bubblegum theme
+          BTN = (252, 237, 158)
+          BG_TOP, BG_BOT = (255, 214, 232), (199, 166, 250)
+
+          def bez(p0, p1, p2, p3, n=80):
+              for i in range(n + 1):
+                  t = i / n; u = 1 - t
+                  yield (u**3*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t**3*p3[0],
+                         u**3*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t**3*p3[1])
+
+          def egg(x, y, w, h):
+              """Same curves as EggShape in ToyView.swift."""
+              mx = x + w / 2
               pts = []
-              import math
-              for i in range(720):
-                  a = i / 720 * 2 * math.pi
-                  x = math.sin(a)
-                  y = -math.cos(a)
-                  k = 1 - 0.22 * max(0.0, -y) ** 1.6   # narrower towards the top, smooth at the waist
-                  pts.append((cx + x * scale * 0.80 * k, cy + y * scale * (1.05 if y < 0 else 0.92)))
+              pts += bez((mx, y), (x + w*0.90, y), (x + w, y + h*0.26), (x + w, y + h*0.58))
+              pts += bez((x + w, y + h*0.58), (x + w, y + h*0.88), (x + w*0.80, y + h), (mx, y + h))
+              pts += bez((mx, y + h), (x + w*0.20, y + h), (x, y + h*0.88), (x, y + h*0.58))
+              pts += bez((x, y + h*0.58), (x, y + h*0.26), (x + w*0.10, y), (mx, y))
               return pts
-          shadow = Image.new("L", (S, S), 0)
-          ImageDraw.Draw(shadow).polygon(egg(400, 512, 560), fill=150)
-          shadow = shadow.filter(ImageFilter.GaussianBlur(30))
-          img.paste((120, 60, 140), (0, 0), shadow)
-          mask = Image.new("L", (S, S), 0)
-          ImageDraw.Draw(mask).polygon(egg(400, 512, 530), fill=255)
-          shell = Image.new("RGB", (S, S))
-          sd = ImageDraw.Draw(shell)
-          for y in range(S):
-              sd.line([(0, y), (S, y)], fill=lerp((255, 236, 246), (247, 112, 170), max(0, min(1, (y - 120) / 800))))
-          img.paste(shell, (0, 0), mask)
+
+          def lerp(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+          def vgrad(size, c0, c1, y0=0, y1=None):
+              im = Image.new("RGB", size); d = ImageDraw.Draw(im); y1 = y1 or size[1]
+              for y in range(size[1]):
+                  d.line([(0, y), (size[0], y)], fill=lerp(c0, c1, max(0, min(1, (y - y0) / max(1, y1 - y0)))))
+              return im
+
+          img = Image.new("RGB", (S, S), (255, 255, 255)) if PREVIEW else vgrad((S, S), BG_TOP, BG_BOT)
           d = ImageDraw.Draw(img)
+
+          # toy metrics (ShellMetrics), fitted into the icon
+          w = S * (0.80 if PREVIEW else 0.74)
+          eggH = w * 1.14; loopH = w * 0.16; total = eggH + loopH
+          left = (S - w) / 2
+          top = (S - total) / 2 + (0 if PREVIEW else S * 0.02)
+          lw = max(3, w * 0.018)
+          eggTop = top + loopH
+
+          # ground shadow
+          sh = Image.new("L", (S, S), 0)
+          ImageDraw.Draw(sh).ellipse([S/2 - w*0.4, eggTop + eggH*1.02 - w*0.06, S/2 + w*0.4, eggTop + eggH*1.02 + w*0.06], fill=90)
+          img.paste((60, 30, 70), (0, 0), sh.filter(ImageFilter.GaussianBlur(w * 0.025)))
+
+          # ball-chain loop
+          r = w * 0.075
+          cx, cy = S / 2, top + r
+          d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=INK, width=int(lw * 2.6))
+          d.ellipse([cx - r + lw*0.7, cy - r + lw*0.7, cx + r - lw*0.7, cy + r - lw*0.7], outline=(235, 235, 235), width=int(lw * 1.2))
+          cap = [cx - w*0.08, top + loopH - w*0.05 - w*0.045, cx + w*0.08, top + loopH - w*0.05 + w*0.045]
+          d.rounded_rectangle(cap, radius=w*0.045, fill=BOT, outline=INK, width=int(lw))
+
+          # egg: darker base, gradient body shifted up-left (cel shading), outline
+          base = egg(left, eggTop, w, eggH)
+          d.polygon(base, fill=lerp(BOT, (0, 0, 0), 0.14))
+          m = Image.new("L", (S, S), 0)
+          ImageDraw.Draw(m).polygon(egg(left + w*0.025 - w*0.022, eggTop + eggH*0.025 - eggH*0.022, w*0.95, eggH*0.95), fill=255)
+          img.paste(vgrad((S, S), TOP, BOT, int(eggTop), int(eggTop + eggH)), (0, 0), m)
+          d = ImageDraw.Draw(img)
+          d.line(base + [base[0]], fill=INK, width=int(lw), joint="curve")
+
+          # front-plate rim (dotted)
+          rim = egg(left + w*0.06, eggTop + eggH*0.06, w*0.88, eggH*0.88)
+          for i, p in enumerate(rim[::4]):
+              if i % 2 == 0:
+                  d.ellipse([p[0] - lw*0.4, p[1] - lw*0.4, p[0] + lw*0.4, p[1] + lw*0.4], fill=(255, 240, 248))
+
           # gloss
           gl = Image.new("L", (S, S), 0)
-          ImageDraw.Draw(gl).ellipse([300, 190, 520, 290], fill=140)
-          gl = gl.filter(ImageFilter.GaussianBlur(14))
+          gd = ImageDraw.Draw(gl)
+          gx, gy = S/2 - w*0.27, eggTop + eggH/2 - eggH*0.36
+          gd.ellipse([gx - w*0.11, gy - eggH*0.0375, gx + w*0.11, gy + eggH*0.0375], fill=190)
+          gl = gl.rotate(28, center=(gx, gy))
+          gd = ImageDraw.Draw(gl)
+          dx, dy = S/2 - w*0.13, eggTop + eggH/2 - eggH*0.41
+          gd.ellipse([dx - w*0.0225, dy - w*0.0225, dx + w*0.0225, dy + w*0.0225], fill=220)
           img.paste((255, 255, 255), (0, 0), gl)
-          # screen
-          d.rounded_rectangle([352, 360, 672, 680], radius=46, fill=(30, 26, 40))
-          d.rounded_rectangle([382, 390, 642, 650], radius=18, fill=(150, 230, 200))
-          # pixel pet
-          px = 20
-          pet = ["..XXXX..",
-                 ".XXXXXX.",
-                 "XX.XX.XX",
-                 "XXXXXXXX",
-                 "XX.XX.XX",
-                 "XXX..XXX",
-                 ".XXXXXX.",
-                 "..X..X.."]
-          ox, oy = 512 - 4 * px, 520 - 4 * px
+          d = ImageDraw.Draw(img)
+
+          def sparkle(cx, cy, a, b, fill):
+              k = 0.18; pts = []
+              for (sx, sy), (ex, ey), (qx, qy) in [((0, -b), (a, 0), (a*k, -b*k)), ((a, 0), (0, b), (a*k, b*k)),
+                                                   ((0, b), (-a, 0), (-a*k, b*k)), ((-a, 0), (0, -b), (-a*k, -b*k))]:
+                  for i in range(21):
+                      t = i / 20; u = 1 - t
+                      pts.append((cx + u*u*sx + 2*u*t*qx + t*t*ex, cy + u*u*sy + 2*u*t*qy + t*t*ey))
+              d.polygon(pts, fill=fill); d.line(pts + [pts[0]], fill=INK, width=max(2, int(lw*0.45)))
+
+          ec = eggTop + eggH / 2
+          sparkle(S/2 + w*0.36, ec - eggH*0.24, w*0.04, w*0.05, (255, 255, 255))
+          sparkle(S/2 + w*0.30, ec - eggH*0.33, w*0.025, w*0.0325, BTN)
+          # heart
+          hx, hy, hs = S/2 - w*0.38, ec + eggH*0.12, w*0.028
+          heart = [(hx + hs*16*math.sin(t)**3/16, hy - hs*(13*math.cos(t) - 5*math.cos(2*t) - 2*math.cos(3*t) - math.cos(4*t))/16) for t in [i/60*2*math.pi for i in range(61)]]
+          d.polygon([(x + lw*0.35, y + lw*0.35) for x, y in heart], fill=INK)
+          d.polygon(heart, fill=BTN)
+          # speaker holes
+          for i in (-1, 0, 1):
+              x, y, rr = S/2 + i * w*0.044, ec + eggH*0.445, w*0.011
+              d.ellipse([x - rr, y - rr, x + rr, y + rr], fill=lerp(BOT, INK, 0.55))
+
+          # screen bezel + screen
+          scr = w * 0.55; bez_ = scr * 1.15
+          sy = top + loopH + eggH * 0.415
+          bz = [S/2 - bez_/2, sy - bez_/2, S/2 + bez_/2, sy + bez_/2]
+          bm = Image.new("L", (S, S), 0); ImageDraw.Draw(bm).rounded_rectangle(bz, radius=bez_*0.26, fill=255)
+          img.paste(vgrad((S, S), (255, 250, 252), TOP, int(bz[1]), int(bz[3])), (0, 0), bm)
+          d = ImageDraw.Draw(img)
+          d.rounded_rectangle(bz, radius=bez_*0.26, outline=INK, width=int(lw))
+          fr = scr * 1.08
+          d.rounded_rectangle([S/2 - fr/2, sy - fr/2, S/2 + fr/2, sy + fr/2], radius=scr*0.12, fill=(31, 26, 46), outline=INK, width=int(lw*0.8))
+          lcd = [S/2 - scr/2, sy - scr/2, S/2 + scr/2, sy + scr/2]
+          d.rounded_rectangle(lcd, radius=scr*0.05, fill=(255, 246, 214))
+
+          # pixel scene: a cute original pet in a sunny room
+          P = scr / 16
+          def px(c, r, col): d.rectangle([lcd[0] + c*P, lcd[1] + r*P, lcd[0] + (c+1)*P - 1, lcd[1] + (r+1)*P - 1], fill=col)
+          for r in range(12, 16):
+              for c in range(16): px(c, r, (186, 232, 168) if (r + c) % 2 else (170, 222, 152))
+          for r in range(0, 12):
+              for c in range(16):
+                  if (r // 3 + c // 3) % 2 == 0: px(c, r, (255, 236, 196))
+          pet = ["....XXXXXX......",
+                 "..XXWWWWWWXX....",
+                 ".XWWWWWWWWWWX...",
+                 "XWWKWWWWWKWWWX..",
+                 "XWWKWWWWWKWWWX..",
+                 "XWPPWWKWWWPPWX..",
+                 "XWWWWWWWWWWWWX..",
+                 ".XWWWWWWWWWWX...",
+                 "..XXWXXXXWXX....",
+                 "....X....X......"]
+          cols = {"X": (52, 40, 80), "W": (255, 255, 255), "K": (52, 40, 80), "P": (255, 150, 180)}
           for r, row in enumerate(pet):
               for c, ch in enumerate(row):
-                  if ch == "X":
-                      d.rectangle([ox + c * px, oy + r * px, ox + c * px + px - 1, oy + r * px + px - 1], fill=(40, 70, 70))
-          # buttons
-          for (x, y) in [(400, 770), (512, 800), (624, 770)]:
-              d.ellipse([x - 38, y - 38, x + 38, y + 38], fill=(255, 230, 120), outline=(200, 120, 150), width=5)
-          img.save(sys.argv[1])
+                  if ch in cols: px(c + 2, r + 4, cols[ch])
+          for c, r in [(13, 2), (14, 1), (14, 3), (15, 2)]: px(c, r, (255, 200, 60))   # sparkle
+          px(14, 2, (255, 240, 150))
+          d.rounded_rectangle(lcd, radius=scr*0.05, outline=(31, 26, 46), width=int(lw*0.6))
+
+          # buttons (A, B lower, C)
+          bd = w * 0.135
+          by = top + loopH + eggH * 0.785
+          for i, off in ((-1, 0), (0, 0.32), (1, 0)):
+              x = S/2 + i * (bd + w*0.085); y = by + off * bd * 0.8
+              d.ellipse([x - bd/2, y - bd/2 + bd*0.07, x + bd/2, y + bd/2 + bd*0.07], fill=lerp(BOT, INK, 0.5))
+              d.ellipse([x - bd/2, y - bd/2, x + bd/2, y + bd/2], fill=BTN, outline=INK, width=int(lw))
+              d.ellipse([x - bd*0.28, y - bd*0.30, x - bd*0.02, y - bd*0.08], fill=(255, 255, 240))
+
+          img = img.resize((SIZE, SIZE), Image.LANCZOS)
+          img.save(OUT)
           TAMA_EOF
           cat > ios/project.yml <<'TAMA_EOF'
           name: TamaiOS
@@ -929,6 +1115,10 @@ jobs:
               platform: iOS
               sources:
                 - path: TamaiOS
+                  excludes: ["Firmware.bin"]
+                - path: TamaiOS/Firmware.bin
+                  buildPhase: resources
+                  optional: true
               settings:
                 base:
                   PRODUCT_BUNDLE_IDENTIFIER: com.jakebway.tamaios
@@ -941,7 +1131,7 @@ jobs:
                   OTHER_LDFLAGS: -ltamaios
                   ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
                   TARGETED_DEVICE_FAMILY: "1"
-                  MARKETING_VERSION: "1.0"
+                  MARKETING_VERSION: "1.2"
                   CURRENT_PROJECT_VERSION: "1"
                   CODE_SIGNING_ALLOWED: NO
                   CODE_SIGNING_REQUIRED: NO
@@ -1061,10 +1251,10 @@ jobs:
 
               enum Step { case pick, checking, found(RomCheck), failed(ImportError) }
               @State private var step: Step = .pick
-              @State private var picking = false
+              enum AddSheet: String, Identifiable { case picker, help; var id: String { rawValue } }
+              @State private var sheet: AddSheet?
               @State private var name = ""
               @State private var color = 0
-              @State private var showHelp = false
               @State private var existing: Toy?
 
               var body: some View {
@@ -1084,10 +1274,12 @@ jobs:
                           .frame(maxWidth: .infinity)
                       }
                   }
-                  .fileImporter(isPresented: $picking, allowedContentTypes: [.item], allowsMultipleSelection: false) { r in
-                      if case .success(let urls) = r, let u = urls.first { check(u) }
+                  .sheet(item: $sheet) { which in
+                      switch which {
+                      case .picker: DocumentPicker { check($0) }.ignoresSafeArea()
+                      case .help: DumpHelpView()
+                      }
                   }
-                  .sheet(isPresented: $showHelp) { DumpHelpView() }
                   .onAppear(perform: takePending)
                   .onChange(of: model.pendingImport) { _ in takePending() }
               }
@@ -1105,11 +1297,11 @@ jobs:
                               .opacity(0.85)
                       }
                       .foregroundStyle(theme.ink)
-                      BigButton(title: "Choose my ROM file", icon: "folder.fill", theme: theme) { picking = true }
+                      BigButton(title: "Choose my ROM file", icon: "folder.fill", theme: theme) { sheet = .picker }
                       Text("A .bin file, or a .zip with one inside. You can also share it to TamaiOS from Files or AirDrop.")
                           .font(.system(.footnote, design: .rounded)).multilineTextAlignment(.center)
                           .foregroundStyle(theme.ink.opacity(0.75))
-                      Button { showHelp = true } label: {
+                      Button { sheet = .help } label: {
                           Label("How do I get my ROM?", systemImage: "questionmark.circle.fill")
                               .font(.system(.callout, design: .rounded).weight(.semibold))
                       }
@@ -1152,8 +1344,8 @@ jobs:
                               Text(e.errorDescription ?? "").font(.system(.body, design: .rounded))
                           }
                       }
-                      BigButton(title: "Try another file", icon: "folder.fill", theme: theme) { picking = true }
-                      Button { showHelp = true } label: { Label("How do I get my ROM?", systemImage: "questionmark.circle.fill") }
+                      BigButton(title: "Try another file", icon: "folder.fill", theme: theme) { sheet = .picker }
+                      Button { sheet = .help } label: { Label("How do I get my ROM?", systemImage: "questionmark.circle.fill") }
                           .foregroundStyle(theme.ink)
                   }
               }
@@ -1358,6 +1550,11 @@ jobs:
               @Published var pendingBackup: URL?
 
               init() {
+                  // firmware built into the app (firmware/*.bin in the repo): set up its
+                  // toy automatically, so there's nothing to import
+                  if let t = ToyStore.installBundled(), Prefs.d.string(forKey: "currentToy") == nil {
+                      Prefs.d.set(t.id, forKey: "currentToy")
+                  }
                   toys = ToyStore.list()
                   AppModel.current = self
                   if let t = currentToy { emu.load(t) }
@@ -1405,7 +1602,7 @@ jobs:
               }
           }
 
-          struct Theme: Identifiable {
+          struct Theme: Identifiable, Equatable {
               let id: Int
               let name: String
               let top: Color
@@ -1938,7 +2135,7 @@ jobs:
                   d.register(defaults: [
                       "soundOn": true, "volume": 0.6, "haptics": true, "liveInBackground": true,
                       "callAlerts": true, "keepAwake": true, "neverSleep": false, "showHints": true,
-                      "p.tick_ms": 4.0, "p.audio_min_ms": 50.0, "p.audio_max_ms": 120.0,
+                      "p.tick_ms": 4.0, "p.sleep_tick_ms": 20.0, "p.audio_min_ms": 30.0, "p.audio_max_ms": 80.0,
                       "p.gap_s": 2.0, "p.autosave_s": 180.0, "p.fps": 60.0, "p.call_gap_s": 600.0,
                   ])
               }
@@ -1972,7 +2169,8 @@ jobs:
           /// Owns the running toy: a background thread runs the emulator core and
           /// publishes the screen; everything that touches the core holds `lock`.
           final class Emulator: ObservableObject {
-              @Published var screen: CGImage?
+              /// The latest screen image, read straight by the LCD layer (no SwiftUI redraw per frame).
+              let frames = FrameSink()
               @Published var dark = false
               @Published var toast: String?
               @Published var stopped: StopInfo?
@@ -1991,7 +2189,12 @@ jobs:
               private var backgroundAt: Date?
               private var lastCall = Date.distantPast
               private var lastCode: Int32 = 0
+              private let wake = DispatchSemaphore(value: 0)
+              private let inputLock = NSLock()
+              private var inputQ: [(Int32, Bool, Double)] = []
               private var toastWork: DispatchWorkItem?
+              private var lastDark = false
+              private var syncAnnounced = false
               private(set) var stats = (ticks: 0, lastTickMs: 0.0, frames: 0)
               var appLog: [String] = []
 
@@ -2029,7 +2232,7 @@ jobs:
 
               func load(_ toy: Toy, completion: ((Bool) -> Void)? = nil) {
                   unload()
-                  DispatchQueue.main.async { self.loading = true; self.toy = toy; self.stopped = nil; self.screen = nil }
+                  DispatchQueue.main.async { self.loading = true; self.toy = toy; self.stopped = nil; self.frames.put(nil) }
                   DispatchQueue.global(qos: .userInitiated).async {
                       let ok = self.boot(toy)
                       DispatchQueue.main.async {
@@ -2125,32 +2328,60 @@ jobs:
 
               private func stopThread() {
                   stopFlag = true
+                  wake.signal()
                   while let t = thread, t.isExecuting { Thread.sleep(forTimeInterval: 0.005) }
                   thread = nil
               }
 
+              /// Settings the loop reads, refreshed once a second instead of every tick.
+              private struct LoopPrefs {
+                  var tick = 0.004, sleepTick = 0.02, gap = 2.0, autosave = 180.0, fps = 60.0
+                  static func read() -> LoopPrefs {
+                      LoopPrefs(tick: max(1, Prefs.num("p.tick_ms")) / 1000,
+                                sleepTick: max(1, Prefs.num("p.sleep_tick_ms")) / 1000,
+                                gap: max(0.5, Prefs.num("p.gap_s")),
+                                autosave: max(30, Prefs.num("p.autosave_s")),
+                                fps: max(5, Prefs.num("p.fps")))
+                  }
+              }
+
               private func loop() {
                   var last = CACurrentMediaTime()
-                  var nextAutosave = last + Prefs.num("p.autosave_s")
+                  var lp = LoopPrefs.read()
+                  var nextPrefs = last + 1
+                  var nextAutosave = last + lp.autosave
+                  var nextWall = last
                   let audioBuf = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
                   defer { audioBuf.deallocate() }
                   var pixels = [UInt32](repeating: 0, count: 128 * 128)
                   var needFrame = true
                   var lastPublish = 0.0
+                  var asleep = false
                   while !stopFlag {
-                      let tickMs = max(1, Prefs.num("p.tick_ms"))
                       if paused {
-                          Thread.sleep(forTimeInterval: 0.05)
+                          _ = wake.wait(timeout: .now() + 0.1)
                           last = CACurrentMediaTime()
                           continue
                       }
                       let now = CACurrentMediaTime()
+                      if now >= nextPrefs { lp = LoopPrefs.read(); nextPrefs = now + 1 }
                       var dt = now - last
                       last = now
+                      inputLock.lock()
+                      let inputs = inputQ
+                      inputQ.removeAll(keepingCapacity: true)
+                      inputLock.unlock()
+                      let wallNow: Double? = now >= nextWall ? rtcNow() : nil
+                      if wallNow != nil { nextWall = now + 1 }
+
                       var code: Int32 = 0, flags: UInt32 = 0, n = 0, isDark = false, published = false
                       lock.lock()
                       guard let h = handle else { lock.unlock(); break }
-                      if dt > max(0.5, Prefs.num("p.gap_s")) {
+                      for (key, down, wall) in inputs {
+                          if down { tg_press(h, key, wall) } else { tg_release(h, key) }
+                      }
+                      if let w = wallNow { tg_set_wall_clock(h, w) }
+                      if dt > lp.gap {
                           // iOS paused the app: move the toy's clock on like the real one
                           tg_advance_clock(h, dt)
                           note("gap of \(String(format: "%.1f", dt)) s, clock advanced")
@@ -2162,9 +2393,9 @@ jobs:
                       stats.ticks += 1
                       flags = tg_take_flags(h)
                       n = tg_take_audio(h, audioBuf, 44100)
+                      asleep = tg_is_asleep(h) != 0
                       if flags & 1 != 0 { needFrame = true }
-                      let minGap = 1.0 / max(5, Prefs.num("p.fps"))
-                      if needFrame && visible && now - lastPublish >= minGap {
+                      if needFrame && visible && now - lastPublish >= 1.0 / lp.fps {
                           isDark = pixels.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) } != 0
                           needFrame = false
                           published = true
@@ -2175,7 +2406,7 @@ jobs:
                           tg_flash_save(h, ToyStore.flashURL(toy).path)
                       }
                       if now >= nextAutosave {
-                          nextAutosave = now + max(30, Prefs.num("p.autosave_s"))
+                          nextAutosave = now + lp.autosave
                           saveLocked(h, snapshot: true)
                       }
                       lock.unlock()
@@ -2183,9 +2414,15 @@ jobs:
                       audio.push(audioBuf, n)
                       if published { publish(pixels, dark: isDark) }
                       if flags & 2 != 0 { careCall() }
+                      if flags & 16 != 0 {
+                          note("clock synced to iPhone time")
+                          if !syncAnnounced { syncAnnounced = true; say("Your toy's clock now matches your iPhone. 🕒") }
+                      }
                       if code != 0 && code != lastCode { report(code) }
                       lastCode = code
-                      Thread.sleep(forTimeInterval: tickMs / 1000)
+                      // a button press wakes the loop at once; otherwise run at the tick
+                      // rate (slower while the toy sleeps, to save battery)
+                      _ = wake.wait(timeout: .now() + (asleep && !needFrame ? lp.sleepTick : lp.tick))
                   }
               }
 
@@ -2200,9 +2437,10 @@ jobs:
                                           provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
                   else { return }
                   stats.frames += 1
-                  DispatchQueue.main.async {
-                      self.screen = img
-                      if self.dark != dark { self.dark = dark }
+                  frames.put(img)
+                  if dark != lastDark {
+                      lastDark = dark
+                      DispatchQueue.main.async { self.dark = dark }
                   }
               }
 
@@ -2235,13 +2473,16 @@ jobs:
 
               // MARK: input
 
-              func press(_ k: TGKey) {
-                  let wall = CACurrentMediaTime()
-                  withCore { tg_press($0, k.rawValue, wall) }
-              }
+              /// Button presses never wait for the emulator: they're queued and the
+              /// emulator thread is woken to handle them straight away.
+              func press(_ k: TGKey) { queue(k, down: true) }
+              func release(_ k: TGKey) { queue(k, down: false) }
 
-              func release(_ k: TGKey) {
-                  withCore { tg_release($0, k.rawValue) }
+              private func queue(_ k: TGKey, down: Bool) {
+                  inputLock.lock()
+                  inputQ.append((k.rawValue, down, CACurrentMediaTime()))
+                  inputLock.unlock()
+                  wake.signal()
               }
 
               // MARK: saving
@@ -2410,6 +2651,134 @@ jobs:
               }
           }
           TAMA_EOF
+          cat > ios/TamaiOS/LCD.swift <<'TAMA_EOF'
+          import SwiftUI
+          import UIKit
+          import QuartzCore
+
+          /// Hands the newest screen image from the emulator thread to the LCD layer.
+          final class FrameSink {
+              private let lock = NSLock()
+              private var image: CGImage?
+              private var version = 0
+
+              func put(_ img: CGImage?) {
+                  lock.lock(); image = img; version &+= 1; lock.unlock()
+              }
+
+              /// The image if it changed since `seen`.
+              func take(after seen: Int) -> (CGImage?, Int)? {
+                  lock.lock(); defer { lock.unlock() }
+                  return version == seen ? nil : (image, version)
+              }
+          }
+
+          /// The toy's LCD: a plain layer updated on the display refresh, so the
+          /// screen animates at full speed without SwiftUI redrawing anything.
+          final class LCDLayerView: UIView {
+              var sink: FrameSink?
+              private var link: CADisplayLink?
+              private var seen = -1
+
+              override init(frame: CGRect) {
+                  super.init(frame: frame)
+                  backgroundColor = .black
+                  isOpaque = true
+                  isUserInteractionEnabled = false
+                  layer.magnificationFilter = .nearest
+                  layer.minificationFilter = .nearest
+                  layer.contentsGravity = .resize
+              }
+
+              required init?(coder: NSCoder) { fatalError() }
+
+              override func didMoveToWindow() {
+                  super.didMoveToWindow()
+                  if window != nil, link == nil {
+                      let l = CADisplayLink(target: WeakTarget(self), selector: #selector(WeakTarget.step))
+                      l.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+                      l.add(to: .main, forMode: .common)
+                      link = l
+                  } else if window == nil {
+                      link?.invalidate()
+                      link = nil
+                  }
+              }
+
+              fileprivate func step() {
+                  guard let sink, let r = sink.take(after: seen) else { return }
+                  seen = r.1
+                  CATransaction.begin()
+                  CATransaction.setDisableActions(true)
+                  layer.contents = r.0
+                  CATransaction.commit()
+              }
+
+              private final class WeakTarget: NSObject {
+                  weak var view: LCDLayerView?
+                  init(_ v: LCDLayerView) { view = v }
+                  @objc func step() { view?.step() }
+              }
+          }
+
+          struct LCDView: UIViewRepresentable {
+              let sink: FrameSink
+              func makeUIView(context: Context) -> LCDLayerView {
+                  let v = LCDLayerView()
+                  v.sink = sink
+                  return v
+              }
+              func updateUIView(_ v: LCDLayerView, context: Context) { v.sink = sink }
+          }
+
+          /// Raw touches for the toy's buttons: fires on the instant a finger lands,
+          /// with no gesture-recogniser delay, and several buttons can be held at once.
+          struct TouchPad: UIViewRepresentable {
+              let down: () -> Void
+              let up: () -> Void
+
+              func makeUIView(context: Context) -> PadView {
+                  let v = PadView()
+                  v.down = down; v.up = up
+                  return v
+              }
+              func updateUIView(_ v: PadView, context: Context) { v.down = down; v.up = up }
+
+              final class PadView: UIView {
+                  var down: (() -> Void)?
+                  var up: (() -> Void)?
+                  private var touching = 0
+                  override init(frame: CGRect) {
+                      super.init(frame: frame)
+                      backgroundColor = .clear
+                      isMultipleTouchEnabled = true
+                  }
+                  required init?(coder: NSCoder) { fatalError() }
+                  override func touchesBegan(_ t: Set<UITouch>, with e: UIEvent?) {
+                      if touching == 0 { down?() }
+                      touching += t.count
+                  }
+                  override func touchesEnded(_ t: Set<UITouch>, with e: UIEvent?) { lift(t.count) }
+                  override func touchesCancelled(_ t: Set<UITouch>, with e: UIEvent?) { lift(t.count) }
+                  private func lift(_ n: Int) {
+                      touching = max(0, touching - n)
+                      if touching == 0 { up?() }
+                  }
+              }
+          }
+
+          enum Haptics {
+              private static let gen: UIImpactFeedbackGenerator = {
+                  let g = UIImpactFeedbackGenerator(style: .medium)
+                  g.prepare()
+                  return g
+              }()
+              static func tap() {
+                  gen.impactOccurred()
+                  gen.prepare()
+              }
+          }
+          TAMA_EOF
           cat > ios/TamaiOS/SettingsView.swift <<'TAMA_EOF'
           import SwiftUI
           import UniformTypeIdentifiers
@@ -2430,8 +2799,11 @@ jobs:
 
               @State private var name = ""
               @State private var confirmRestart = false
-              @State private var shareURL: URL?
-              @State private var pickBackup = false
+              enum SettingsSheet: Identifiable {
+                  case share(URL), picker
+                  var id: String { if case .share(let u) = self { return u.path }; return "picker" }
+              }
+              @State private var sheet: SettingsSheet?
               @State private var restoreFailed = false
 
               var body: some View {
@@ -2473,7 +2845,7 @@ jobs:
 
                           Section {
                               Button { makeBackup() } label: { Label("Back up this toy", systemImage: "square.and.arrow.up") }
-                              Button { pickBackup = true } label: { Label("Restore a backup", systemImage: "square.and.arrow.down") }
+                              Button { sheet = .picker } label: { Label("Restore a backup", systemImage: "square.and.arrow.down") }
                           } header: { Text("Saves") } footer: {
                               Text("TamaiOS saves automatically. Backups are .tamaios files you can keep in Files or iCloud Drive.")
                           }
@@ -2509,12 +2881,16 @@ jobs:
                       .confirmationDialog("Restart the toy?", isPresented: $confirmRestart, titleVisibility: .visible) {
                           Button("Restart", role: .destructive) { emu.restart(); dismiss() }
                       } message: { Text("Like taking the batteries out and putting them back. Your pet is kept.") }
-                      .sheet(item: Binding(get: { shareURL.map(ShareItem.init) }, set: { shareURL = $0?.url })) { item in
-                          ActivityView(items: [item.url])
-                      }
-                      .fileImporter(isPresented: $pickBackup, allowedContentTypes: [.item]) { r in
-                          if case .success(let u) = r, let d = try? ToyStore.readPicked(u) {
-                              if emu.restoreBackup(d) { dismiss() } else { restoreFailed = true }
+                      .sheet(item: $sheet) { which in
+                          switch which {
+                          case .share(let u): ActivityView(items: [u])
+                          case .picker:
+                              DocumentPicker { u in
+                                  if let d = try? ToyStore.readPicked(u) {
+                                      if emu.restoreBackup(d) { dismiss() } else { restoreFailed = true }
+                                  } else { restoreFailed = true }
+                              }
+                              .ignoresSafeArea()
                           }
                       }
                       .alert("That backup doesn't fit this toy", isPresented: $restoreFailed) {
@@ -2532,7 +2908,7 @@ jobs:
               private func makeBackup() {
                   DispatchQueue.global(qos: .userInitiated).async {
                       let u = emu.backupFile()
-                      DispatchQueue.main.async { shareURL = u }
+                      DispatchQueue.main.async { if let u { sheet = .share(u) } }
                   }
               }
           }
@@ -2658,6 +3034,8 @@ jobs:
           cat > ios/TamaiOS/Store.swift <<'TAMA_EOF'
           import Foundation
           import UIKit
+          import SwiftUI
+          import UniformTypeIdentifiers
 
           /// A toy the user has hatched: one ROM plus its saves, in Documents/Toys/<id>/.
           struct Toy: Codable, Identifiable, Equatable {
@@ -2819,6 +3197,20 @@ jobs:
               }
           }
 
+          extension ToyStore {
+              /// The firmware built into this copy of the app, if any.
+              static var bundledFirmware: URL? { Bundle.main.url(forResource: "Firmware", withExtension: "bin") }
+
+              /// Make (or find) the toy for the built-in firmware.
+              static func installBundled() -> Toy? {
+                  guard let url = bundledFirmware,
+                        let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+                        let c = try? check(data) else { return nil }
+                  if let t = list().first(where: { $0.id == c.stem }) { return t }
+                  return try? create(c, name: c.shortName, color: 0)
+              }
+          }
+
           /// Seconds as "3 h 12 min".
           func describeDuration(_ s: Double) -> String {
               let f = DateComponentsFormatter()
@@ -2834,29 +3226,187 @@ jobs:
               return tg_rtc_seconds(Int64(c.year ?? 2026), UInt32(c.month ?? 1), UInt32(c.day ?? 1),
                                     UInt32(c.hour ?? 0), UInt32(c.minute ?? 0), UInt32(c.second ?? 0))
           }
+
+          /// iOS's own Files picker. It copies the chosen file into the app first, so it
+          /// works for iCloud Drive, Downloads and other apps' folders alike.
+          struct DocumentPicker: UIViewControllerRepresentable {
+              let onPick: (URL) -> Void
+
+              func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+              func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+                  let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+                  vc.allowsMultipleSelection = false
+                  vc.shouldShowFileExtensions = true
+                  vc.delegate = context.coordinator
+                  return vc
+              }
+
+              func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+
+              final class Coordinator: NSObject, UIDocumentPickerDelegate {
+                  let onPick: (URL) -> Void
+                  init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+                  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+                      guard let u = urls.first else { return }
+                      // let the picker finish closing before the screen changes
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { self.onPick(u) }
+                  }
+              }
+          }
           TAMA_EOF
           cat > ios/TamaiOS/ToyView.swift <<'TAMA_EOF'
           import SwiftUI
 
+          /// Egg outline, rounder like the Tamagotchi ON's shell.
           struct EggShape: Shape {
               func path(in r: CGRect) -> Path {
                   let w = r.width, h = r.height
                   var p = Path()
                   p.move(to: CGPoint(x: r.midX, y: r.minY))
-                  p.addCurve(to: CGPoint(x: r.maxX, y: r.minY + h * 0.60),
-                             control1: CGPoint(x: r.minX + w * 0.84, y: r.minY),
-                             control2: CGPoint(x: r.maxX, y: r.minY + h * 0.30))
+                  p.addCurve(to: CGPoint(x: r.maxX, y: r.minY + h * 0.58),
+                             control1: CGPoint(x: r.minX + w * 0.90, y: r.minY),
+                             control2: CGPoint(x: r.maxX, y: r.minY + h * 0.26))
                   p.addCurve(to: CGPoint(x: r.midX, y: r.maxY),
-                             control1: CGPoint(x: r.maxX, y: r.minY + h * 0.86),
-                             control2: CGPoint(x: r.minX + w * 0.78, y: r.maxY))
-                  p.addCurve(to: CGPoint(x: r.minX, y: r.minY + h * 0.60),
-                             control1: CGPoint(x: r.minX + w * 0.22, y: r.maxY),
-                             control2: CGPoint(x: r.minX, y: r.minY + h * 0.86))
+                             control1: CGPoint(x: r.maxX, y: r.minY + h * 0.88),
+                             control2: CGPoint(x: r.minX + w * 0.80, y: r.maxY))
+                  p.addCurve(to: CGPoint(x: r.minX, y: r.minY + h * 0.58),
+                             control1: CGPoint(x: r.minX + w * 0.20, y: r.maxY),
+                             control2: CGPoint(x: r.minX, y: r.minY + h * 0.88))
                   p.addCurve(to: CGPoint(x: r.midX, y: r.minY),
-                             control1: CGPoint(x: r.minX, y: r.minY + h * 0.30),
-                             control2: CGPoint(x: r.minX + w * 0.16, y: r.minY))
+                             control1: CGPoint(x: r.minX, y: r.minY + h * 0.26),
+                             control2: CGPoint(x: r.minX + w * 0.10, y: r.minY))
                   p.closeSubpath()
                   return p
+              }
+          }
+
+          /// Four-pointed cartoon sparkle.
+          struct Sparkle: Shape {
+              func path(in r: CGRect) -> Path {
+                  let c = CGPoint(x: r.midX, y: r.midY), a = r.width / 2, b = r.height / 2, k: CGFloat = 0.18
+                  var p = Path()
+                  p.move(to: CGPoint(x: c.x, y: c.y - b))
+                  p.addQuadCurve(to: CGPoint(x: c.x + a, y: c.y), control: CGPoint(x: c.x + a * k, y: c.y - b * k))
+                  p.addQuadCurve(to: CGPoint(x: c.x, y: c.y + b), control: CGPoint(x: c.x + a * k, y: c.y + b * k))
+                  p.addQuadCurve(to: CGPoint(x: c.x - a, y: c.y), control: CGPoint(x: c.x - a * k, y: c.y + b * k))
+                  p.addQuadCurve(to: CGPoint(x: c.x, y: c.y - b), control: CGPoint(x: c.x - a * k, y: c.y - b * k))
+                  p.closeSubpath()
+                  return p
+              }
+          }
+
+          /// Cartoon ink colour for outlines.
+          let inkLine = Color(red: 0.17, green: 0.11, blue: 0.24)
+
+          /// Layout of the toy, shared by the static shell and the live parts on top.
+          struct ShellMetrics {
+              let w: CGFloat
+              var scale: CGFloat = 3
+              var eggH: CGFloat { w * 1.14 }
+              var loopH: CGFloat { w * 0.16 }
+              var totalH: CGFloat { eggH + loopH }
+              var line: CGFloat { max(2.5, w * 0.018) }
+              /// LCD size, snapped so each of its 128 pixels covers a whole number of
+              /// device pixels (crisp, even pixels).
+              var screen: CGFloat {
+                  let ideal = w * 0.55 * scale
+                  var per = max(1, (ideal / 128).rounded())
+                  if per > 1 && per * 128 / scale > w * 0.55 * 1.06 { per -= 1 }   // must fit its frame
+                  return per * 128 / scale
+              }
+              var bezel: CGFloat { w * 0.55 * 1.15 }
+              var button: CGFloat { w * 0.135 }
+              var buttonGap: CGFloat { w * 0.085 }
+              /// Centre of the screen, from the top of the whole toy.
+              var screenY: CGFloat { loopH + eggH * 0.415 }
+              var buttonsY: CGFloat { loopH + eggH * 0.785 }
+          }
+
+          /// Everything that never changes while you play: drawn once and cached.
+          struct ShellArt: View, Equatable {
+              let theme: Theme
+              let m: ShellMetrics
+
+              static func == (a: ShellArt, b: ShellArt) -> Bool { a.theme == b.theme && a.m.w == b.m.w && a.m.scale == b.m.scale }
+
+              var body: some View {
+                  let w = m.w
+                  let h = m.eggH
+                  let lw = m.line
+                  ZStack(alignment: .top) {
+                      // ball-chain loop on top
+                      ZStack {
+                          Circle().stroke(inkLine, lineWidth: lw * 2.6)
+                          Circle().stroke(Color(white: 0.92), lineWidth: lw * 1.2)
+                      }
+                      .frame(width: w * 0.15, height: w * 0.15)
+                      .offset(y: 0)
+                      Capsule()
+                          .fill(theme.bottom)
+                          .overlay(Capsule().stroke(inkLine, lineWidth: lw))
+                          .frame(width: w * 0.16, height: w * 0.09)
+                          .offset(y: m.loopH - w * 0.05)
+
+                      // the egg
+                      ZStack {
+                          // ground shadow
+                          Ellipse().fill(Color.black.opacity(0.18))
+                              .frame(width: w * 0.8, height: w * 0.12)
+                              .blur(radius: w * 0.025)
+                              .offset(y: h * 0.52)
+                          // cel shading: darker crescent bottom-right, body on top
+                          EggShape().fill(theme.bottom.opacity(0.9)).overlay(EggShape().fill(Color.black.opacity(0.14)))
+                          EggShape()
+                              .fill(LinearGradient(colors: [theme.top, theme.bottom], startPoint: .top, endPoint: .bottom))
+                              .frame(width: w * 0.95, height: h * 0.95)
+                              .offset(x: -w * 0.022, y: -h * 0.022)
+                          EggShape().stroke(inkLine, lineWidth: lw)
+                          // rim of the front plate
+                          EggShape()
+                              .stroke(Color.white.opacity(0.55), style: StrokeStyle(lineWidth: lw * 0.8, lineCap: .round, dash: [lw * 0.1, lw * 1.6], dashPhase: 0))
+                              .frame(width: w * 0.88, height: h * 0.88)
+                          // gloss
+                          Ellipse().fill(Color.white.opacity(0.75))
+                              .frame(width: w * 0.22, height: h * 0.075)
+                              .rotationEffect(.degrees(-28))
+                              .offset(x: -w * 0.27, y: -h * 0.36)
+                          Circle().fill(Color.white.opacity(0.85))
+                              .frame(width: w * 0.045)
+                              .offset(x: -w * 0.13, y: -h * 0.41)
+                          // decorations
+                          Sparkle().fill(Color.white).overlay(Sparkle().stroke(inkLine, lineWidth: lw * 0.45))
+                              .frame(width: w * 0.08, height: w * 0.1)
+                              .offset(x: w * 0.36, y: -h * 0.24)
+                          Sparkle().fill(theme.button).overlay(Sparkle().stroke(inkLine, lineWidth: lw * 0.4))
+                              .frame(width: w * 0.05, height: w * 0.065)
+                              .offset(x: w * 0.30, y: -h * 0.33)
+                          Image(systemName: "heart.fill")
+                              .font(.system(size: w * 0.055))
+                              .foregroundStyle(theme.button)
+                              .shadow(color: inkLine, radius: 0, x: lw * 0.35, y: lw * 0.35)
+                              .offset(x: -w * 0.38, y: h * 0.12)
+                          // speaker holes
+                          HStack(spacing: w * 0.022) {
+                              ForEach(0..<3, id: \.self) { _ in Circle().fill(inkLine.opacity(0.55)).frame(width: w * 0.022) }
+                          }
+                          .offset(y: h * 0.445)
+                          // screen bezel
+                          RoundedRectangle(cornerRadius: m.bezel * 0.26, style: .continuous)
+                              .fill(LinearGradient(colors: [Color.white.opacity(0.95), theme.top], startPoint: .top, endPoint: .bottom))
+                              .overlay(RoundedRectangle(cornerRadius: m.bezel * 0.26, style: .continuous).stroke(inkLine, lineWidth: lw))
+                              .frame(width: m.bezel, height: m.bezel)
+                              .offset(y: m.screenY - m.loopH - h / 2)
+                          RoundedRectangle(cornerRadius: m.w * 0.066, style: .continuous)
+                              .fill(Color(red: 0.12, green: 0.10, blue: 0.18))
+                              .overlay(RoundedRectangle(cornerRadius: m.w * 0.066, style: .continuous).stroke(inkLine, lineWidth: lw * 0.8))
+                              .frame(width: m.w * 0.55 * 1.08, height: m.w * 0.55 * 1.08)
+                              .offset(y: m.screenY - m.loopH - h / 2)
+                      }
+                      .frame(width: w, height: h)
+                      .offset(y: m.loopH)
+                  }
+                  .frame(width: w, height: m.totalH, alignment: .top)
               }
           }
 
@@ -2867,27 +3417,27 @@ jobs:
               @State private var showSettings = false
               @State private var wiggle = false
               @State private var restoreError = false
+              @Environment(\.displayScale) private var displayScale
 
               var body: some View {
                   let theme = Theme.of(emu.toy?.color ?? 0)
                   GeometryReader { geo in
-                      let shellW = min(geo.size.width * 0.9, geo.size.height * 0.62, 460)
+                      let room = geo.size.height - 64 - (showHints ? 44 : 0)
+                      let m = ShellMetrics(w: min(geo.size.width - 8, room / 1.30, 640), scale: displayScale)
                       ZStack {
-                          LinearGradient(colors: [theme.top.opacity(0.55), theme.bottom.opacity(0.75)],
+                          LinearGradient(colors: [theme.top.opacity(0.45), theme.bottom.opacity(0.7)],
                                          startPoint: .top, endPoint: .bottom)
                               .ignoresSafeArea()
                           VStack(spacing: 0) {
                               topBar(theme)
-                              Spacer(minLength: 8)
-                              shell(theme, width: shellW)
-                                  .rotationEffect(.degrees(wiggle ? 3 : 0))
-                              Spacer(minLength: 8)
-                              if showHints {
-                                  hint(theme).padding(.bottom, 8)
-                              }
+                              Spacer(minLength: 0)
+                              toy(theme, m)
+                                  .rotationEffect(.degrees(wiggle ? 2.5 : 0), anchor: .top)
+                              Spacer(minLength: 0)
+                              if showHints { hint(theme).padding(.bottom, 6) }
                           }
                           .frame(maxWidth: .infinity)
-                          .padding(.horizontal, 16)
+                          .padding(.horizontal, 6)
 
                           if let t = emu.toast {
                               VStack {
@@ -2935,89 +3485,68 @@ jobs:
                   HStack {
                       VStack(alignment: .leading, spacing: 0) {
                           Text(emu.toy?.name ?? "TamaiOS")
-                              .font(.system(.title2, design: .rounded).weight(.heavy))
+                              .font(.system(.title3, design: .rounded).weight(.heavy))
                           if let r = emu.toy?.romName {
-                              Text(r).font(.system(.caption, design: .rounded)).opacity(0.7)
+                              Text(r).font(.system(.caption2, design: .rounded)).opacity(0.7)
                           }
                       }
                       Spacer()
                       Button { showSettings = true } label: {
                           Image(systemName: "gearshape.fill")
-                              .font(.system(size: 20, weight: .bold))
-                              .padding(11)
+                              .font(.system(size: 18, weight: .bold))
+                              .padding(10)
                               .background(Circle().fill(.ultraThinMaterial))
                       }
                       .accessibilityLabel("Settings")
                   }
                   .foregroundStyle(theme.ink)
-                  .padding(.top, 8)
+                  .padding(.horizontal, 10)
+                  .padding(.top, 4)
+                  .frame(height: 56)
               }
 
-              private func shell(_ theme: Theme, width w: CGFloat) -> some View {
-                  let h = w * 1.18
-                  let screen = w * 0.56
+              /// The whole toy: cached art, the live LCD, and the buttons.
+              private func toy(_ theme: Theme, _ m: ShellMetrics) -> some View {
+                  ZStack(alignment: .top) {
+                      ShellArt(theme: theme, m: m)
+                          .equatable()
+                          .drawingGroup()
+                      screenView(m)
+                          .offset(y: m.screenY - m.screen / 2)
+                      buttons(theme, m)
+                          .offset(y: m.buttonsY - m.button / 2)
+                  }
+                  .frame(width: m.w, height: m.totalH, alignment: .top)
+              }
+
+              private func screenView(_ m: ShellMetrics) -> some View {
+                  let size = m.screen
                   return ZStack {
-                      EggShape()
-                          .fill(LinearGradient(colors: [theme.top, theme.bottom], startPoint: .topLeading, endPoint: .bottomTrailing))
-                          .shadow(color: .black.opacity(0.25), radius: 18, y: 12)
-                      EggShape()
-                          .stroke(LinearGradient(colors: [.white.opacity(0.9), .white.opacity(0.1)], startPoint: .top, endPoint: .bottom), lineWidth: 4)
-                      // gloss
-                      Ellipse()
-                          .fill(LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
-                          .frame(width: w * 0.42, height: h * 0.16)
-                          .offset(x: -w * 0.16, y: -h * 0.36)
-                          .blur(radius: 2)
-                      VStack(spacing: h * 0.045) {
-                          screenView(size: screen, theme: theme)
-                          buttons(theme, width: w)
-                      }
-                      .offset(y: h * 0.03)
-                  }
-                  .frame(width: w, height: h)
-              }
-
-              private func screenView(size: CGFloat, theme: Theme) -> some View {
-                  ZStack {
-                      RoundedRectangle(cornerRadius: size * 0.12, style: .continuous)
-                          .fill(Color(white: 0.08))
-                          .frame(width: size * 1.14, height: size * 1.14)
-                          .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
-                      Group {
-                          if emu.loading {
-                              VStack(spacing: 10) {
-                                  ProgressView().tint(.white)
-                                  Text("Waking up…").font(.system(.caption, design: .rounded)).foregroundStyle(.white.opacity(0.8))
-                              }
-                          } else if emu.dark || emu.screen == nil {
-                              ZStack {
-                                  Color.black
-                                  if emu.toy != nil && !emu.loading {
-                                      Text("z z z").font(.system(size: size * 0.09, weight: .bold, design: .rounded))
-                                          .foregroundStyle(.white.opacity(0.25))
-                                  }
-                              }
-                          } else if let img = emu.screen {
-                              Image(decorative: img, scale: 1)
-                                  .interpolation(.none)
-                                  .resizable()
+                      LCDView(sink: emu.frames)
+                      if emu.loading {
+                          Color.black
+                          VStack(spacing: 10) {
+                              ProgressView().tint(.white)
+                              Text("Waking up…").font(.system(.caption, design: .rounded)).foregroundStyle(.white.opacity(0.8))
                           }
+                      } else if emu.dark {
+                          Color.black
+                          Text("z z z").font(.system(size: size * 0.09, weight: .bold, design: .rounded))
+                              .foregroundStyle(.white.opacity(0.25))
                       }
-                      .frame(width: size, height: size)
-                      .clipShape(RoundedRectangle(cornerRadius: size * 0.04, style: .continuous))
                   }
+                  .frame(width: size, height: size)
+                  .clipShape(RoundedRectangle(cornerRadius: size * 0.05, style: .continuous))
                   .accessibilityLabel("Toy screen")
               }
 
-              private func buttons(_ theme: Theme, width w: CGFloat) -> some View {
-                  let d = w * 0.15
-                  return HStack(alignment: .top, spacing: w * 0.07) {
-                      ToyButton(label: "A", size: d, theme: theme) { emu.press(.a) } up: { emu.release(.a) }
-                          .offset(y: -d * 0.12)
-                      ToyButton(label: "B", size: d, theme: theme) { emu.press(.b) } up: { emu.release(.b) }
-                          .offset(y: d * 0.18)
-                      ToyButton(label: "C", size: d, theme: theme) { emu.press(.c) } up: { emu.release(.c) }
-                          .offset(y: -d * 0.12)
+              private func buttons(_ theme: Theme, _ m: ShellMetrics) -> some View {
+                  let d = m.button
+                  return HStack(alignment: .top, spacing: m.buttonGap) {
+                      ToyButton(label: "A", size: d, theme: theme, line: m.line) { emu.press(.a) } up: { emu.release(.a) }
+                      ToyButton(label: "B", size: d, theme: theme, line: m.line) { emu.press(.b) } up: { emu.release(.b) }
+                          .offset(y: d * 0.26)
+                      ToyButton(label: "C", size: d, theme: theme, line: m.line) { emu.press(.c) } up: { emu.release(.c) }
                   }
               }
 
@@ -3054,47 +3583,45 @@ jobs:
               }
           }
 
+          /// A cartoon button that reacts on touch-down (no gesture delay).
           struct ToyButton: View {
               let label: String
               let size: CGFloat
               let theme: Theme
+              let line: CGFloat
               let down: () -> Void
               let up: () -> Void
               @State private var pressed = false
               @AppStorage("haptics") private var haptics = true
 
               var body: some View {
-                  VStack(spacing: 4) {
-                      Circle()
-                          .fill(RadialGradient(colors: [theme.button.opacity(0.9), theme.button], center: .topLeading, startRadius: 1, endRadius: size))
-                          .overlay(Circle().stroke(Color.black.opacity(0.15), lineWidth: 1.5))
-                          .overlay(Circle().fill(Color.white.opacity(pressed ? 0 : 0.35)).frame(width: size * 0.35).offset(x: -size * 0.15, y: -size * 0.15).blur(radius: 2))
-                          .frame(width: size, height: size)
-                          .shadow(color: .black.opacity(pressed ? 0.1 : 0.3), radius: pressed ? 1 : 4, y: pressed ? 1 : 4)
-                          .scaleEffect(pressed ? 0.9 : 1)
-                          // bigger invisible touch area
-                          .padding(size * 0.25)
-                          .contentShape(Circle())
-                          .gesture(
-                              DragGesture(minimumDistance: 0)
-                                  .onChanged { _ in
-                                      if !pressed {
-                                          pressed = true
-                                          if haptics { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
-                                          down()
-                                      }
-                                  }
-                                  .onEnded { _ in
-                                      pressed = false
-                                      up()
-                                  }
-                          )
-                          .padding(-size * 0.25)
+                  VStack(spacing: size * 0.08) {
+                      ZStack {
+                          Circle().fill(inkLine.opacity(0.35))
+                              .offset(y: size * 0.07)
+                          Circle()
+                              .fill(RadialGradient(colors: [Color.white.opacity(0.6), theme.button], center: UnitPoint(x: 0.32, y: 0.28), startRadius: 0, endRadius: size * 0.55))
+                              .overlay(Circle().fill(Color.black.opacity(pressed ? 0.12 : 0)))
+                              .overlay(Circle().stroke(inkLine, lineWidth: line))
+                              .offset(y: pressed ? size * 0.06 : 0)
+                      }
+                      .frame(width: size, height: size)
+                      .overlay(
+                          TouchPad(down: {
+                              pressed = true
+                              if haptics { Haptics.tap() }
+                              down()
+                          }, up: {
+                              pressed = false
+                              up()
+                          })
+                          .frame(width: size * 1.5, height: size * 1.6)
+                      )
                       Text(label)
-                          .font(.system(size: size * 0.26, weight: .heavy, design: .rounded))
-                          .foregroundStyle(theme.ink.opacity(0.7))
+                          .font(.system(size: size * 0.24, weight: .heavy, design: .rounded))
+                          .foregroundStyle(inkLine.opacity(0.75))
+                          .allowsHitTesting(false)
                   }
-                  .animation(.easeOut(duration: 0.08), value: pressed)
                   .accessibilityElement()
                   .accessibilityLabel("Button \(label)")
                   .accessibilityAddTraits(.isButton)
@@ -3103,6 +3630,18 @@ jobs:
           }
           TAMA_EOF
           echo "Wrote $(ls -R ffi ios tools | wc -l) entries"
+
+      - name: Build in your firmware (firmware/*.bin, if you added one)
+        run: |
+          f=$(ls firmware/*.bin 2>/dev/null | head -1 || true)
+          if [ -n "$f" ]; then
+            size=$(wc -c < "$f" | tr -d ' ')
+            if [ "$size" -lt 8388608 ]; then echo "::error::$f is $size bytes; a Tamagotchi ON dump is 8 MB (8388608 bytes)"; exit 1; fi
+            cp "$f" ios/TamaiOS/Firmware.bin
+            echo "Built in $f ($size bytes) - the app will open straight to this toy"
+          else
+            echo "No firmware/*.bin in the repo - the app will ask you to pick a ROM"
+          fi
 
       - name: Get the emulator core (tg18-emu by oreo-fox, MIT licence)
         run: |

@@ -118,6 +118,8 @@ jobs:
               wall: Option<(f64, f64)>,
               auto_sync: bool,
               last_drift: f64,
+              /// Put to sleep from the app: "never sleep" waits until a button is pressed.
+              sleep_hold: Option<bool>,
           }
 
           fn log_line(e: &mut Emu, s: String) {
@@ -360,6 +362,7 @@ jobs:
                   wall: None,
                   auto_sync: true,
                   last_drift: 0.0,
+                  sleep_hold: None,
               }
           }
 
@@ -556,6 +559,19 @@ jobs:
               e.flags |= F_SYNCED;
           }
 
+          /// How far the toy's clock is from the phone's, in seconds (0 if unknown).
+          #[no_mangle]
+          pub extern "C" fn tg_clock_drift(e: *mut Emu) -> f64 {
+              with(e, |e| match e.wall {
+                  Some((wall, at)) => {
+                      let m = &e.m;
+                      let want = ((wall + (m.sys.game_time - at)) * 32768.0) as i64;
+                      (want - m.sys.rtc.ticks(m.sys.game_time)) as f64 / 32768.0
+                  }
+                  None => 0.0,
+              })
+          }
+
           /// The phone's local time now, as tg_rtc_seconds gives it. Call about once a second.
           #[no_mangle]
           pub extern "C" fn tg_set_wall_clock(e: *mut Emu, rtc_now: f64) {
@@ -610,6 +626,9 @@ jobs:
                       return;
                   }
                   e.down[i] = true;
+                  if let Some(v) = e.sleep_hold.take() {
+                      e.m.never_sleep = v;
+                  }
                   if !e.m.sys.powered_off && wall - e.rewind_at >= e.params.rewind_gap {
                       e.rewind = Some(Snapshot::capture(&e.m));
                       e.rewind_at = wall;
@@ -681,7 +700,10 @@ jobs:
 
           #[no_mangle]
           pub extern "C" fn tg_set_never_sleep(e: *mut Emu, on: i32) {
-              with(e, |e| e.m.never_sleep = on != 0)
+              with(e, |e| match e.sleep_hold.as_mut() {
+                  Some(h) => *h = on != 0,
+                  None => e.m.never_sleep = on != 0,
+              })
           }
 
           // --- saving, sleeping, the clock -------------------------------------------------
@@ -756,6 +778,11 @@ jobs:
           pub extern "C" fn tg_force_sleep(e: *mut Emu) -> i32 {
               with(e, |e| {
                   let r = force_sleep(e, 10.0);
+                  if r && e.sleep_hold.is_none() {
+                      // stay asleep (the once-a-minute clock wake-ups go straight back to sleep)
+                      e.sleep_hold = Some(e.m.never_sleep);
+                      e.m.never_sleep = false;
+                  }
                   e.was_asleep = e.m.sys.powered_off;
                   reset_timing(e);
                   r as i32
@@ -1071,6 +1098,8 @@ jobs:
                       let low = name.to_ascii_lowercase().replace('\\', "/");
                       if low.contains("assets/characters/") {
                           lib.add_file(&name, data);
+                      } else if low.contains("assets/items/") && low.ends_with(".txt") {
+                          lib.add_item(&name, data);
                       }
                   }
                   lib.finish();
@@ -1183,6 +1212,72 @@ jobs:
                   }
                   _ => 0,
               }
+          }
+
+
+          /// Shop items from the loaded pack as JSON: [{"i":0,"lang":"en","file":..,"id":..,"name":..,"kind":"food"}]
+          #[no_mangle]
+          pub extern "C" fn tg_mm_items(out: *mut *mut u8, out_len: *mut usize) {
+              let g = TOWN.lock().unwrap();
+              let v: Vec<serde_json::Value> = g
+                  .as_ref()
+                  .map(|l| {
+                      l.items
+                          .iter()
+                          .enumerate()
+                          .map(|(i, it)| serde_json::json!({"i": i, "lang": it.lang, "file": it.file, "id": it.id, "name": it.name, "kind": it.kind}))
+                          .collect()
+                  })
+                  .unwrap_or_default();
+              give_string(serde_json::Value::Array(v).to_string(), out, out_len)
+          }
+
+          /// Delivery packet for pack item i, with Gotchi Points. Returns 1 on success.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_item_packet(i: usize, points: u32, out: *mut *mut u8, out_len: *mut usize) -> i32 {
+              let g = TOWN.lock().unwrap();
+              match g.as_ref().and_then(|l| l.items.get(i)) {
+                  Some(it) => {
+                      give(mm::item_packet(&it.data, points), out, out_len);
+                      1
+                  }
+                  None => 0,
+              }
+          }
+
+          /// Delivery packet for an item file the user brought. Returns 1 on success.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_user_item(p: *const u8, n: usize, points: u32, out: *mut *mut u8, out_len: *mut usize) -> i32 {
+              match unsafe { bytes(p, n) }.and_then(|d| mm::wrap_user_item(d, points)) {
+                  Some(v) => {
+                      give(v, out, out_len);
+                      1
+                  }
+                  None => 0,
+              }
+          }
+
+          /// Name of an item file the user brought ("" if it isn't one).
+          #[no_mangle]
+          pub extern "C" fn tg_mm_user_item_name(p: *const u8, n: usize, out: *mut *mut u8, out_len: *mut usize) {
+              let name = unsafe { bytes(p, n) }
+                  .and_then(|d| {
+                      if d.len() > 0x110 && d[0x4c] == 0x17 {
+                          let l = u32::from_le_bytes([d[0x108], d[0x109], d[0x10a], d[0x10b]]) as usize;
+                          d.get(0x10c..0x10c + l).and_then(mm::item_info)
+                      } else {
+                          mm::item_info(d)
+                      }
+                  })
+                  .map(|(id, name)| if name.is_empty() { id } else { name })
+                  .unwrap_or_default();
+              give_string(name, out, out_len)
+          }
+
+          /// Gotchi Points only (no item), like the app's point gifts.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_points_packet(points: u32, out: *mut *mut u8, out_len: *mut usize) {
+              give(mm::packet(0x17, 0x3A, 258, points, None, None), out, out_len)
           }
           TAMA_EOF
           cat > ffi/src/mm.rs <<'TAMA_EOF'
@@ -1676,6 +1771,8 @@ jobs:
               /// File name (lower case, no folder) -> data.
               files: HashMap<String, Vec<u8>>,
               pub ids: Vec<u16>,
+              /// Shop items from the pack (assets/items/<lang>/...).
+              pub items: Vec<ShopItem>,
               parts: HashMap<(u16, char), Part>,
           }
 
@@ -1973,6 +2070,83 @@ jobs:
               let m = Marriage { partner, character_data, colors, dna_pattern, dna_value, sex: c.baby_sex };
               Some(packet(OP_MARRIAGE, CMD_MARRIAGE, MARRIAGE_PACKET_SIZE, 0, None, Some(&m)))
           }
+
+
+          // ---- shop items (MyMeets assets/items) -------------------------------------------
+
+          pub struct ShopItem {
+              pub lang: String,
+              pub file: String,
+              pub id: String,
+              pub name: String,
+              pub kind: &'static str,
+              pub data: Vec<u8>,
+          }
+
+          /// What an item is, from its id ("tg18_oy00079_1" -> food).
+          pub fn item_kind(id: &str) -> &'static str {
+              let l = id.to_ascii_lowercase();
+              let k = l.split('_').nth(1).unwrap_or("");
+              let k: String = k.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+              match k.as_str() {
+                  "oy" | "gh" => "food",
+                  "as" => "item",
+                  "ac" => "accessory",
+                  "bg" => "wallpaper",
+                  "ode" => "stations",
+                  "gm" => "games",
+                  _ => "item",
+              }
+          }
+
+          /// Read the id and toy-text name out of an item file (it starts with "TAMAGO").
+          pub fn item_info(d: &[u8]) -> Option<(String, String)> {
+              if d.len() < 0x80 || &d[..6] != CODE_TAMAGO {
+                  return None;
+              }
+              let id: String = d[0x34..0x48].iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
+              let name = decode_name(&d[0x5e..0x80]).replace('\u{3000}', " ");
+              Some((id, name.trim().to_string()))
+          }
+
+          impl Library {
+              pub fn add_item(&mut self, path: &str, data: Vec<u8>) {
+                  let parts: Vec<&str> = path.split(['/', '\\']).collect();
+                  let n = parts.len();
+                  if n < 2 {
+                      return;
+                  }
+                  let (lang, file) = (parts[n - 2].to_ascii_lowercase(), parts[n - 1].to_string());
+                  if let Some((id, name)) = item_info(&data) {
+                      let kind = item_kind(&id);
+                      self.items.push(ShopItem { lang, file, id, name, kind, data });
+                  }
+              }
+          }
+
+          /// The packet that delivers an item file to the toy (op Item, cmd Item), as
+          /// MyMeets and WebMeets build it, optionally with Gotchi Points.
+          pub fn item_packet(item: &[u8], gotchi_points: u32) -> Vec<u8> {
+              packet(0x17, 0x3A, 256 + 12 + item.len() + 4 + 2, gotchi_points, Some(item), None)
+          }
+
+          /// A file someone has: either an item file (TAMAGO + DL_ name) or an already
+          /// built delivery packet. Returns the packet to send.
+          pub fn wrap_user_item(d: &[u8], gotchi_points: u32) -> Option<Vec<u8>> {
+              if d.len() < 0x110 || &d[..6] != CODE_TAMAGO {
+                  return None;
+              }
+              let size = u32::from_le_bytes([d[0x48], d[0x49], d[0x4a], d[0x4b]]) as usize;
+              if size == d.len() && d[0x4c] == 0x17 {
+                  // already a delivery packet; unwrap so points can be added
+                  let inner_len = u32::from_le_bytes([d[0x108], d[0x109], d[0x10a], d[0x10b]]) as usize;
+                  if 0x10c + inner_len <= d.len() {
+                      return Some(item_packet(&d[0x10c..0x10c + inner_len], gotchi_points));
+                  }
+                  return Some(d.to_vec());
+              }
+              Some(item_packet(d, gotchi_points))
+          }
           TAMA_EOF
           cat > tools/icon.py <<'TAMA_EOF'
           # Draws the TamaiOS app icon: a Tamagotchi ON-style egg (tall egg, big colour
@@ -2256,6 +2430,7 @@ jobs:
           void tg_radio_trace(Emu *e, uint8_t **out, size_t *out_len);
 
           /* Tama Town: marriage */
+          double tg_clock_drift(Emu *e);
           int32_t tg_mm_load_zip(const uint8_t *p, size_t n);
           size_t tg_mm_ids(uint16_t *out, size_t max);
           int32_t tg_mm_compose(uint16_t b, int32_t bp, uint16_t m, uint16_t a, int32_t ap, uint16_t k, int32_t kp, uint32_t *out);
@@ -2267,6 +2442,12 @@ jobs:
                                  uint16_t b, int32_t bp, uint16_t m, uint16_t a, int32_t ap, uint16_t k, int32_t kp,
                                  uint8_t baby_sex, uint8_t lang, uint8_t kind, const char *name, uint64_t seed,
                                  uint8_t **out, size_t *out_len);
+
+          void tg_mm_items(uint8_t **out, size_t *out_len);
+          int32_t tg_mm_item_packet(size_t i, uint32_t points, uint8_t **out, size_t *out_len);
+          int32_t tg_mm_user_item(const uint8_t *p, size_t n, uint32_t points, uint8_t **out, size_t *out_len);
+          void tg_mm_user_item_name(const uint8_t *p, size_t n, uint8_t **out, size_t *out_len);
+          void tg_mm_points_packet(uint32_t points, uint8_t **out, size_t *out_len);
 
           #endif
           TAMA_EOF
@@ -2676,6 +2857,153 @@ jobs:
                       }
                   }
                   .preferredColorScheme(nil)
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/ArcadeView.swift <<'TAMA_EOF'
+          import SwiftUI
+
+          /// The Arcade: a quick game that wins Gotchi Points for TamaDepa.
+          /// "Tama Pop": Tamas pop out of the bushes — tap them before they hide.
+          struct ArcadeView: View {
+              @ObservedObject var town = Town.shared
+              @AppStorage("gotchiWallet") private var wallet = 1000
+              @AppStorage("arcadeBest") private var best = 0
+              @AppStorage("haptics") private var haptics = true
+
+              @State private var playing = false
+              @State private var timeLeft: Double = 0
+              @State private var score = 0
+              @State private var holes: [Suitor?] = Array(repeating: nil, count: 9)
+              @State private var shownAt: [Double] = Array(repeating: 0, count: 9)
+              @State private var won: Int?
+              @State private var clock: Double = 0
+
+              private let length: Double = 30
+              private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+
+              var body: some View {
+                  ScrollView {
+                      VStack(spacing: 16) {
+                          HStack {
+                              stat("Time", playing ? "\(Int(timeLeft.rounded(.up)))" : "–")
+                              stat("Caught", "\(score)")
+                              stat("Wallet", "\(wallet) G")
+                          }
+                          ZStack {
+                              RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                  .fill(LinearGradient(colors: [Color(red: 0.75, green: 0.92, blue: 1), Color(red: 0.62, green: 0.86, blue: 0.56)], startPoint: .top, endPoint: .bottom))
+                              LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                                  ForEach(0..<9, id: \.self) { i in hole(i) }
+                              }
+                              .padding(14)
+                              if !playing {
+                                  VStack(spacing: 12) {
+                                      Text(won.map { "You caught \($0 / 50)! +\($0) G 🎉" } ?? "Tama Pop")
+                                          .font(.system(.title2, design: .rounded).weight(.heavy))
+                                      Text("Tap the Tamas as they pop up. Each one is worth 50 Gotchi Points.")
+                                          .font(.system(.subheadline, design: .rounded)).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                                      Button { start() } label: {
+                                          Label(won == nil ? "Play" : "Play again", systemImage: "play.fill")
+                                              .font(.system(.title3, design: .rounded).weight(.bold))
+                                              .padding(.horizontal, 26).padding(.vertical, 10)
+                                      }
+                                      .buttonStyle(.borderedProminent).tint(.purple)
+                                      if best > 0 { Text("Best: \(best)").font(.caption).foregroundStyle(.secondary) }
+                                  }
+                                  .padding(22)
+                                  .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(.regularMaterial))
+                                  .padding(24)
+                              }
+                          }
+                          .aspectRatio(1, contentMode: .fit)
+                          Text("Spend your Gotchi Points at TamaDepa — they're sent along with your next gift.")
+                              .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                      }
+                      .padding(16)
+                  }
+                  .navigationTitle("Arcade")
+                  .navigationBarTitleDisplayMode(.inline)
+                  .onReceive(timer) { _ in tick() }
+                  .onDisappear { playing = false }
+              }
+
+              private func stat(_ t: String, _ v: String) -> some View {
+                  VStack(spacing: 2) {
+                      Text(t).font(.caption).foregroundStyle(.secondary)
+                      Text(v).font(.system(.headline, design: .rounded)).monospacedDigit()
+                  }
+                  .frame(maxWidth: .infinity)
+                  .padding(.vertical, 8)
+                  .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemBackground)))
+              }
+
+              private func hole(_ i: Int) -> some View {
+                  ZStack(alignment: .bottom) {
+                      Ellipse().fill(Color(red: 0.36, green: 0.62, blue: 0.34)).frame(height: 26)
+                      if let s = holes[i] {
+                          Group {
+                              if let img = town.image(s) {
+                                  CharacterPicture(image: img)
+                              } else {
+                                  Text("🐣").font(.system(size: 44))
+                              }
+                          }
+                          .frame(width: 70, height: 70)
+                          .padding(.bottom, 8)
+                          .transition(.move(edge: .bottom).combined(with: .opacity))
+                      }
+                  }
+                  .frame(maxWidth: .infinity, minHeight: 96)
+                  .contentShape(Rectangle())
+                  .onTapGesture { tap(i) }
+              }
+
+              private func start() {
+                  score = 0
+                  won = nil
+                  timeLeft = length
+                  holes = Array(repeating: nil, count: 9)
+                  playing = true
+              }
+
+              private func randomTama() -> Suitor {
+                  town.randomSuitor(mix: false) ?? Suitor(name: "TAMA", body: 0, face: 0, head: 0, back: 0, bodyColor: 0, headColor: 0, backColor: 0, blurb: "")
+              }
+
+              private func tick() {
+                  clock += 0.1
+                  guard playing else { return }
+                  timeLeft -= 0.1
+                  if timeLeft <= 0 {
+                      playing = false
+                      withAnimation { holes = Array(repeating: nil, count: 9) }
+                      let pts = score * 50
+                      won = pts
+                      wallet = min(99999, wallet + pts)
+                      best = max(best, score)
+                      return
+                  }
+                  // Tamas hide again after a moment; speed up as time runs out
+                  let stay = 0.6 + 0.6 * (timeLeft / length)
+                  for i in 0..<9 where holes[i] != nil && clock - shownAt[i] > stay {
+                      withAnimation(.easeIn(duration: 0.12)) { holes[i] = nil }
+                  }
+                  let busy = holes.compactMap { $0 }.count
+                  if busy < 3 && Double.random(in: 0...1) < 0.35 {
+                      let free = (0..<9).filter { holes[$0] == nil }
+                      if let i = free.randomElement() {
+                          shownAt[i] = clock
+                          withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) { holes[i] = randomTama() }
+                      }
+                  }
+              }
+
+              private func tap(_ i: Int) {
+                  guard playing, holes[i] != nil else { return }
+                  score += 1
+                  if haptics { Haptics.tap() }
+                  withAnimation(.easeOut(duration: 0.1)) { holes[i] = nil }
               }
           }
           TAMA_EOF
@@ -3253,6 +3581,11 @@ jobs:
               private var thread: Thread?
               private var stopFlag = false
               private var paused = false
+              /// The Tama App screen is open: while the toy waits for the app, hold its
+              /// time still so it doesn't give up waiting while you look around.
+              var holdForApp = false
+              /// A Bluetooth exchange is running (the toy must keep running then).
+              var linkBusy = false
               private var visible = true
               private var backgroundAt: Date?
               private var lastCall = Date.distantPast
@@ -3419,6 +3752,8 @@ jobs:
                   var nextPrefs = last + 1
                   var nextAutosave = last + lp.autosave
                   var nextWall = last
+                  var lastInput = last
+                  var nextClockFix = last + 8          // give the toy a moment after loading
                   let audioBuf = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
                   defer { audioBuf.deallocate() }
                   var pixels = [UInt32](repeating: 0, count: 128 * 128)
@@ -3428,8 +3763,8 @@ jobs:
                   var nextRadio = last
                   var radioReady = false
                   while !stopFlag {
-                      if paused {
-                          _ = wake.wait(timeout: .now() + 0.1)
+                      if paused || (holdForApp && radioReady && !linkBusy) {
+                          _ = wake.wait(timeout: .now() + (paused ? 0.1 : 0.03))
                           last = CACurrentMediaTime()
                           continue
                       }
@@ -3451,6 +3786,18 @@ jobs:
                           if down { tg_press(h, key, wall) } else { tg_release(h, key) }
                       }
                       if let w = wallNow { tg_set_wall_clock(h, w) }
+                      if !inputs.isEmpty { lastInput = now }
+                      // Keep the toy on iPhone time even when it never sleeps: if it is more
+                      // than a minute off, re-set it while nobody is pressing buttons.
+                      if let w = wallNow, now >= nextClockFix, now - lastInput > 15, !radioReady, tg_is_asleep(h) == 0,
+                         abs(tg_clock_drift(h)) > 60 {
+                          nextClockFix = now + 120
+                          let off = tg_clock_drift(h)
+                          if tg_sync_clock(h, w) == 1 {
+                              note("clock set to iPhone time automatically (was off by \(Int(off)) s)")
+                              say("Clock matched to your iPhone. 🕒")
+                          }
+                      }
                       if dt > lp.gap {
                           // iOS paused the app: move the toy's clock on like the real one
                           tg_advance_clock(h, dt)
@@ -3632,10 +3979,13 @@ jobs:
 
               // MARK: toy actions
 
-              func syncClock() {
+              /// Set the toy to iPhone time now. Returns whether it worked.
+              @discardableResult
+              func syncClock() -> Bool {
                   let now = rtcNow()
                   let ok = withCore { tg_sync_clock($0, now) } ?? 0
-                  say(ok == 1 ? "Clock set to your iPhone's time." : "The toy can't take a new time right now (maybe it's calling, or still in setup). Try again in a moment.")
+                  say(ok == 1 ? "Clock set to your iPhone's time. 🕒" : "The toy can't take a new time right now (maybe it's calling, or still in setup). TamaiOS will keep trying by itself.")
+                  return ok == 1
               }
 
               func sleepNow() {
@@ -3896,8 +4246,8 @@ jobs:
                                       .onSubmit { rename(toy) }
                                   ColorPickerRow(selection: Binding(get: { toy.color }, set: { c in var t = toy; t.color = c; model.update(t) }))
                                       .padding(.vertical, 4)
-                                  Button { emu.syncClock() } label: { Label("Set clock to iPhone time", systemImage: "clock.arrow.circlepath") }
-                                  Button { emu.sleepNow() } label: { Label("Put to sleep now", systemImage: "moon.zzz.fill") }
+                                  Button { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { emu.syncClock() } } label: { Label("Set clock to iPhone time", systemImage: "clock.arrow.circlepath") }
+                                  Button { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { emu.sleepNow() } } label: { Label("Put to sleep now", systemImage: "moon.zzz.fill") }
                                   Button(role: .destructive) { confirmRestart = true } label: { Label("Restart toy", systemImage: "arrow.clockwise") }
                               } header: { Text(toy.romName) }
                           }
@@ -4347,181 +4697,682 @@ jobs:
           cat > ios/TamaiOS/TamaAppView.swift <<'TAMA_EOF'
           import SwiftUI
 
-          /// TamaiOS's built-in replacement for the Tamagotchi app: the toy connects to
-          /// it through its own Connection › App menu, like the real one.
+          /// TamaiOS's built-in Tama App, laid out like the original Tamagotchi app:
+          /// a town square with Home, Tama ♥ Party, Arcade and TamaDepa. The toy
+          /// connects to it through its own Connection › App menu.
           struct TamaAppView: View {
               @EnvironmentObject var emu: Emulator
               @Environment(\.dismiss) private var dismiss
+              @State private var path: [TownPlace] = []
 
-              @State private var items: [WebMeets.Item] = []
+              var body: some View {
+                  NavigationStack(path: $path) {
+                      TownSquare(path: $path)
+                          .navigationTitle("Tama Town")
+                          .navigationBarTitleDisplayMode(.inline)
+                          .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                          .navigationDestination(for: TownPlace.self) { place in
+                              place.view.environmentObject(emu)
+                          }
+                  }
+                  .tint(.pink)
+                  .onAppear {
+                      emu.holdForApp = true      // the toy waits patiently while you're in here
+                      Town.shared.loadIfPresent()
+                      if let t = emu.toy, Town.shared.state(t).away { path = [.party] }
+                  }
+                  .onDisappear { emu.holdForApp = false }
+              }
+          }
+
+          enum TownPlace: Hashable, CaseIterable {
+              case home, party, arcade, depa, settings
+
+              var title: String {
+                  switch self {
+                  case .home: return "Home"
+                  case .party: return "Tama ♥ Party"
+                  case .arcade: return "Arcade"
+                  case .depa: return "TamaDepa"
+                  case .settings: return "Settings"
+                  }
+              }
+              var icon: String {
+                  switch self {
+                  case .home: return "house.fill"
+                  case .party: return "heart.fill"
+                  case .arcade: return "gamecontroller.fill"
+                  case .depa: return "bag.fill"
+                  case .settings: return "gearshape.fill"
+                  }
+              }
+              var tint: Color {
+                  switch self {
+                  case .home: return .orange
+                  case .party: return .pink
+                  case .arcade: return .purple
+                  case .depa: return .blue
+                  case .settings: return .gray
+                  }
+              }
+              var blurb: String {
+                  switch self {
+                  case .home: return "Visit town, come home, family album"
+                  case .party: return "Dates, marriage & gene mixing"
+                  case .arcade: return "Play games, win Gotchi Points"
+                  case .depa: return "Shop food, items, places & more"
+                  case .settings: return "Character pack & extras"
+                  }
+              }
+
+              @ViewBuilder var view: some View {
+                  switch self {
+                  case .home: PlaceScreen(place: self) { TownView(mode: .home) }
+                  case .party: PlaceScreen(place: self) { TownView(mode: .party) }
+                  case .arcade: ArcadeView()
+                  case .depa: TamaDepaView()
+                  case .settings: TownSettingsView()
+                  }
+              }
+          }
+
+          /// A place's page: coloured header, then its content.
+          struct PlaceScreen<C: View>: View {
+              let place: TownPlace
+              @ViewBuilder let content: C
+              var body: some View {
+                  ScrollView {
+                      VStack(alignment: .leading, spacing: 16) {
+                          content
+                      }
+                      .padding(16)
+                  }
+                  .background(LinearGradient(colors: [place.tint.opacity(0.10), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
+                  .navigationTitle(place.title)
+                  .navigationBarTitleDisplayMode(.inline)
+              }
+          }
+
+          // MARK: - the town square
+
+          struct TownSquare: View {
+              @Binding var path: [TownPlace]
+              @EnvironmentObject var emu: Emulator
+              @ObservedObject var town = Town.shared
+
+              var body: some View {
+                  ScrollView {
+                      VStack(spacing: 14) {
+                          TownScene { path.append($0) }
+                              .aspectRatio(1.25, contentMode: .fit)
+                              .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                              .shadow(color: .black.opacity(0.15), radius: 10, y: 5)
+                          statusBanner
+                          LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                              ForEach([TownPlace.party, .depa, .arcade, .home], id: \.self) { p in
+                                  Button { path.append(p) } label: { PlaceTile(place: p) }.buttonStyle(.plain)
+                              }
+                          }
+                          Button { path.append(.settings) } label: {
+                              Label("Settings", systemImage: "gearshape.fill").font(.system(.subheadline, design: .rounded).weight(.semibold))
+                          }
+                          .foregroundStyle(.secondary)
+                      }
+                      .padding(16)
+                  }
+                  .background(LinearGradient(colors: [Color(red: 1, green: 0.93, blue: 0.97), Color(red: 0.93, green: 0.92, blue: 1)], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
+              }
+
+              private var statusBanner: some View {
+                  let st = emu.toy.map { town.state($0) }
+                  let away = st?.away ?? false
+                  let name = emu.toy?.name ?? "Your Tama"
+                  return HStack(spacing: 12) {
+                      Image(systemName: emu.appWaiting ? "dot.radiowaves.left.and.right" : (away ? "figure.walk" : "house.fill"))
+                          .font(.title2)
+                          .foregroundStyle(emu.appWaiting ? .green : (away ? .purple : .orange))
+                          .frame(width: 34)
+                      VStack(alignment: .leading, spacing: 2) {
+                          Text(emu.appWaiting ? "\(name) is connected" : (away ? "\(name) is in town" : "\(name) is at home"))
+                              .font(.system(.headline, design: .rounded))
+                          Text(emu.appWaiting ? "Pick a place. Your toy will wait for you." :
+                                  (away ? "Go to Tama ♥ Party to find a partner." : "On the toy: Connection › App › Visit (party) or Download (shop)."))
+                              .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
+                      }
+                      Spacer(minLength: 0)
+                  }
+                  .padding(14)
+                  .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(.regularMaterial))
+              }
+          }
+
+          struct PlaceTile: View {
+              let place: TownPlace
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 6) {
+                      Image(systemName: place.icon)
+                          .font(.title2.weight(.bold)).foregroundStyle(.white)
+                          .frame(width: 44, height: 44)
+                          .background(Circle().fill(place.tint.gradient))
+                      Text(place.title).font(.system(.headline, design: .rounded))
+                      Text(place.blurb).font(.system(.caption, design: .rounded)).foregroundStyle(.secondary).lineLimit(2)
+                  }
+                  .padding(14)
+                  .frame(maxWidth: .infinity, minHeight: 130, alignment: .topLeading)
+                  .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(.systemBackground)))
+                  .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(place.tint.opacity(0.35), lineWidth: 1.5))
+              }
+          }
+
+          struct Triangle: Shape {
+              func path(in r: CGRect) -> Path {
+                  var p = Path()
+                  p.move(to: CGPoint(x: r.midX, y: r.minY))
+                  p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+                  p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+                  p.closeSubpath()
+                  return p
+              }
+          }
+
+          /// The town picture: castle in the middle, Tama ♥ Party on the left, TamaDepa
+          /// on the right, the Arcade in front, and Tamas walking around. Every building
+          /// can be tapped.
+          struct TownScene: View {
+              let go: (TownPlace) -> Void
+              @ObservedObject var town = Town.shared
+              @State private var walkers: [Suitor] = []
+              static let sparkX: [CGFloat] = [0.08, 0.22, 0.36, 0.55, 0.68, 0.83, 0.93, 0.47, 0.15]
+              static let sparkY: [CGFloat] = [0.10, 0.06, 0.15, 0.05, 0.12, 0.07, 0.18, 0.22, 0.24]
+
+              var body: some View {
+                  GeometryReader { g in
+                      let w = g.size.width, h = g.size.height
+                      ZStack {
+                          // sky
+                          LinearGradient(colors: [Color(red: 1.0, green: 0.78, blue: 0.90), Color(red: 0.86, green: 0.84, blue: 1.0), Color(red: 0.78, green: 0.92, blue: 1.0)],
+                                         startPoint: .top, endPoint: .bottom)
+                          ForEach(0..<9, id: \.self) { i in
+                              let size: CGFloat = i % 3 == 0 ? 0.035 : 0.022
+                              Image(systemName: "sparkle")
+                                  .font(.system(size: w * size))
+                                  .foregroundStyle(.white.opacity(0.9))
+                                  .position(x: w * TownScene.sparkX[i], y: h * TownScene.sparkY[i])
+                          }
+                          cloud(w * 0.20).position(x: w * 0.20, y: h * 0.16)
+                          cloud(w * 0.16).position(x: w * 0.80, y: h * 0.12)
+                          // hills and the square
+                          Ellipse().fill(Color(red: 0.62, green: 0.86, blue: 0.56)).frame(width: w * 0.9, height: h * 0.4).position(x: w * 0.18, y: h * 0.74)
+                          Ellipse().fill(Color(red: 0.55, green: 0.82, blue: 0.52)).frame(width: w * 0.9, height: h * 0.4).position(x: w * 0.85, y: h * 0.76)
+                          Rectangle().fill(Color(red: 0.99, green: 0.93, blue: 0.80)).frame(height: h * 0.30).position(x: w / 2, y: h * 0.86)
+                          Rectangle().fill(Color(red: 0.96, green: 0.86, blue: 0.70)).frame(height: h * 0.012).position(x: w / 2, y: h * 0.715)
+
+                          Button { go(.home) } label: { castle(w: w, h: h) }
+                              .buttonStyle(.plain)
+                              .position(x: w * 0.5, y: h * 0.47)
+                          Button { go(.party) } label: { partyHall(w: w, h: h) }
+                              .buttonStyle(.plain)
+                              .position(x: w * 0.17, y: h * 0.53)
+                          Button { go(.depa) } label: { depa(w: w, h: h) }
+                              .buttonStyle(.plain)
+                              .position(x: w * 0.84, y: h * 0.52)
+
+                          // Tamas out for a walk
+                          TimelineView(.animation(minimumInterval: 1.0 / 20)) { tl in
+                              let t = tl.date.timeIntervalSinceReferenceDate
+                              ZStack {
+                                  ForEach(Array(walkers.enumerated()), id: \.element.id) { i, s in
+                                      let a: Double = t * (0.25 + Double(i) * 0.07) + Double(i) * 1.7
+                                      let x = CGFloat(0.5 + 0.40 * sin(a))
+                                      let flip: CGFloat = cos(a) >= 0 ? -1 : 1
+                                      let y = CGFloat(0.80 + Double(i % 3) * 0.05 - abs(sin(t * 4 + Double(i))) * 0.012)
+                                      CharacterPicture(image: town.image(s))
+                                          .frame(width: w * 0.15, height: w * 0.15)
+                                          .scaleEffect(x: flip, y: 1)
+                                          .position(x: w * x, y: h * y)
+                                  }
+                              }
+                          }
+                          .allowsHitTesting(false)
+
+                          Button { go(.arcade) } label: { arcadeSign(w: w) }
+                              .buttonStyle(.plain)
+                              .position(x: w * 0.5, y: h * 0.80)
+
+                          // place labels along the bottom, like the original app
+                          HStack(spacing: w * 0.02) {
+                              label("Tama ♥ Party", .pink) { go(.party) }
+                              label("Arcade", .purple) { go(.arcade) }
+                              label("TamaDepa", .blue) { go(.depa) }
+                          }
+                          .position(x: w / 2, y: h * 0.94)
+                          // corner buttons
+                          cornerButton("house.fill", "Home", .orange) { go(.home) }.position(x: w * 0.09, y: h * 0.09)
+                          cornerButton("gearshape.fill", "Settings", .pink) { go(.settings) }.position(x: w * 0.91, y: h * 0.09)
+                      }
+                  }
+                  .onAppear(perform: pickWalkers)
+                  .onChange(of: town.ids.count) { _ in pickWalkers() }
+              }
+
+              private func pickWalkers() {
+                  guard walkers.isEmpty, !town.ids.isEmpty else { return }
+                  walkers = (0..<4).compactMap { _ in town.randomSuitor(mix: false) }
+              }
+
+              private func cloud(_ s: CGFloat) -> some View {
+                  ZStack {
+                      Capsule().fill(.white).frame(width: s, height: s * 0.32)
+                      Circle().fill(.white).frame(width: s * 0.42).offset(x: -s * 0.14, y: -s * 0.12)
+                      Circle().fill(.white).frame(width: s * 0.32).offset(x: s * 0.14, y: -s * 0.10)
+                  }
+                  .opacity(0.95)
+              }
+
+              private func castle(w: CGFloat, h: CGFloat) -> some View {
+                  let blue = Color(red: 0.45, green: 0.62, blue: 0.98), wall = Color(red: 0.90, green: 0.91, blue: 1.0)
+                  let ink = inkLine.opacity(0.6)
+                  return ZStack {
+                      // side towers
+                      ForEach([CGFloat(-1), CGFloat(1)], id: \.self) { sgn in
+                          VStack(spacing: 0) {
+                              Triangle().fill(blue).overlay(Triangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.11, height: w * 0.11)
+                              Rectangle().fill(wall).overlay(Rectangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.08, height: h * 0.20)
+                          }
+                          .offset(x: sgn * w * 0.12, y: h * 0.03)
+                      }
+                      // keep
+                      VStack(spacing: 0) {
+                          Triangle().fill(blue).overlay(Triangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.16, height: w * 0.16)
+                          Rectangle().fill(wall).overlay(Rectangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.13, height: h * 0.13)
+                          Rectangle().fill(wall).overlay(Rectangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.26, height: h * 0.12)
+                              .overlay(
+                                  Image(systemName: "heart.fill").font(.system(size: w * 0.045)).foregroundStyle(.pink)
+                                      .padding(w * 0.012).background(Capsule().fill(Color(red: 1, green: 0.85, blue: 0.5)))
+                                      .offset(y: h * 0.015)
+                              )
+                      }
+                      Image(systemName: "diamond.fill").font(.system(size: w * 0.05)).foregroundStyle(Color(red: 0.4, green: 0.8, blue: 1)).offset(y: -h * 0.17)
+                  }
+                  .frame(width: w * 0.36, height: h * 0.46)
+                  .contentShape(Rectangle())
+              }
+
+              private func partyHall(w: CGFloat, h: CGFloat) -> some View {
+                  ZStack {
+                      RoundedRectangle(cornerRadius: w * 0.04).fill(Color(red: 1, green: 0.72, blue: 0.85))
+                          .overlay(RoundedRectangle(cornerRadius: w * 0.04).stroke(inkLine.opacity(0.6), lineWidth: 1.5))
+                          .frame(width: w * 0.25, height: h * 0.26)
+                          .offset(y: h * 0.04)
+                      Image(systemName: "heart.fill").font(.system(size: w * 0.15)).foregroundStyle(.red.opacity(0.85))
+                          .shadow(color: .white, radius: 0, x: 2, y: 2)
+                          .offset(y: -h * 0.11)
+                      ForEach(0..<3, id: \.self) { i in
+                          Circle().fill([Color.red, .yellow, .blue][i]).frame(width: w * 0.035)
+                              .offset(x: w * (CGFloat(i) * 0.03 - 0.12), y: -h * (0.20 + CGFloat(i % 2) * 0.03))
+                      }
+                      RoundedRectangle(cornerRadius: w * 0.02).fill(Color.white).frame(width: w * 0.07, height: h * 0.09).offset(y: h * 0.12)
+                  }
+                  .frame(width: w * 0.30, height: h * 0.45)
+                  .contentShape(Rectangle())
+              }
+
+              private func depa(w: CGFloat, h: CGFloat) -> some View {
+                  ZStack {
+                      RoundedRectangle(cornerRadius: w * 0.02).fill(Color(red: 1.0, green: 0.96, blue: 0.82))
+                          .overlay(RoundedRectangle(cornerRadius: w * 0.02).stroke(inkLine.opacity(0.6), lineWidth: 1.5))
+                          .frame(width: w * 0.24, height: h * 0.32)
+                      // striped awning
+                      HStack(spacing: 0) {
+                          ForEach(0..<6, id: \.self) { i in Rectangle().fill(i % 2 == 0 ? Color.pink : Color.white) }
+                      }
+                      .frame(width: w * 0.27, height: h * 0.05)
+                      .clipShape(RoundedRectangle(cornerRadius: 4))
+                      .offset(y: -h * 0.10)
+                      Image(systemName: "bag.fill").font(.system(size: w * 0.07)).foregroundStyle(.blue.opacity(0.8)).offset(y: h * 0.02)
+                      Text("TAMADEPA").font(.system(size: w * 0.028, weight: .heavy, design: .rounded)).foregroundStyle(.pink).offset(y: -h * 0.15)
+                  }
+                  .frame(width: w * 0.28, height: h * 0.42)
+                  .contentShape(Rectangle())
+              }
+
+              private func arcadeSign(w: CGFloat) -> some View {
+                  Text("GAME")
+                      .font(.system(size: w * 0.07, weight: .black, design: .rounded))
+                      .foregroundStyle(LinearGradient(colors: [.red, .orange, .yellow, .green, .blue, .purple], startPoint: .leading, endPoint: .trailing))
+                      .padding(.horizontal, w * 0.03).padding(.vertical, w * 0.008)
+                      .background(Capsule().fill(.white))
+                      .overlay(Capsule().stroke(inkLine.opacity(0.5), lineWidth: 1.5))
+                      .rotationEffect(.degrees(-6))
+              }
+
+              private func label(_ text: String, _ c: Color, action: @escaping () -> Void) -> some View {
+                  Button(action: action) {
+                      Text(text)
+                          .font(.system(.caption, design: .rounded).weight(.heavy))
+                          .foregroundStyle(.white)
+                          .lineLimit(1).minimumScaleFactor(0.7)
+                          .padding(.horizontal, 10).padding(.vertical, 6)
+                          .background(Capsule().fill(c.gradient))
+                          .overlay(Capsule().stroke(.white, lineWidth: 1.5))
+                  }
+                  .buttonStyle(.plain)
+              }
+
+              private func cornerButton(_ icon: String, _ text: String, _ c: Color, action: @escaping () -> Void) -> some View {
+                  Button(action: action) {
+                      VStack(spacing: 1) {
+                          Image(systemName: icon).font(.system(size: 18, weight: .bold)).foregroundStyle(c)
+                          Text(text).font(.system(size: 9, weight: .heavy, design: .rounded)).foregroundStyle(c)
+                      }
+                      .frame(width: 50, height: 50)
+                      .background(Circle().fill(.white))
+                      .overlay(Circle().stroke(c.opacity(0.6), lineWidth: 2))
+                  }
+                  .buttonStyle(.plain)
+              }
+          }
+
+          // MARK: - settings
+
+          struct TownSettingsView: View {
+              @ObservedObject var town = Town.shared
+              @State private var importing = false
+              @AppStorage("gotchiWallet") private var wallet = 1000
+
+              var body: some View {
+                  List {
+                      Section("Character pack") {
+                          switch town.pack {
+                          case .ready(let n): Label("\(n) characters, \(town.items.count) shop items", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
+                          case .loading: ProgressView()
+                          case .missing: Text("Not downloaded yet")
+                          case .failed(let e): Text(e).foregroundStyle(.orange)
+                          }
+                          Button("Download again from TamaTown") { town.download() }
+                          Button("Use my own MyMeets2_3_7.zip") { importing = true }
+                      }
+                      Section("Gotchi Points") {
+                          Text("Wallet: \(wallet) G")
+                          Button("Top up to 5,000 G") { wallet = max(wallet, 5000) }
+                      }
+                      Section("Thanks") {
+                          Text("Characters and shop items: the MyMeets pack (TamaTown).")
+                          Text("Gift catalog: WebMeets (tamagotchicenter.com).")
+                          Text("Emulator core: tg18-emu by oreo-fox.")
+                      }
+                  }
+                  .navigationTitle("Settings")
+                  .sheet(isPresented: $importing) {
+                      DocumentPicker { u in if let d = try? Data(contentsOf: u) { town.importPack(d) } }.ignoresSafeArea()
+                  }
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/TamaDepaView.swift <<'TAMA_EOF'
+          import SwiftUI
+
+          /// TamaDepa, the department store: send food, items, accessories, wallpapers,
+          /// places and games to your Tama, with your Gotchi Points.
+          struct TamaDepaView: View {
+              @EnvironmentObject var emu: Emulator
+              @ObservedObject var town = Town.shared
+              @AppStorage("gotchiWallet") private var wallet = 1000
+
+              struct Entry: Identifiable, Hashable {
+                  enum Source: Hashable { case web(WebMeets.Item), pack(PackItem) }
+                  let id: String
+                  let name: String
+                  let kind: String
+                  let price: Int?
+                  let note: String?
+                  let source: Source
+                  var imageURL: URL? { if case .web(let w) = source { return w.imageURL }; return nil }
+              }
+
+              @State private var web: [WebMeets.Item] = []
               @State private var loadError: String?
               @State private var category = "food"
               @State private var search = ""
-              @State private var points = 0
-              @State private var picked: WebMeets.Item?
+              @State private var withPoints = true
+              @State private var picked: Entry?
               @State private var sending = false
               @State private var progress = ""
-              @State private var result: String?
-              @State private var resultOK = false
-              @State private var tab = 0
+              @State private var result: (ok: Bool, text: String)?
+              @State private var importing = false
+              @State private var custom: (name: String, data: Data)?
 
-              private var shown: [WebMeets.Item] {
+              private var isJP: Bool { emu.toy?.romName.contains("(JP") ?? false }
+              private var lang: String { isJP ? "jp" : "en" }
+
+              private var entries: [Entry] {
+                  var out: [Entry] = []
+                  var seen = Set<String>()
+                  for w in web where w.lang_dir == lang || (w.item_type == "stations" || w.item_type == "games") {
+                      let k = w.lang_dir + "/" + w.file_name.lowercased()
+                      seen.insert(k)
+                      out.append(Entry(id: "w:" + w.id, name: w.name, kind: w.item_type, price: w.item_price,
+                                       note: w.lang_dir != lang ? "Japan event" : nil, source: .web(w)))
+                  }
+                  for p in town.items {
+                      let k = p.lang + "/" + p.file.lowercased()
+                      if seen.contains(k) { continue }
+                      let special = p.kind == "stations" || p.kind == "games"
+                      let fits = p.lang == lang && (isJP || !p.isKana)
+                      guard fits || special else { continue }
+                      seen.insert(k)
+                      out.append(Entry(id: "p:\(p.i)", name: p.displayName, kind: p.kind, price: nil,
+                                       note: p.lang != lang ? "Japan event" : nil, source: .pack(p)))
+                  }
+                  return out
+              }
+
+              private var shown: [Entry] {
                   let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-                  return items.filter { $0.item_type == category && (q.isEmpty || $0.name.lowercased().contains(q)) }
+                  return entries.filter { $0.kind == category && (q.isEmpty || $0.name.lowercased().contains(q)) }
               }
 
               var body: some View {
-                  NavigationStack {
-                      ScrollView {
-                          VStack(alignment: .leading, spacing: 16) {
-                              Picker("", selection: $tab) {
-                                  Text("💕 Town").tag(0)
-                                  Text("🎁 Gifts").tag(1)
-                              }
-                              .pickerStyle(.segmented)
-                              if tab == 0 {
-                                  TownView()
-                              } else {
-                                  gifts
+                  ScrollView {
+                      VStack(alignment: .leading, spacing: 14) {
+                          walletCard
+                          if !emu.appWaiting {
+                              Label("On the toy choose Connection › App › Download, then pick something here.", systemImage: "hand.point.up.left.fill")
+                                  .font(.system(.subheadline, design: .rounded)).foregroundStyle(.orange)
+                                  .padding(12)
+                                  .frame(maxWidth: .infinity, alignment: .leading)
+                                  .background(RoundedRectangle(cornerRadius: 14).fill(Color.orange.opacity(0.1)))
+                          }
+                          ScrollView(.horizontal, showsIndicators: false) {
+                              HStack(spacing: 8) {
+                                  ForEach(WebMeets.categories, id: \.key) { c in
+                                      Button { category = c.key } label: {
+                                          Label(c.title, systemImage: c.icon)
+                                              .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                              .padding(.horizontal, 12).padding(.vertical, 8)
+                                              .background(Capsule().fill(category == c.key ? Color.blue : Color(.secondarySystemBackground)))
+                                              .foregroundStyle(category == c.key ? .white : .primary)
+                                      }
+                                      .buttonStyle(.plain)
+                                  }
                               }
                           }
-                          .padding(16)
-                      }
-                      .searchable(text: $search, prompt: "Search items")
-                      .navigationTitle("Tama App")
-                      .navigationBarTitleDisplayMode(.inline)
-                      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-                      .task { await load() }
-                      .overlay { if sending { BusyOverlay(text: progress) } }
-                      .confirmationDialog(picked.map { "Send \($0.name)?" } ?? "", isPresented: Binding(get: { picked != nil }, set: { if !$0 { picked = nil } }), titleVisibility: .visible) {
-                          Button(points > 0 ? "Send with \(points) Gotchi Points" : "Send gift") { if let p = picked { send(p) } }
-                          Button("Cancel", role: .cancel) { picked = nil }
-                      }
-                      .alert(resultOK ? "Delivered! 🎁" : "Not delivered", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
-                          Button("OK") { if resultOK { dismiss() } }
-                      } message: { Text(result ?? "") }
-                  }
-              }
-
-              @ViewBuilder
-              private var gifts: some View {
-                              statusCard
-                              pointsCard
-                              Picker("Kind", selection: $category) {
-                                  ForEach(WebMeets.categories, id: \.key) { c in Text(c.title).tag(c.key) }
-                              }
-                              .pickerStyle(.segmented)
-                              grid
-                              Text("Gifts and item catalog by WebMeets (tamagotchicenter.com) — thank you!")
+                          if category == "stations" { ownFileCard }
+                          grid
+                          if !packReady {
+                              Text("Download the character pack in Tama Town › Settings for hundreds more items, places and games.")
                                   .font(.caption).foregroundStyle(.secondary)
-                                  .frame(maxWidth: .infinity)
+                          }
+                          Text("Catalog by WebMeets (tamagotchicenter.com) and the MyMeets pack (TamaTown).")
+                              .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+                      }
+                      .padding(16)
+                  }
+                  .searchable(text: $search, prompt: "Search TamaDepa")
+                  .navigationTitle("TamaDepa")
+                  .navigationBarTitleDisplayMode(.inline)
+                  .background(LinearGradient(colors: [Color.blue.opacity(0.08), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
+                  .task { await load() }
+                  .overlay { if sending { BusyOverlay(text: progress) } }
+                  .confirmationDialog(picked.map { "Send \($0.name)?" } ?? "", isPresented: Binding(get: { picked != nil }, set: { if !$0 { picked = nil } }), titleVisibility: .visible) {
+                      Button(pointsToSend > 0 ? "Send with \(pointsToSend) G" : "Send") { if let p = picked { send(p) } }
+                      Button("Cancel", role: .cancel) { picked = nil }
+                  }
+                  .sheet(isPresented: $importing) {
+                      DocumentPicker { u in
+                          guard let d = try? Data(contentsOf: u), Town.userItemPacket(d, points: 0) != nil else {
+                              result = (false, "That file isn't a Tamagotchi item. Item files start with \"TAMAGO\" (like the .txt files in MyMeets).")
+                              return
+                          }
+                          let n = Town.userItemName(d)
+                          custom = (n.isEmpty ? u.deletingPathExtension().lastPathComponent : n, d)
+                      }.ignoresSafeArea()
+                  }
+                  .alert(result?.ok == true ? "Delivered! 🎁" : "Not delivered", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
+                      Button("OK") {}
+                  } message: { Text(result?.text ?? "") }
               }
 
-              private var statusCard: some View {
+              private var packReady: Bool {
+                  if case .ready = town.pack { return true }
+                  return false
+              }
+
+              private var pointsToSend: Int { withPoints ? min(wallet, 99999) : 0 }
+
+              private var walletCard: some View {
                   HStack(spacing: 12) {
-                      Image(systemName: emu.appWaiting ? "dot.radiowaves.left.and.right" : "hand.point.up.left.fill")
-                          .font(.title2)
-                          .foregroundStyle(emu.appWaiting ? .green : .orange)
-                          .frame(width: 36)
+                      Image(systemName: "dollarsign.circle.fill").font(.largeTitle).foregroundStyle(.yellow)
                       VStack(alignment: .leading, spacing: 2) {
-                          Text(emu.appWaiting ? "\(emu.toy?.name ?? "Your Tama") is waiting for the app" : "Get your Tama ready")
-                              .font(.system(.headline, design: .rounded))
-                          Text(emu.appWaiting ? "Pick a gift below to send it (choose Connection › App › Download on the toy)." : "On the toy choose Connection › App › Download. This screen sees it straight away.")
-                              .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
+                          Text("\(wallet) G").font(.system(.title2, design: .rounded).weight(.heavy)).monospacedDigit()
+                          Text("Gotchi Points — win more in the Arcade").font(.caption).foregroundStyle(.secondary)
                       }
+                      Spacer()
+                      Toggle("Send", isOn: $withPoints).labelsHidden()
                   }
                   .padding(14)
-                  .frame(maxWidth: .infinity, alignment: .leading)
-                  .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(.secondarySystemBackground)))
+                  .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(.regularMaterial))
               }
 
-              private var pointsCard: some View {
-                  HStack {
-                      Image(systemName: "bag.fill").foregroundStyle(.yellow)
-                      Text("Add Gotchi Points").font(.system(.subheadline, design: .rounded))
-                      Spacer()
-                      Text("\(points)").font(.system(.body, design: .rounded).monospacedDigit().weight(.semibold))
-                      Stepper("", value: $points, in: 0...99999, step: 500).labelsHidden()
+              private var ownFileCard: some View {
+                  TownCard(tint: .purple) {
+                      Label("Bring your own place", systemImage: "wand.and.stars")
+                          .font(.system(.headline, design: .rounded)).foregroundStyle(.purple)
+                      Text("Have a place or item file of your own, like Magic Hut? Choose it and TamaiOS sends it to your Tama, just like the app did.")
+                          .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
+                      if let c = custom {
+                          Button { sendCustom(c.data, name: c.name) } label: {
+                              Label("Send \(c.name)", systemImage: "paperplane.fill").frame(maxWidth: .infinity)
+                          }
+                          .buttonStyle(.borderedProminent).tint(.purple)
+                      }
+                      Button(custom == nil ? "Choose file…" : "Choose another file…") { importing = true }
+                          .font(.subheadline.weight(.semibold))
                   }
-                  .padding(.horizontal, 14).padding(.vertical, 8)
-                  .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(.secondarySystemBackground)))
               }
 
               @ViewBuilder
               private var grid: some View {
-                  if let e = loadError, items.isEmpty {
-                      VStack(spacing: 10) {
-                          Text("Couldn't load the gift catalog").font(.headline)
-                          Text(e).font(.caption).foregroundStyle(.secondary)
-                          Button("Try again") { Task { await load() } }
+                  if web.isEmpty && town.items.isEmpty {
+                      if let e = loadError {
+                          VStack(spacing: 10) {
+                              Text("Couldn't load TamaDepa").font(.headline)
+                              Text(e).font(.caption).foregroundStyle(.secondary)
+                              Button("Try again") { Task { await load() } }
+                          }
+                          .frame(maxWidth: .infinity).padding(30)
+                      } else {
+                          ProgressView("Opening the store…").frame(maxWidth: .infinity).padding(40)
                       }
-                      .frame(maxWidth: .infinity).padding(30)
-                  } else if items.isEmpty {
-                      ProgressView("Loading gifts…").frame(maxWidth: .infinity).padding(40)
                   } else {
-                      LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 12)], spacing: 12) {
+                      LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
                           ForEach(shown) { it in
-                              Button { picked = it } label: { cell(it) }
-                                  .buttonStyle(.plain)
+                              Button { picked = it } label: { cell(it) }.buttonStyle(.plain)
                           }
                       }
                       if shown.isEmpty {
-                          Text("Nothing here").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding()
+                          Text("Nothing here yet").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding()
                       }
                   }
               }
 
-              private func cell(_ it: WebMeets.Item) -> some View {
+              private func icon(_ kind: String) -> String {
+                  WebMeets.categories.first { $0.key == kind }?.icon ?? "gift.fill"
+              }
+
+              private func cell(_ it: Entry) -> some View {
                   VStack(spacing: 6) {
-                      AsyncImage(url: it.imageURL) { img in
-                          img.interpolation(.none).resizable().scaledToFit()
-                      } placeholder: {
-                          Color(.tertiarySystemFill)
+                      Group {
+                          if let u = it.imageURL {
+                              AsyncImage(url: u) { img in img.interpolation(.none).resizable().scaledToFit() } placeholder: { Color(.tertiarySystemFill) }
+                          } else {
+                              Image(systemName: icon(it.kind)).font(.title).foregroundStyle(.blue.opacity(0.7))
+                                  .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                  .background(Color.blue.opacity(0.08))
+                          }
                       }
-                      .frame(width: it.item_type == "wallpaper" ? 80 : 48, height: it.item_type == "wallpaper" ? 80 : 48)
-                      .clipShape(RoundedRectangle(cornerRadius: 6))
+                      .frame(width: it.kind == "wallpaper" ? 80 : 52, height: it.kind == "wallpaper" ? 80 : 52)
+                      .clipShape(RoundedRectangle(cornerRadius: 8))
                       Text(it.name).font(.system(.caption, design: .rounded).weight(.semibold))
                           .lineLimit(2).multilineTextAlignment(.center)
-                      if let p = it.item_price {
+                      if let n = it.note {
+                          Text(n).font(.caption2).foregroundStyle(.pink)
+                      } else if let p = it.price {
                           Text("\(p) G").font(.caption2).foregroundStyle(.secondary)
                       }
                   }
                   .padding(8)
-                  .frame(maxWidth: .infinity, minHeight: 120)
-                  .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(.secondarySystemBackground)))
+                  .frame(maxWidth: .infinity, minHeight: 124)
+                  .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemBackground)))
               }
 
               private func load() async {
                   loadError = nil
-                  do { items = try await WebMeets.items() } catch { loadError = error.localizedDescription }
+                  do { web = try await WebMeets.items() } catch { loadError = error.localizedDescription }
               }
 
-              private func send(_ it: WebMeets.Item) {
+              private func deliver(name: String, points: Int, packet: @escaping () async throws -> [UInt8]) {
                   picked = nil
                   sending = true
-                  progress = "Getting the gift…"
-                  let pts = points
+                  progress = "Wrapping your gift…"
                   Task {
                       do {
-                          async let start = WebMeets.startPacket()
-                          let pkt = try await WebMeets.itemPacket(it, points: pts)
-                          let st = await start
+                          let pkt = try await packet()
+                          let start = TamaLink.packet(op: 0x17, cmd: 0)
                           let link = TamaLink(emu: emu)
                           try await Task.detached(priority: .userInitiated) {
-                              try link.sendGift(start: st, item: pkt) { msg in
-                                  DispatchQueue.main.async { progress = msg }
-                              }
+                              try link.sendGift(start: start, item: pkt) { msg in DispatchQueue.main.async { progress = msg } }
                           }.value
-                          emu.note("gift sent: \(it.file_name) points=\(pts)")
+                          emu.note("gift sent: \(name) points=\(points)")
+                          if points > 0 { wallet = max(0, wallet - points) }
                           sending = false
-                          resultOK = true
-                          result = "\(emu.toy?.name ?? "Your Tama") got \(it.name)\(pts > 0 ? " and \(pts) Gotchi Points" : ""). Watch the toy!"
+                          result = (true, "\(emu.toy?.name ?? "Your Tama") got \(name)\(points > 0 ? " and \(points) Gotchi Points" : ""). Watch the toy!")
                       } catch {
                           emu.note("gift failed: \(error.localizedDescription)")
                           sending = false
-                          resultOK = false
-                          result = error.localizedDescription
+                          result = (false, error.localizedDescription)
                       }
+                  }
+              }
+
+              private func send(_ it: Entry) {
+                  let pts = pointsToSend
+                  switch it.source {
+                  case .web(let w):
+                      deliver(name: it.name, points: pts) { try await WebMeets.itemPacket(w, points: pts) }
+                  case .pack(let p):
+                      deliver(name: it.name, points: pts) {
+                          guard let pk = Town.shared.itemPacket(p, points: pts) else { throw URLError(.cannotDecodeContentData) }
+                          return pk
+                      }
+                  }
+              }
+
+              private func sendCustom(_ d: Data, name: String) {
+                  let pts = pointsToSend
+                  deliver(name: name, points: pts) {
+                      guard let pk = Town.userItemPacket(d, points: pts) else { throw URLError(.cannotDecodeContentData) }
+                      return pk
                   }
               }
           }
@@ -4551,7 +5402,11 @@ jobs:
 
               var ready: Bool { (emu.withCore { tg_radio_ready($0) } ?? 0) != 0 }
 
-              func connect(_ on: Bool) { emu.withCore { tg_radio_connect($0, on ? 1 : 0) } }
+              func connect(_ on: Bool) {
+                  if on { emu.linkBusy = true }
+                  emu.withCore { tg_radio_connect($0, on ? 1 : 0) }
+                  if !on { emu.linkBusy = false }
+              }
 
               private func write(_ d: [UInt8]) throws {
                   for _ in 0..<400 {
@@ -4816,6 +5671,8 @@ jobs:
               @Published var pack: Pack = .missing
               @Published var ids: [UInt16] = []
               @Published var suitors: [Suitor] = []
+              /// Shop items (food, items, accessories, wallpapers, places, games) from the pack.
+              @Published var items: [PackItem] = []
 
               static let packURL = URL(string: "https://tamatown.com/wp-content/uploads/2020/11/MyMeets2_3_7.zip")!
               static var packFile: URL {
@@ -4864,6 +5721,7 @@ jobs:
                       await MainActor.run {
                           if n > 0 {
                               self.ids = Array(ids.prefix(c))
+                              self.items = Town.readItems()
                               self.imageCache = [:]
                               self.pack = .ready(Int(n))
                               if self.suitors.isEmpty { self.shuffle() }
@@ -4872,6 +5730,47 @@ jobs:
                           }
                       }
                   }
+              }
+
+              static func readItems() -> [PackItem] {
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  tg_mm_items(&p, &n)
+                  guard let p else { return [] }
+                  let d = Data(bytes: p, count: n)
+                  tg_free(p, n)
+                  return (try? JSONDecoder().decode([PackItem].self, from: d)) ?? []
+              }
+
+              /// Delivery packet for a pack item, with Gotchi Points.
+              func itemPacket(_ it: PackItem, points: Int) -> [UInt8]? {
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  guard tg_mm_item_packet(it.i, UInt32(max(0, points)), &p, &n) == 1, let p else { return nil }
+                  let a = Array(UnsafeBufferPointer(start: p, count: n))
+                  tg_free(p, n)
+                  return a
+              }
+
+              /// Delivery packet for an item file you brought (e.g. a place like Magic Hut).
+              static func userItemPacket(_ d: Data, points: Int) -> [UInt8]? {
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  let ok = d.withUnsafeBytes { tg_mm_user_item($0.bindMemory(to: UInt8.self).baseAddress, $0.count, UInt32(max(0, points)), &p, &n) }
+                  guard ok == 1, let p else { return nil }
+                  let a = Array(UnsafeBufferPointer(start: p, count: n))
+                  tg_free(p, n)
+                  return a
+              }
+
+              static func userItemName(_ d: Data) -> String {
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  d.withUnsafeBytes { tg_mm_user_item_name($0.bindMemory(to: UInt8.self).baseAddress, $0.count, &p, &n) }
+                  guard let p else { return "" }
+                  let s = String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
+                  tg_free(p, n)
+                  return s
               }
 
               // MARK: pictures
@@ -4998,6 +5897,19 @@ jobs:
               }
           }
 
+          /// One item in the character pack's shop.
+          struct PackItem: Decodable, Hashable {
+              let i: Int
+              let lang: String
+              let file: String
+              let id: String
+              let name: String
+              let kind: String
+              /// Written in kana (for Japanese toys)?
+              var isKana: Bool { name.unicodeScalars.contains { $0.value >= 0x3040 && $0.value < 0x3100 } }
+              var displayName: String { name.isEmpty ? id : name.capitalized }
+          }
+
           /// A pixel-sharp character picture.
           struct CharacterPicture: View {
               let image: CGImage?
@@ -5018,6 +5930,8 @@ jobs:
           /// TamaiOS Town: your Tama visits, goes on dates and gets married — the part of
           /// the old Tamagotchi app that sent your Tama home with a baby.
           struct TownView: View {
+              enum Mode { case party, home }
+              var mode: Mode = .party
               @EnvironmentObject var emu: Emulator
               @ObservedObject var town = Town.shared
 
@@ -5096,6 +6010,17 @@ jobs:
                       visitCard
                   } else if st.pending != .none {
                       pendingCard
+                  } else if mode == .home {
+                      TownCard(tint: .purple) {
+                          Label("\(tamaName) is out in town", systemImage: "figure.walk")
+                              .font(.system(.headline, design: .rounded)).foregroundStyle(.purple)
+                          Text("Head to Tama ♥ Party to meet someone special, or bring \(tamaName) home.")
+                              .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
+                          Button { setPending(.back, nil) } label: {
+                              Label("Bring \(tamaName) home", systemImage: "house.fill").frame(maxWidth: .infinity)
+                          }
+                          .buttonStyle(.borderedProminent).tint(.purple)
+                      }
                   } else {
                       awayHeader
                       suitorGrid
@@ -5104,7 +6029,7 @@ jobs:
                       }
                       .buttonStyle(.bordered).tint(.secondary)
                   }
-                  if !st.married.isEmpty {
+                  if mode == .home && !st.married.isEmpty {
                       TownCard(tint: .yellow) {
                           Label("Family album", systemImage: "heart.text.square.fill")
                               .font(.system(.headline, design: .rounded)).foregroundStyle(.orange)
@@ -5119,7 +6044,7 @@ jobs:
 
               private var visitCard: some View {
                   TownCard(tint: .pink) {
-                      Label("Visit TamaiOS Town", systemImage: "figure.walk.motion")
+                      Label(mode == .party ? "Bring your Tama to the party" : "Visit TamaiOS Town", systemImage: "figure.walk.motion")
                           .font(.system(.headline, design: .rounded)).foregroundStyle(.pink)
                       step(1, "On the toy choose Connection › App › Visit.")
                       step(2, "When it says it's waiting, tap the button below (it lights up by itself).")

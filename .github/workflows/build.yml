@@ -7062,7 +7062,12 @@ jobs:
           xcodebuild -project TamaiOS.xcodeproj -scheme TamaiOS -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build -quiet \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} build
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} build 2>&1 | tee build.log | grep -E "error:|warning: .*never|BUILD" || true
+          if ! grep -q "BUILD SUCCEEDED" build.log && grep -q "error:" build.log; then
+            echo "================ WHAT WENT WRONG (send Claude a screenshot of this) ================"
+            grep -E "error:" -A3 build.log | head -60
+            exit 1
+          fi
 
       - name: Package the IPA
         run: |

@@ -49,6 +49,8 @@ jobs:
           //! emulator core. Every entry point catches panics so a bug in the core shows
           //! up as an error code instead of crashing the app.
 
+          pub mod mm;
+
           use std::ffi::{c_char, CStr};
           use std::panic::{catch_unwind, AssertUnwindSafe};
           use std::sync::Arc;
@@ -335,6 +337,7 @@ jobs:
           fn new_emu(m: Machine, image: Arc<Vec<u8>>) -> Emu {
               let mut m = m;
               m.stop_on_bluetooth = true;
+              m.sys.radio = Some(tg18::radio::Radio::new()); // the phone app is built in
               Emu {
                   m,
                   image,
@@ -577,6 +580,7 @@ jobs:
                   return false;
               }
               m.stop_on_bluetooth = true;
+              m.sys.radio = Some(tg18::radio::Radio::new());
               m.never_sleep = e.m.never_sleep;
               m.idle_skip = e.m.idle_skip;
               e.m = m;
@@ -937,168 +941,1177 @@ jobs:
                   assert_eq!(e.flags & F_SYNCED, 0);
               }
           }
+
+          // --- Bluetooth module (the "phone app" side) ---------------------------------------
+
+          /// Turn the emulated Bluetooth module on (1) or off (0).
+          #[no_mangle]
+          pub extern "C" fn tg_radio_enable(e: *mut Emu, on: i32) {
+              with(e, |e| {
+                  if on != 0 {
+                      if e.m.sys.radio.is_none() {
+                          e.m.sys.radio = Some(tg18::radio::Radio::new());
+                      }
+                      if let Some(r) = e.m.sys.radio.as_mut() {
+                          r.tracing = on == 2; // 2 = also keep a message log (console)
+                      }
+                  } else {
+                      e.m.sys.radio = None;
+                  }
+              })
+          }
+
+          /// A phone connects (1) or disconnects (0).
+          #[no_mangle]
+          pub extern "C" fn tg_radio_connect(e: *mut Emu, on: i32) {
+              with(e, |e| {
+                  if let Some(r) = e.m.sys.radio.as_mut() {
+                      r.connected = on != 0;
+                  }
+              })
+          }
+
+          /// 1 once the firmware has set the module up for a connection.
+          #[no_mangle]
+          pub extern "C" fn tg_radio_ready(e: *mut Emu) -> i32 {
+              with(e, |e| e.m.sys.radio.as_ref().map_or(0, |r| r.setup_done as i32))
+          }
+
+          /// Write from the phone (characteristic fff2). 1 = taken, 0 = try again.
+          #[no_mangle]
+          pub extern "C" fn tg_radio_write(e: *mut Emu, d: *const u8, n: usize) -> i32 {
+              let d = match unsafe { bytes(d, n) } {
+                  Some(d) => d.to_vec(),
+                  None => return 1,
+              };
+              with(e, |e| e.m.sys.radio.as_mut().map_or(0, |r| r.from_phone(&d) as i32))
+          }
+
+          /// Next notification for the phone (characteristic fff1); 0 if none.
+          #[no_mangle]
+          pub extern "C" fn tg_radio_read(e: *mut Emu, out: *mut *mut u8, out_len: *mut usize) -> i32 {
+              let v = with(e, |e| e.m.sys.radio.as_mut().and_then(|r| r.to_phone.pop_front()));
+              match v {
+                  Some(v) => {
+                      give(v, out, out_len);
+                      1
+                  }
+                  None => 0,
+              }
+          }
+
+          /// The module's message log (for research).
+          #[no_mangle]
+          pub extern "C" fn tg_radio_trace(e: *mut Emu, out: *mut *mut u8, out_len: *mut usize) {
+              let s = with(e, |e| e.m.sys.radio.as_ref().map(|r| r.trace.join("\n")).unwrap_or_default());
+              give_string(s, out, out_len)
+          }
+
+          // --- Tama Town: marriage (see mm.rs) ------------------------------------------------
+
+          static TOWN: std::sync::Mutex<Option<mm::Library>> = std::sync::Mutex::new(None);
+
+          fn zip_entries(d: &[u8]) -> Vec<(String, Vec<u8>)> {
+              let mut out = Vec::new();
+              if d.len() < 22 {
+                  return out;
+              }
+              let start = d.len().saturating_sub(22 + 65535);
+              let eocd = match (start..=d.len() - 22).rev().find(|&i| d[i..i + 4] == [0x50, 0x4B, 0x05, 0x06]) {
+                  Some(e) => e,
+                  None => return out,
+              };
+              let (count, mut off) = match (u16le(d, eocd + 10), u32le(d, eocd + 16)) {
+                  (Some(c), Some(o)) => (c, o),
+                  _ => return out,
+              };
+              for _ in 0..count {
+                  let ok = (|| -> Option<()> {
+                      if d.get(off..off + 4)? != [0x50, 0x4B, 0x01, 0x02] {
+                          return None;
+                      }
+                      let method = u16le(d, off + 10)?;
+                      let csize = u32le(d, off + 20)?;
+                      let nlen = u16le(d, off + 28)?;
+                      let xlen = u16le(d, off + 30)?;
+                      let clen = u16le(d, off + 32)?;
+                      let local = u32le(d, off + 42)?;
+                      let name = String::from_utf8_lossy(d.get(off + 46..off + 46 + nlen)?).to_string();
+                      off += 46 + nlen + xlen + clen;
+                      let lnlen = u16le(d, local + 26)?;
+                      let lxlen = u16le(d, local + 28)?;
+                      let s = local + 30 + lnlen + lxlen;
+                      let body = d.get(s..s + csize)?;
+                      let data = match method {
+                          0 => body.to_vec(),
+                          8 => miniz_oxide::inflate::decompress_to_vec(body).ok()?,
+                          _ => return Some(()),
+                      };
+                      out.push((name, data));
+                      Some(())
+                  })();
+                  if ok.is_none() {
+                      break;
+                  }
+              }
+              out
+          }
+
+          /// Load the MyMeets character pack (the zip as downloaded). Returns the number
+          /// of usable characters (0 = nothing usable).
+          #[no_mangle]
+          pub extern "C" fn tg_mm_load_zip(p: *const u8, n: usize) -> i32 {
+              let d = match unsafe { bytes(p, n) } {
+                  Some(d) => d,
+                  None => return 0,
+              };
+              catch_unwind(|| {
+                  let mut lib = mm::Library::default();
+                  for (name, data) in zip_entries(d) {
+                      let low = name.to_ascii_lowercase().replace('\\', "/");
+                      if low.contains("assets/characters/") {
+                          lib.add_file(&name, data);
+                      }
+                  }
+                  lib.finish();
+                  let c = lib.ids.len() as i32;
+                  if c > 0 {
+                      *TOWN.lock().unwrap() = Some(lib);
+                  }
+                  c
+              })
+              .unwrap_or(0)
+          }
+
+          /// Character ids (up to max) into out; returns how many.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_ids(out: *mut u16, max: usize) -> usize {
+              let g = TOWN.lock().unwrap();
+              let ids = match g.as_ref() {
+                  Some(l) => &l.ids,
+                  None => return 0,
+              };
+              let n = ids.len().min(max);
+              if !out.is_null() {
+                  unsafe { std::ptr::copy_nonoverlapping(ids.as_ptr(), out, n) };
+              }
+              n
+          }
+
+          /// Draw a character from parts (ids + palettes for B M A K) into out
+          /// (64*64 0xAARRGGBB). Returns 1 on success.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_compose(b: u16, bp: i32, m: u16, a: u16, ap: i32, k: u16, kp: i32, out: *mut u32) -> i32 {
+              if out.is_null() {
+                  return 0;
+              }
+              let g = TOWN.lock().unwrap();
+              let lib = match g.as_ref() {
+                  Some(l) => l,
+                  None => return 0,
+              };
+              let picks = [(b, bp.max(0) as usize), (m, 0), (a, ap.max(0) as usize), (k, kp.max(0) as usize)];
+              match catch_unwind(AssertUnwindSafe(|| lib.compose(&picks, false))) {
+                  Ok(Some(img)) => {
+                      let o = unsafe { std::slice::from_raw_parts_mut(out, 64 * 64) };
+                      o.copy_from_slice(&img.px[..64 * 64]);
+                      1
+                  }
+                  _ => 0,
+              }
+          }
+
+          /// The 8 colours of a palette (for colour buttons).
+          #[no_mangle]
+          pub extern "C" fn tg_mm_palette(pal: i32, out: *mut u32) -> i32 {
+              if out.is_null() {
+                  return 0;
+              }
+              let s = mm::palette_swatch(pal.max(0) as usize);
+              unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), out, 8) };
+              mm::PALETTE_COUNT as i32
+          }
+
+          /// A plain app packet (op 0x14 visit / 0x15 back / 0x16 marriage, cmd 0 = hello).
+          #[no_mangle]
+          pub extern "C" fn tg_mm_packet(op: u8, cmd: u8, out: *mut *mut u8, out_len: *mut usize) {
+              give(mm::packet(op, cmd, 258, 0, None, None), out, out_len)
+          }
+
+          /// What the toy sent on a visit: bit0 adult, bit1 sex; name via tg_mm_visit_name.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_visit_info(p: *const u8, n: usize) -> i32 {
+              match unsafe { bytes(p, n) } {
+                  Some(v) => (mm::visit_is_adult(v) as i32) | ((mm::visit_sex(v) as i32 & 1) << 1),
+                  None => 0,
+              }
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_mm_visit_name(p: *const u8, n: usize, out: *mut *mut u8, out_len: *mut usize) {
+              let s = unsafe { bytes(p, n) }.map(mm::visit_name).unwrap_or_default();
+              give_string(s, out, out_len)
+          }
+
+          /// The marriage packet. kind: 0 like the app, 1 the baby becomes the partner,
+          /// 2 random genes. baby_sex 0/1. lang 4 JP / 8 EN. Returns 1 on success.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_marriage(
+              visit: *const u8, visit_len: usize,
+              b: u16, bp: i32, m: u16, a: u16, ap: i32, k: u16, kp: i32,
+              baby_sex: u8, lang: u8, kind: u8, name: *const c_char, seed: u64,
+              out: *mut *mut u8, out_len: *mut usize,
+          ) -> i32 {
+              let v = unsafe { bytes(visit, visit_len) }.map(|x| x.to_vec()).unwrap_or_default();
+              let name = unsafe { cstr(name) }.unwrap_or_default();
+              let g = TOWN.lock().unwrap();
+              let lib = match g.as_ref() {
+                  Some(l) => l,
+                  None => return 0,
+              };
+              let c = mm::Choice {
+                  picks: [(b, bp.max(0) as usize), (m, 0), (a, ap.max(0) as usize), (k, kp.max(0) as usize)],
+                  baby_sex,
+                  lang,
+                  kind,
+                  name,
+              };
+              match catch_unwind(AssertUnwindSafe(|| mm::marriage_packet(lib, &v, &c, seed))) {
+                  Ok(Some(p)) => {
+                      give(p, out, out_len);
+                      1
+                  }
+                  _ => 0,
+              }
+          }
+          TAMA_EOF
+          cat > ffi/src/mm.rs <<'TAMA_EOF'
+          //! Marriage support for the built-in Tama App: character parts, pictures,
+          //! character data and the app packets, as the official app (and the MyMeets
+          //! community tool, whose behaviour this follows) produced them.
+          //!
+          //! Character parts come from the MyMeets character pack the user downloads
+          //! (files `NNcIIII_Type_P[_en].txt`), never from this source.
+
+          use std::collections::HashMap;
+
+          // ---- packets --------------------------------------------------------------------
+
+          pub const OP_VISIT: u8 = 0x14;
+          pub const OP_BACK: u8 = 0x15;
+          pub const OP_MARRIAGE: u8 = 0x16;
+          pub const OP_ITEM: u8 = 0x17;
+          pub const CMD_START: u8 = 0;
+          pub const CMD_VISIT: u8 = 0x34;
+          pub const CMD_BACK: u8 = 0x36;
+          pub const CMD_MARRIAGE: u8 = 0x38;
+
+          const CODE_TAMAGO: &[u8; 6] = b"TAMAGO";
+          const CODE_SECURITY: [u8; 8] = [0x7c, 0x68, 0x48, 0x97, 0x75, 0xa6, 0x4e, 0x99];
+          const CODE_FORMAT: [u8; 8] = [0, 0, 0, 0, 0x10, 0, 0x01, 0x04];
+          pub const MARRIAGE_PACKET_SIZE: usize = 39334;
+
+          struct W<'a> {
+              b: &'a mut Vec<u8>,
+              p: usize,
+          }
+          impl<'a> W<'a> {
+              fn bytes(&mut self, d: &[u8]) {
+                  let end = (self.p + d.len()).min(self.b.len());
+                  let n = end - self.p.min(end);
+                  self.b[self.p..self.p + n].copy_from_slice(&d[..n]);
+                  self.p += d.len();
+              }
+              fn zeros(&mut self, n: usize) {
+                  self.p += n;
+              }
+              fn u8(&mut self, v: u8) {
+                  self.bytes(&[v])
+              }
+              fn u16(&mut self, v: u16) {
+                  self.bytes(&v.to_le_bytes())
+              }
+              fn u32(&mut self, v: u32) {
+                  self.bytes(&v.to_le_bytes())
+              }
+          }
+
+          /// The partner as the marriage packet describes it.
+          pub struct Partner {
+              pub sex: u8,
+              pub id: u16,
+              pub name: Vec<u8>,
+              pub generation: u16,
+              pub growth: u8,
+              pub twins: u8,
+              pub birthday: u16,
+              pub dna: u8,
+              pub dna_pattern: [u8; 8],
+              pub palette: [u8; 3],
+              pub character_info: Vec<u8>,
+              pub parent_images: Vec<u8>,
+          }
+
+          pub struct Marriage {
+              pub partner: Partner,
+              pub character_data: Vec<u8>,
+              pub colors: [u8; 3],
+              pub dna_pattern: [u8; 8],
+              pub dna_value: u8,
+              pub sex: u8,
+          }
+
+          /// Build a packet (BLETmgcPacket.Compile in MyMeets).
+          pub fn packet(op: u8, cmd: u8, size: usize, gotchi_points: u32, item: Option<&[u8]>, marriage: Option<&Marriage>) -> Vec<u8> {
+              let size = size.max(258);
+              let mut raw = vec![0u8; size];
+              {
+                  let mut w = W { b: &mut raw, p: 0 };
+                  w.bytes(CODE_TAMAGO);
+                  match marriage {
+                      Some(m) => {
+                          w.zeros(60);
+                          w.bytes(&m.colors);
+                          w.zeros(3);
+                      }
+                      None => w.zeros(66),
+                  }
+                  w.u32(size as u32);
+                  w.u8(op);
+                  w.u8(0);
+                  w.u32(0);
+                  w.bytes(&CODE_SECURITY);
+                  w.u32(0);
+                  w.u8(cmd);
+                  match marriage {
+                      Some(m) => {
+                          let v = &m.partner;
+                          w.u8(v.sex);
+                          let mut name = [0u8; 16];
+                          let n = v.name.len().min(16);
+                          name[..n].copy_from_slice(&v.name[..n]);
+                          w.bytes(&name);
+                          w.u16(0);
+                          w.u16(0); // RandomID1
+                          w.u16(v.id);
+                          w.zeros(3);
+                          w.u8(0);
+                          w.u16(v.generation);
+                          w.u8(v.growth);
+                          w.zeros(6);
+                          w.u8(v.twins);
+                          w.u16(0); // Unknown1
+                          w.u16(0); // Unknown2
+                          w.u8(0); // BKind
+                          w.u8(0); // PKind
+                          w.u16(v.birthday);
+                          w.u16(0);
+                          w.u16(0); // RandomID2
+                          w.zeros(8);
+                          w.bytes(&v.dna_pattern);
+                          w.u8(m.dna_value);
+                          w.u8(m.sex);
+                          w.bytes(&v.palette);
+                          w.bytes(&m.dna_pattern);
+                          w.u8(m.dna_value);
+                          w.zeros(13);
+                      }
+                      None => w.zeros(92),
+                  }
+                  if gotchi_points > 0 {
+                      w.u8(3);
+                      w.u32(gotchi_points);
+                  } else {
+                      w.zeros(5);
+                  }
+                  if marriage.is_some() {
+                      w.zeros(12);
+                      w.u32(256);
+                      w.u32(33036);
+                  } else {
+                      w.zeros(20);
+                  }
+                  if item.is_some() {
+                      w.u32(256);
+                      w.zeros(20);
+                  } else {
+                      w.zeros(24);
+                  }
+                  if marriage.is_some() {
+                      w.u32(33176);
+                      w.zeros(8);
+                  } else {
+                      w.zeros(12);
+                  }
+                  w.bytes(&CODE_FORMAT);
+                  if let Some(it) = item {
+                      w.u32(2);
+                      w.u32(1);
+                      w.u32(it.len() as u32);
+                      w.bytes(it);
+                      w.u32(0);
+                  } else if let Some(m) = marriage {
+                      w.u32(0);
+                      w.u32(1);
+                      w.u32(32768);
+                      let mut cd = m.character_data.clone();
+                      cd.resize(32768, 0);
+                      w.bytes(&cd);
+                      w.bytes(&m.partner.character_info);
+                      w.bytes(&m.partner.parent_images);
+                  }
+              }
+              let n = raw.len();
+              let sum = raw[..n - 2].iter().fold(0u16, |a, &b| a.wrapping_add(b as u16));
+              // MyMeets sums the whole buffer before the checksum is written (it is still 0)
+              raw[n - 2..].copy_from_slice(&sum.to_le_bytes());
+              raw
+          }
+
+          // ---- strings --------------------------------------------------------------------
+
+          const MOJIS: [&str; 16] = [
+              "\u{3000}あいうえおかきくけこさしすせそ", "たちつてとなにぬねのはひふへほま", "みむめもやゆよらりるれろわをんぁ",
+              "ぃぅぇぉっゃゅょがぎぐげござじず", "ぜぞだぢづでどばびぶべぼぱぴぷぺ", "ぽー～…、。()「」.・!?&○",
+              "×┣◎★┳♪┫↑↓→←￥\u{3000}012", "3456789アイウエオカキクケ", "コサシスセソタチツテトナニヌネノ",
+              "ハヒフヘホマミムメモヤユヨラリル", "レロワヲンァィゥェォッャュョガギ", "グゲゴザジズゼゾダヂヅデドバビブ",
+              "ベボパピプペポヴ        ", "│┌┐┘└├┬┤┴┼━┃┏┓┛┗", "ABCDEFGHIJKLMNOP", "QRSTUVWXYZ%-+  \n",
+          ];
+
+          /// Encode a name the way the toy stores text (language byte + table index).
+          pub fn encode_name(s: &str, lang: u8) -> Vec<u8> {
+              let mut out = Vec::new();
+              for c in s.to_uppercase().chars() {
+                  for (row, chars) in MOJIS.iter().enumerate() {
+                      if let Some(col) = chars.chars().position(|x| x == c) {
+                          out.push(lang);
+                          out.push(((row as u8) << 4) | (col as u8 & 15));
+                          break;
+                      }
+                  }
+              }
+              out
+          }
+
+          pub fn decode_name(b: &[u8]) -> String {
+              let mut s = String::new();
+              for p in b.chunks(2) {
+                  if p.len() < 2 || (p[0] != 4 && p[0] != 8) {
+                      break;
+                  }
+                  if let Some(c) = MOJIS[(p[1] >> 4) as usize].chars().nth((p[1] & 15) as usize) {
+                      s.push(c);
+                  }
+              }
+              s.trim().to_string()
+          }
+
+          // ---- DNA ----------------------------------------------------------------------
+
+          const DNA_PATTERNS: [[[u8; 8]; 4]; 4] = [
+              [[0, 1, 10, 11, 8, 9, 2, 3], [8, 9, 2, 3, 0, 1, 10, 11], [0, 9, 10, 3, 8, 1, 2, 11], [8, 1, 2, 11, 0, 9, 10, 3]],
+              [[0, 1, 10, 11, 12, 9, 6, 3], [8, 9, 2, 3, 4, 1, 14, 11], [0, 9, 10, 3, 12, 1, 6, 11], [8, 1, 2, 11, 4, 9, 14, 3]],
+              [[0, 1, 10, 11, 12, 1, 2, 11], [8, 1, 2, 11, 4, 9, 10, 3], [0, 1, 10, 11, 8, 9, 6, 3], [8, 9, 2, 3, 4, 1, 14, 11]],
+              [[0, 9, 10, 3, 8, 1, 6, 11], [8, 1, 2, 11, 0, 9, 14, 3], [0, 1, 10, 11, 8, 9, 6, 3], [8, 9, 2, 3, 0, 1, 14, 11]],
+          ];
+          const DNA_PATTERN_E: [[u8; 8]; 13] = [
+              [0, 9, 10, 11, 12, 13, 14, 15], [8, 1, 10, 11, 12, 13, 14, 15], [0, 1, 10, 11, 12, 13, 14, 15],
+              [8, 9, 10, 3, 12, 13, 14, 15], [0, 1, 10, 11, 12, 13, 14, 15], [0, 9, 2, 11, 12, 13, 14, 15],
+              [0, 9, 10, 3, 12, 13, 14, 15], [8, 9, 2, 11, 12, 13, 14, 15], [8, 9, 2, 3, 12, 13, 14, 15],
+              [0, 1, 2, 11, 12, 13, 14, 15], [0, 1, 10, 3, 12, 13, 14, 15], [0, 9, 2, 3, 12, 13, 14, 15], [8, 1, 2, 3, 12, 13, 14, 15],
+          ];
+
+          pub struct Rng(u64);
+          impl Rng {
+              pub fn new(seed: u64) -> Rng {
+                  Rng(seed ^ 0x9E37_79B9_7F4A_7C15 | 1)
+              }
+              pub fn next(&mut self, lo: i32, hi: i32) -> i32 {
+                  // xorshift64*; [lo, hi) like .NET Random.Next
+                  self.0 ^= self.0 >> 12;
+                  self.0 ^= self.0 << 25;
+                  self.0 ^= self.0 >> 27;
+                  let v = self.0.wrapping_mul(0x2545_F491_4F6C_DD1D);
+                  if hi <= lo {
+                      return lo;
+                  }
+                  lo + (v % (hi - lo) as u64) as i32
+              }
+          }
+
+          /// DNA pattern for the chosen marriage type: 0 = like the device/app,
+          /// 1 = "get character" (the baby becomes the partner), 2 = random genes.
+          pub fn dna_from_type(kind: u8, generation_hint: u8, rng: &mut Rng) -> (u8, [u8; 8]) {
+              let mut p = [0u8; 8];
+              match kind {
+                  0 => {
+                      p = [8; 8];
+                      (255, p)
+                  }
+                  1 => {
+                      let v = if generation_hint > 1 && generation_hint - 1 <= 3 { generation_hint - 1 } else { 255 };
+                      if v != 255 {
+                          return (v, DNA_PATTERN_E[v as usize]);
+                      }
+                      let r = rng.next(0, 100);
+                      let g = if r < 25 { 0 } else if r < 50 { 1 } else if r < 75 { 2 } else { 3 };
+                      let k = if r % 10 > 3 { (r % 10 % 3 + 1) as usize } else { 0 };
+                      p.copy_from_slice(&DNA_PATTERNS[g][k]);
+                      (g as u8, p)
+                  }
+                  _ => {
+                      for b in p.iter_mut() {
+                          *b = rng.next(0, 12) as u8;
+                      }
+                      (255, p)
+                  }
+              }
+          }
+
+          // ---- pictures -----------------------------------------------------------------------
+
+          #[derive(Clone)]
+          pub struct Image {
+              pub w: usize,
+              pub h: usize,
+              /// 0xAARRGGBB
+              pub px: Vec<u32>,
+          }
+
+          impl Image {
+              pub fn new(w: usize, h: usize) -> Image {
+                  Image { w, h, px: vec![0; w * h] }
+              }
+              pub fn get(&self, x: usize, y: usize) -> u32 {
+                  self.px[y * self.w + x]
+              }
+              pub fn set(&mut self, x: usize, y: usize, c: u32) {
+                  if x < self.w && y < self.h {
+                      self.px[y * self.w + x] = c;
+                  }
+              }
+          }
+
+          fn rgb565_to_argb(v: u16) -> u32 {
+              // stored with blue in the high bits (as the toy's images are)
+              let b = ((v & 0xF800) >> 11) as u32 * 255 / 31;
+              let g = ((v & 0x07E0) >> 5) as u32 * 255 / 63;
+              let r = (v & 0x1F) as u32 * 255 / 31;
+              0xFF00_0000 | r << 16 | g << 8 | b
+          }
+
+          fn argb_to_565(c: u32) -> u16 {
+              let r = ((c >> 16) & 0xFF) as u16;
+              let g = ((c >> 8) & 0xFF) as u16;
+              let b = (c & 0xFF) as u16;
+              ((b >> 3) & 31) << 11 | ((g >> 2) & 63) << 5 | ((r >> 3) & 31)
+          }
+
+          /// Size of one picture from its header (0 if it isn't one).
+          pub fn image_size(h: &[u8]) -> usize {
+              if h.len() < 6 {
+                  return 0;
+              }
+              let v = u16::from_le_bytes([h[3], h[4]]);
+              if v != 1 && v != 256 {
+                  return 0;
+              }
+              let (w, ht, n) = (h[0] as usize, h[1] as usize, h[2] as usize);
+              let mut px = w * ht;
+              if n <= 16 {
+                  px /= 2;
+              }
+              6 + px + n * 2
+          }
+
+          /// Decode a toy picture; pixel (0,0)'s colour becomes transparent.
+          pub fn decode_image(b: &[u8], key_transparent: bool) -> Option<Image> {
+              let size = image_size(b);
+              if size == 0 || size > b.len() {
+                  return None;
+              }
+              let (w, h, n) = (b[0] as usize, b[1] as usize, b[2] as usize);
+              let pal: Vec<u32> = (0..n).map(|i| rgb565_to_argb(u16::from_be_bytes([b[6 + i * 2], b[7 + i * 2]]))).collect();
+              let mut img = Image::new(w, h);
+              let start = 6 + n * 2;
+              if n <= 16 {
+                  for i in 0..w * h / 2 {
+                      let v = b[start + i];
+                      let (lo, hi) = ((v & 15) as usize, (v >> 4) as usize);
+                      let (p0, p1) = (i * 2, i * 2 + 1);
+                      img.px[p0] = *pal.get(lo).unwrap_or(&0);
+                      if p1 < w * h {
+                          img.px[p1] = *pal.get(hi).unwrap_or(&0);
+                      }
+                  }
+              } else {
+                  for i in 0..w * h {
+                      img.px[i] = *pal.get(b[start + i] as usize).unwrap_or(&0);
+                  }
+              }
+              if key_transparent && !img.px.is_empty() {
+                  let k = img.px[0];
+                  for p in img.px.iter_mut() {
+                      if *p == k {
+                          *p = 0;
+                      }
+                  }
+              }
+              Some(img)
+          }
+
+          /// Encode a picture in the toy's format (TamagoImage.FromBitmap).
+          pub fn encode_image(img: &Image) -> Vec<u8> {
+              let mut pal: Vec<u32> = Vec::new();
+              for x in 0..img.w {
+                  for y in 0..img.h {
+                      let c = img.get(x, y);
+                      if !pal.contains(&c) {
+                          pal.push(c);
+                      }
+                  }
+              }
+              let n = pal.len().min(255);
+              let mut size = img.w * img.h;
+              if n <= 16 {
+                  size /= 2;
+              }
+              let mut total = 6 + size + n * 2;
+              total += total % 4;
+              let mut out = vec![0u8; total];
+              out[0] = img.w as u8;
+              out[1] = img.h as u8;
+              out[2] = n as u8;
+              let v: u16 = if n <= 16 { 1 } else { 256 };
+              out[3..5].copy_from_slice(&v.to_le_bytes());
+              out[5] = 0xFF;
+              for (i, c) in pal.iter().take(n).enumerate() {
+                  let v = argb_to_565(*c);
+                  out[6 + i * 2..8 + i * 2].copy_from_slice(&v.to_be_bytes());
+              }
+              let start = 6 + n * 2;
+              let idx = |c: u32| pal.iter().position(|&p| p == c).unwrap_or(0).min(255) as u8;
+              if n <= 16 {
+                  let mut i = 0;
+                  while i + 1 < img.w * img.h + 1 && i < img.w * img.h {
+                      let a = idx(img.px[i]) & 15;
+                      let b = if i + 1 < img.px.len() { idx(img.px[i + 1]) & 15 } else { 0 };
+                      out[start + i / 2] = a | b << 4;
+                      i += 2;
+                  }
+              } else {
+                  for (i, &c) in img.px.iter().enumerate() {
+                      out[start + i] = idx(c);
+                  }
+              }
+              out
+          }
+
+          // ---- colour palettes (13 x 8, palette 0 = the parts' own colours) ---------------------
+
+          const PALETTES: [[[u8; 3]; 8]; 13] = [
+              [[255, 255, 209], [255, 255, 109], [255, 224, 0], [255, 255, 99], [255, 219, 0], [255, 191, 0], [244, 234, 76], [214, 204, 0]],
+              [[255, 142, 153], [255, 119, 130], [242, 58, 73], [255, 89, 102], [229, 0, 17], [183, 0, 15], [135, 0, 0], [104, 0, 0]],
+              [[155, 204, 255], [107, 165, 232], [73, 130, 193], [73, 96, 255], [63, 84, 224], [25, 45, 186], [0, 20, 160], [0, 17, 132]],
+              [[198, 198, 198], [160, 160, 160], [132, 132, 132], [119, 119, 119], [102, 102, 102], [79, 79, 79], [73, 56, 56], [33, 33, 33]],
+              [[255, 255, 255], [255, 255, 255], [244, 242, 242], [255, 255, 255], [242, 239, 239], [219, 216, 216], [211, 209, 209], [219, 214, 191]],
+              [[255, 255, 255], [255, 219, 239], [244, 186, 209], [249, 193, 219], [255, 170, 204], [239, 124, 175], [255, 130, 165], [224, 84, 119]],
+              [[255, 234, 127], [255, 186, 0], [255, 135, 0], [255, 193, 0], [255, 145, 0], [229, 112, 0], [158, 91, 0], [127, 73, 0]],
+              [[255, 255, 237], [255, 249, 198], [242, 234, 135], [255, 255, 229], [255, 249, 186], [221, 211, 89], [252, 247, 201], [249, 242, 114]],
+              [[175, 244, 68], [140, 209, 35], [99, 170, 0], [122, 170, 79], [102, 142, 68], [40, 112, 25], [84, 142, 0], [66, 114, 0]],
+              [[242, 249, 255], [206, 234, 249], [153, 198, 226], [214, 244, 255], [130, 209, 255], [94, 175, 214], [107, 158, 211], [61, 114, 173]],
+              [[255, 234, 255], [229, 191, 214], [198, 145, 186], [229, 165, 214], [191, 104, 165], [147, 68, 124], [209, 68, 170], [191, 51, 140]],
+              [[255, 255, 249], [224, 224, 224], [175, 170, 173], [255, 255, 255], [211, 211, 211], [188, 188, 188], [237, 237, 237], [214, 214, 214]],
+              [[239, 239, 219], [216, 216, 196], [170, 170, 150], [142, 142, 124], [117, 117, 96], [73, 73, 53], [53, 53, 33], [30, 30, 10]],
+          ];
+          pub const PALETTE_COUNT: usize = 13;
+
+          fn argb(c: [u8; 3]) -> u32 {
+              0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32
+          }
+
+          fn recolor(c: u32, pal: usize) -> u32 {
+              if c >> 24 == 0 || pal == 0 || pal >= PALETTE_COUNT {
+                  return c;
+              }
+              let (r, g, b) = (((c >> 16) & 255) as f64, ((c >> 8) & 255) as f64, (c & 255) as f64);
+              for (i, base) in PALETTES[0].iter().enumerate() {
+                  let (dr, dg, db) = (r - base[0] as f64, g - base[1] as f64, b - base[2] as f64);
+                  if (0.3 * dr * dr + 0.59 * dg * dg + 0.11 * db * db).sqrt() <= 10.0 {
+                      return argb(PALETTES[pal][i]);
+                  }
+              }
+              c
+          }
+
+          /// A palette's colours (for the app's colour buttons).
+          pub fn palette_swatch(pal: usize) -> [u32; 8] {
+              let mut out = [0u32; 8];
+              for (i, c) in PALETTES[pal.min(PALETTE_COUNT - 1)].iter().enumerate() {
+                  out[i] = argb(*c);
+              }
+              out
+          }
+
+          // ---- character parts ----------------------------------------------------------------
+
+          pub const PARTS: [char; 4] = ['B', 'M', 'A', 'K'];
+
+          fn part_index(p: char) -> usize {
+              PARTS.iter().position(|&c| c == p).unwrap_or(0)
+          }
+
+          #[derive(Default)]
+          pub struct Part {
+              pub offset: Vec<u8>,
+              pub tbl_jp: Vec<u8>,
+              pub tbl_en: Vec<u8>,
+              pub chr: Vec<u8>,
+              pub images: Vec<Option<Image>>,
+              pub accessory_front: bool,
+          }
+
+          #[derive(Default)]
+          pub struct Library {
+              /// File name (lower case, no folder) -> data.
+              files: HashMap<String, Vec<u8>>,
+              pub ids: Vec<u16>,
+              parts: HashMap<(u16, char), Part>,
+          }
+
+          const IMAGE_COUNT: [usize; 4] = [14, 19, 11, 7]; // B M A K
+          const NORMAL_INDEX: usize = 0;
+          const SMALL_INDEX: [usize; 4] = [9, 15, 7, 6]; // B M A K
+
+          impl Library {
+              pub fn add_file(&mut self, name: &str, data: Vec<u8>) {
+                  let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_ascii_lowercase();
+                  if !base.ends_with(".txt") || base.len() < 9 || &base[2..3] != "c" {
+                      return;
+                  }
+                  if let Ok(id) = base[3..7].parse::<u16>() {
+                      if !self.ids.contains(&id) {
+                          self.ids.push(id);
+                      }
+                      self.files.insert(base, data);
+                  }
+              }
+
+              pub fn finish(&mut self) {
+                  self.ids.sort_unstable();
+                  let ids = self.ids.clone();
+                  for id in ids {
+                      for p in PARTS {
+                          let part = self.load_part(id, p);
+                          self.parts.insert((id, p), part);
+                      }
+                  }
+                  // only characters with all four parts and a body picture are usable
+                  let parts = &self.parts;
+                  self.ids.retain(|&id| PARTS.iter().all(|&p| parts.get(&(id, p)).map_or(false, |x| !x.offset.is_empty() && !x.chr.is_empty())));
+              }
+
+              fn file(&self, num: usize, id: u16, kind: &str, p: char, suffix: &str) -> Option<Vec<u8>> {
+                  let n = format!("{:02}c{:04}_{}_{}{}.txt", num, id, kind, p, suffix).to_ascii_lowercase();
+                  self.files.get(&n).cloned()
+              }
+
+              fn load_part(&self, id: u16, p: char) -> Part {
+                  let i = part_index(p);
+                  let mut part = Part::default();
+                  part.offset = self.file(1 + i, id, "offset", p, "").unwrap_or_default();
+                  part.tbl_jp = self.file(5 + i, id, "tbl", p, "").unwrap_or_default();
+                  part.tbl_en = if p == 'B' { self.file(5 + i, id, "tbl", p, "_en").unwrap_or_default() } else { Vec::new() };
+                  part.chr = self.file(9 + i, id, "char", p, "").unwrap_or_default();
+                  if p == 'K' && part.tbl_jp.len() > 6 && part.tbl_jp[6] != 0 {
+                      part.accessory_front = true;
+                  }
+                  // the Offset file lists each picture's place in the 32 KB character
+                  // data; the part's Char data starts at CHAR_BASE there
+                  const CHAR_BASE: [usize; 4] = [0x400, 0x3850, 0x5300, 0x7200];
+                  for e in part.offset.chunks_exact(4) {
+                      let abs = u32::from_le_bytes([e[0], e[1], e[2], e[3]]) as usize;
+                      let img = abs.checked_sub(CHAR_BASE[i]).and_then(|rel| {
+                          let s = image_size(part.chr.get(rel..)?);
+                          if s == 0 || rel + s > part.chr.len() {
+                              return None;
+                          }
+                          decode_image(&part.chr[rel..rel + s], true)
+                      });
+                      part.images.push(img);
+                  }
+                  part
+              }
+
+              pub fn part(&self, id: u16, p: char) -> Option<&Part> {
+                  self.parts.get(&(id, p))
+              }
+
+              fn part_image(&self, id: u16, p: char, index: usize) -> Option<&Image> {
+                  let part = self.part(id, p)?;
+                  if part.images.len() != IMAGE_COUNT[part_index(p)] {
+                      return None;
+                  }
+                  part.images.get(index)?.as_ref()
+              }
+
+              /// Picture of a character from parts: picks[B M A K] = (character id, palette).
+              pub fn compose(&self, picks: &[(u16, usize); 4], small: bool) -> Option<Image> {
+                  let (w, h, ox, oy) = if small { (48, 40, 8, 4) } else { (64, 64, 8, 6) };
+                  let idx = |p: usize| if small { SMALL_INDEX[p] } else { NORMAL_INDEX };
+                  let mut layers: [Option<Image>; 4] = Default::default();
+                  for p in 0..4 {
+                      let img = self.part_image(picks[p].0, PARTS[p], idx(p)).cloned();
+                      if img.is_none() && PARTS[p] != 'K' {
+                          return None;
+                      }
+                      layers[p] = img;
+                  }
+                  // anchors: the body picture marks where the head (red), face
+                  // (yellow) and back (blue) go; its first 4 pixels give the colours
+                  // that replace the marks.
+                  let mut anchors: HashMap<char, (i32, i32)> = HashMap::new();
+                  if let Some(body) = layers[0].as_mut() {
+                      if body.w >= 4 {
+                          let row: Vec<u32> = (0..4).map(|x| body.get(x, 0)).collect();
+                          for x in 0..4 {
+                              body.set(x, 0, row[0]);
+                          }
+                          for y in 0..body.h {
+                              for x in 0..body.w {
+                                  let c = body.get(x, y) | 0xFF00_0000;
+                                  let (key, repl) = match c {
+                                      0xFFFF_0000 => ('A', row[1]),
+                                      0xFFFF_FF00 => ('M', row[2]),
+                                      0xFF00_00FF => ('K', row[3]),
+                                      _ => continue,
+                                  };
+                                  if body.get(x, y) >> 24 == 0 {
+                                      continue;
+                                  }
+                                  anchors.insert(key, (x as i32, y as i32));
+                                  body.set(x, y, repl);
+                              }
+                          }
+                      }
+                  }
+                  let front = self.part(picks[3].0, 'K').map_or(false, |k| k.accessory_front);
+                  let order: [char; 4] = if front { ['B', 'A', 'M', 'K'] } else { ['K', 'B', 'A', 'M'] };
+                  let mut out = Image::new(w, h);
+                  for p in order {
+                      let i = part_index(p);
+                      let Some(img) = layers[i].as_ref() else { continue };
+                      let (mut x0, mut y0) = (ox as i32, oy as i32);
+                      if p != 'B' {
+                          let (ax, ay) = anchors.get(&p).copied().unwrap_or((img.w as i32 / 2, img.h as i32 / 2));
+                          x0 += ax - img.w as i32 / 2;
+                          y0 += ay - img.h as i32 / 2;
+                      }
+                      for y in 0..img.h {
+                          for x in 0..img.w {
+                              let c = img.get(x, y);
+                              if c >> 24 == 0 {
+                                  continue;
+                              }
+                              let (tx, ty) = (x0 + x as i32, y0 + y as i32);
+                              if tx >= 0 && ty >= 0 {
+                                  out.set(tx as usize, ty as usize, recolor(c, picks[i].1));
+                              }
+                          }
+                      }
+                  }
+                  Some(out)
+              }
+
+              /// The 32 KB character data the toy draws the partner with.
+              pub fn character_data(&self, sex: u8, ids: [u16; 4], lang: u8) -> Option<Vec<u8>> {
+                  const TABLE: [u8; 16] = [0x00, 0x01, 0x00, 0x00, 0xe4, 0x01, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0xf4, 0x01, 0x00, 0x00];
+                  const OFFS: [[usize; 3]; 4] = [[0x10, 0x100, 0x400], [0x48, 0x1e4, 0x3850], [0x94, 0x1e8, 0x5300], [0xc0, 0x1f4, 0x7200]];
+                  let mut data = vec![0u8; 32768];
+                  data[..16].copy_from_slice(&TABLE);
+                  for (i, &p) in PARTS.iter().enumerate() {
+                      let part = self.part(ids[i], p)?;
+                      let tbl = if p == 'B' && lang == 8 && !part.tbl_en.is_empty() { &part.tbl_en } else { &part.tbl_jp };
+                      if part.offset.is_empty() || part.chr.is_empty() || tbl.is_empty() {
+                          return None;
+                      }
+                      for (j, src) in [&part.offset, tbl, &part.chr].iter().enumerate() {
+                          let o = OFFS[i][j];
+                          let n = src.len().min(32768 - o);
+                          data[o..o + n].copy_from_slice(&src[..n]);
+                          if i == 0 && j == 1 {
+                              data[o + 6] = sex;
+                          }
+                      }
+                  }
+                  Some(data)
+              }
+
+              pub fn random_id(&self, p: char, rng: &mut Rng) -> u16 {
+                  if self.ids.is_empty() {
+                      return 16;
+                  }
+                  for _ in 0..20 {
+                      let id = self.ids[rng.next(0, self.ids.len() as i32) as usize];
+                      if self.part(id, p).map_or(false, |x| !x.images.is_empty()) {
+                          return id;
+                      }
+                  }
+                  16
+              }
+
+              /// A grandparent-ish picture: some parts from the partner, some random.
+              pub fn fake_parent(&self, picks: &[(u16, usize); 4], keep: [i32; 4], rng: &mut Rng) -> Option<Image> {
+                  let mut p = *picks;
+                  for i in 0..4 {
+                      let rid = self.random_id(PARTS[i], rng);
+                      let rpal = rng.next(0, PALETTE_COUNT as i32 - 1) as usize;
+                      p[i] = if rng.next(30, 100) > keep[i] { picks[i] } else { (rid, if PARTS[i] == 'M' { 0 } else { rpal }) };
+                  }
+                  self.compose(&p, true)
+              }
+          }
+
+          // ---- the whole marriage ---------------------------------------------------------------
+
+          /// Visit data from the toy (what it sends on a visit): is it an adult?
+          pub fn visit_is_adult(v: &[u8]) -> bool {
+              if v.len() < 1536 {
+                  return false;
+              }
+              let rd32 = |o: usize| u32::from_le_bytes([v[o], v[o + 1], v[o + 2], v[o + 3]]) as usize;
+              let rd16 = |o: usize| if o + 2 <= v.len() { u16::from_le_bytes([v[o], v[o + 1]]) } else { 0 };
+              let stage = rd16(rd32(208) + 14);
+              stage >= 2
+          }
+
+          pub fn visit_sex(v: &[u8]) -> u8 {
+              v.get(95).copied().unwrap_or(0)
+          }
+
+          pub fn visit_name(v: &[u8]) -> String {
+              if v.len() < 0x70 {
+                  return String::new();
+              }
+              decode_name(&v[0x60..0x70])
+          }
+
+          pub struct Choice {
+              pub picks: [(u16, usize); 4], // B M A K
+              pub baby_sex: u8,             // 0 boy, 1 girl (as MyMeets offers)
+              pub lang: u8,                 // 4 JP, 8 EN
+              pub kind: u8,                 // 0 like the app, 1 get character, 2 random genes
+              pub name: String,
+          }
+
+          pub fn marriage_packet(lib: &Library, visit: &[u8], c: &Choice, seed: u64) -> Option<Vec<u8>> {
+              let mut rng = Rng::new(seed);
+              let partner_sex = 1u8.wrapping_sub(visit_sex(visit));
+              let (dna_value, mut dna_pattern) = dna_from_type(c.kind, 0, &mut rng);
+              if partner_sex == 0 {
+                  dna_pattern = [0; 8];
+              }
+              let (pdna, ppattern) = dna_from_type(0, 0, &mut rng);
+              let ids = [c.picks[0].0, c.picks[1].0, c.picks[2].0, c.picks[3].0];
+              let character_data = lib.character_data(c.baby_sex, ids, c.lang)?;
+              let colors = [c.picks[0].1 as u8, c.picks[2].1 as u8, c.picks[3].1 as u8];
+              let r: Vec<i32> = (0..7).map(|_| rng.next(0, 100)).collect();
+              let k1 = [r[0], r[2], r[1], r[3]];
+              let k2 = [100 - r[0], 100 - r[2], 100 - r[1], 100 - r[3]];
+              let _ = (r[4], r[5], r[6]);
+              let p1 = lib.fake_parent(&c.picks, k1, &mut rng)?;
+              let p2 = lib.fake_parent(&c.picks, k2, &mut rng)?;
+              // character information (140 bytes)
+              let name = encode_name(if c.name.is_empty() { "TAMA" } else { &c.name }, c.lang);
+              let mut info = vec![0u8; 140];
+              {
+                  let mut w = W { b: &mut info, p: 0 };
+                  w.u32(1);
+                  w.u32(1);
+                  w.u32(128);
+                  w.u16(partner_sex as u16);
+                  w.u16(3);
+                  w.zeros(64);
+                  w.u16(257);
+                  w.u16(2);
+                  let mut n = [0u8; 18];
+                  let k = name.len().min(18);
+                  n[..k].copy_from_slice(&name[..k]);
+                  w.bytes(&n);
+                  w.u16(0);
+                  w.bytes(&n);
+                  w.u16(0);
+              }
+              // parent pictures (6156 bytes)
+              let mut parents = vec![0u8; 6156];
+              {
+                  let mut w = W { b: &mut parents, p: 0 };
+                  w.u32(8);
+                  w.u32(1);
+                  w.u32(6144);
+                  let mut a = encode_image(&p1);
+                  a.resize(3072, 0);
+                  let mut b = encode_image(&p2);
+                  b.resize(3072, 0);
+                  w.bytes(&a);
+                  w.bytes(&b);
+              }
+              let partner = Partner {
+                  sex: partner_sex,
+                  id: c.picks[0].0,
+                  name,
+                  generation: 2,
+                  growth: 4,
+                  twins: 0,
+                  birthday: 257,
+                  dna: pdna,
+                  dna_pattern: ppattern,
+                  palette: colors,
+                  character_info: info,
+                  parent_images: parents,
+              };
+              let m = Marriage { partner, character_data, colors, dna_pattern, dna_value, sex: c.baby_sex };
+              Some(packet(OP_MARRIAGE, CMD_MARRIAGE, MARRIAGE_PACKET_SIZE, 0, None, Some(&m)))
+          }
           TAMA_EOF
           cat > tools/icon.py <<'TAMA_EOF'
-          # Draws the TamaiOS app icon: the same cartoon shell the app shows.
-          # Usage: icon.py OUT.png [size] [preview]   ("preview" = toy only on white, for layout checks)
+          # Draws the TamaiOS app icon: a Tamagotchi ON-style egg (tall egg, big colour
+          # screen in a thick frame, three buttons in a smile underneath), centred exactly.
+          # Usage: icon.py OUT.png [size]
           import sys, math
-          from PIL import Image, ImageDraw, ImageFilter
+          from PIL import Image, ImageDraw, ImageFilter, ImageChops
 
           OUT = sys.argv[1]
           SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 1024
-          PREVIEW = len(sys.argv) > 3
-          SS = 3                      # supersample for smooth edges
+          SS = 4
           S = SIZE * SS
 
-          INK = (43, 28, 61)
-          TOP, BOT = (255, 187, 214), (245, 115, 168)          # Bubblegum theme
-          BTN = (252, 237, 158)
-          BG_TOP, BG_BOT = (255, 214, 232), (199, 166, 250)
+          INK = (58, 36, 78)
+          SHELL_T, SHELL_B = (255, 214, 232), (247, 132, 182)
+          FRAME_T, FRAME_B = (180, 228, 255), (110, 170, 250)
+          BTN_T, BTN_B = (255, 246, 190), (250, 205, 90)
+          BG_T, BG_B = (255, 241, 247), (233, 218, 255)
 
-          def bez(p0, p1, p2, p3, n=80):
+          def lerp(a, b, t): return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+          def vgrad(c0, c1, y0, y1):
+              im = Image.new("RGB", (S, S)); d = ImageDraw.Draw(im)
+              for y in range(S):
+                  d.line([(0, y), (S, y)], fill=lerp(c0, c1, max(0.0, min(1.0, (y - y0) / max(1, y1 - y0)))))
+              return im
+
+          def bez(p0, p1, p2, p3, n=120):
               for i in range(n + 1):
                   t = i / n; u = 1 - t
                   yield (u**3*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t**3*p3[0],
                          u**3*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t**3*p3[1])
 
-          def egg(x, y, w, h):
-              """Same curves as EggShape in ToyView.swift."""
-              mx = x + w / 2
+          def egg(cx, cy, w, h):
+              """Symmetric egg, a bit narrower at the top, centred on its bounding box."""
+              x, y = cx - w / 2, cy - h / 2
               pts = []
-              pts += bez((mx, y), (x + w*0.90, y), (x + w, y + h*0.26), (x + w, y + h*0.58))
-              pts += bez((x + w, y + h*0.58), (x + w, y + h*0.88), (x + w*0.80, y + h), (mx, y + h))
-              pts += bez((mx, y + h), (x + w*0.20, y + h), (x, y + h*0.88), (x, y + h*0.58))
-              pts += bez((x, y + h*0.58), (x, y + h*0.26), (x + w*0.10, y), (mx, y))
+              pts += bez((cx, y), (x + w*0.80, y), (x + w, y + h*0.28), (x + w, y + h*0.60))
+              pts += bez((x + w, y + h*0.60), (x + w, y + h*0.86), (x + w*0.80, y + h), (cx, y + h))
+              pts += bez((cx, y + h), (x + w*0.20, y + h), (x, y + h*0.86), (x, y + h*0.60))
+              pts += bez((x, y + h*0.60), (x, y + h*0.28), (x + w*0.20, y), (cx, y))
               return pts
 
-          def lerp(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+          def mask(draw_fn):
+              m = Image.new("L", (S, S), 0); draw_fn(ImageDraw.Draw(m)); return m
 
-          def vgrad(size, c0, c1, y0=0, y1=None):
-              im = Image.new("RGB", size); d = ImageDraw.Draw(im); y1 = y1 or size[1]
-              for y in range(size[1]):
-                  d.line([(0, y), (size[0], y)], fill=lerp(c0, c1, max(0, min(1, (y - y0) / max(1, y1 - y0)))))
-              return im
-
-          img = Image.new("RGB", (S, S), (255, 255, 255)) if PREVIEW else vgrad((S, S), BG_TOP, BG_BOT)
+          img = vgrad(BG_T, BG_B, 0, S)
           d = ImageDraw.Draw(img)
+          C = S / 2
 
-          # toy metrics (ShellMetrics), fitted into the icon
-          w = S * (0.80 if PREVIEW else 0.74)
-          eggH = w * 1.14; loopH = w * 0.16; total = eggH + loopH
-          left = (S - w) / 2
-          top = (S - total) / 2 + (0 if PREVIEW else S * 0.02)
-          lw = max(3, w * 0.018)
-          eggTop = top + loopH
+          # Egg geometry: centred on the canvas (shadow excluded so the egg itself is centred).
+          H = S * 0.82; W = H / 1.24
+          lw = W * 0.022
+          top = C - H / 2
 
-          # ground shadow
-          sh = Image.new("L", (S, S), 0)
-          ImageDraw.Draw(sh).ellipse([S/2 - w*0.4, eggTop + eggH*1.02 - w*0.06, S/2 + w*0.4, eggTop + eggH*1.02 + w*0.06], fill=90)
-          img.paste((60, 30, 70), (0, 0), sh.filter(ImageFilter.GaussianBlur(w * 0.025)))
+          # soft drop shadow
+          sh = mask(lambda g: g.polygon(egg(C, C + H*0.025, W, H), fill=110))
+          img.paste((120, 70, 120), (0, 0), sh.filter(ImageFilter.GaussianBlur(W * 0.04)))
 
-          # ball-chain loop
-          r = w * 0.075
-          cx, cy = S / 2, top + r
-          d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=INK, width=int(lw * 2.6))
-          d.ellipse([cx - r + lw*0.7, cy - r + lw*0.7, cx + r - lw*0.7, cy + r - lw*0.7], outline=(235, 235, 235), width=int(lw * 1.2))
-          cap = [cx - w*0.08, top + loopH - w*0.05 - w*0.045, cx + w*0.08, top + loopH - w*0.05 + w*0.045]
-          d.rounded_rectangle(cap, radius=w*0.045, fill=BOT, outline=INK, width=int(lw))
-
-          # egg: darker base, gradient body shifted up-left (cel shading), outline
-          base = egg(left, eggTop, w, eggH)
-          d.polygon(base, fill=lerp(BOT, (0, 0, 0), 0.14))
-          m = Image.new("L", (S, S), 0)
-          ImageDraw.Draw(m).polygon(egg(left + w*0.025 - w*0.022, eggTop + eggH*0.025 - eggH*0.022, w*0.95, eggH*0.95), fill=255)
-          img.paste(vgrad((S, S), TOP, BOT, int(eggTop), int(eggTop + eggH)), (0, 0), m)
+          # shell: gradient, darker rim lower right, outline
+          shell = egg(C, C, W, H)
+          img.paste(vgrad(SHELL_T, SHELL_B, top, top + H), (0, 0), mask(lambda g: g.polygon(shell, fill=255)))
+          inner = mask(lambda g: g.polygon(egg(C - W*0.03, C - H*0.03, W*0.94, H*0.94), fill=255))
+          outer = mask(lambda g: g.polygon(shell, fill=255))
+          rim = ImageChops.subtract(outer, inner).filter(ImageFilter.GaussianBlur(W * 0.012))
+          img.paste(lerp(SHELL_B, INK, 0.25), (0, 0), ImageChops.multiply(rim, outer))
           d = ImageDraw.Draw(img)
-          d.line(base + [base[0]], fill=INK, width=int(lw), joint="curve")
+          d.line(shell + [shell[0]], fill=INK, width=int(lw), joint="curve")
 
-          # front-plate rim (dotted)
-          rim = egg(left + w*0.06, eggTop + eggH*0.06, w*0.88, eggH*0.88)
-          for i, p in enumerate(rim[::4]):
-              if i % 2 == 0:
-                  d.ellipse([p[0] - lw*0.4, p[1] - lw*0.4, p[0] + lw*0.4, p[1] + lw*0.4], fill=(255, 240, 248))
-
-          # gloss
-          gl = Image.new("L", (S, S), 0)
+          # gloss on the upper left of the shell
+          gl = Image.new("L", (S, S), 0); gd = ImageDraw.Draw(gl)
+          gx, gy = C - W*0.27, top + H*0.17
+          gd.ellipse([gx - W*0.12, gy - W*0.045, gx + W*0.12, gy + W*0.045], fill=200)
+          gl = gl.rotate(38, center=(gx, gy), resample=Image.BICUBIC)
           gd = ImageDraw.Draw(gl)
-          gx, gy = S/2 - w*0.27, eggTop + eggH/2 - eggH*0.36
-          gd.ellipse([gx - w*0.11, gy - eggH*0.0375, gx + w*0.11, gy + eggH*0.0375], fill=190)
-          gl = gl.rotate(28, center=(gx, gy))
-          gd = ImageDraw.Draw(gl)
-          dx, dy = S/2 - w*0.13, eggTop + eggH/2 - eggH*0.41
-          gd.ellipse([dx - w*0.0225, dy - w*0.0225, dx + w*0.0225, dy + w*0.0225], fill=220)
-          img.paste((255, 255, 255), (0, 0), gl)
+          gd.ellipse([C - W*0.10 - W*0.025, top + H*0.085 - W*0.025, C - W*0.10 + W*0.025, top + H*0.085 + W*0.025], fill=220)
+          img.paste((255, 255, 255), (0, 0), gl.filter(ImageFilter.GaussianBlur(W * 0.004)))
           d = ImageDraw.Draw(img)
 
-          def sparkle(cx, cy, a, b, fill):
-              k = 0.18; pts = []
-              for (sx, sy), (ex, ey), (qx, qy) in [((0, -b), (a, 0), (a*k, -b*k)), ((a, 0), (0, b), (a*k, b*k)),
-                                                   ((0, b), (-a, 0), (-a*k, b*k)), ((-a, 0), (0, -b), (-a*k, -b*k))]:
-                  for i in range(21):
-                      t = i / 20; u = 1 - t
-                      pts.append((cx + u*u*sx + 2*u*t*qx + t*t*ex, cy + u*u*sy + 2*u*t*qy + t*t*ey))
-              d.polygon(pts, fill=fill); d.line(pts + [pts[0]], fill=INK, width=max(2, int(lw*0.45)))
-
-          ec = eggTop + eggH / 2
-          sparkle(S/2 + w*0.36, ec - eggH*0.24, w*0.04, w*0.05, (255, 255, 255))
-          sparkle(S/2 + w*0.30, ec - eggH*0.33, w*0.025, w*0.0325, BTN)
-          # heart
-          hx, hy, hs = S/2 - w*0.38, ec + eggH*0.12, w*0.028
-          heart = [(hx + hs*16*math.sin(t)**3/16, hy - hs*(13*math.cos(t) - 5*math.cos(2*t) - 2*math.cos(3*t) - math.cos(4*t))/16) for t in [i/60*2*math.pi for i in range(61)]]
-          d.polygon([(x + lw*0.35, y + lw*0.35) for x, y in heart], fill=INK)
-          d.polygon(heart, fill=BTN)
-          # speaker holes
-          for i in (-1, 0, 1):
-              x, y, rr = S/2 + i * w*0.044, ec + eggH*0.445, w*0.011
-              d.ellipse([x - rr, y - rr, x + rr, y + rr], fill=lerp(BOT, INK, 0.55))
-
-          # screen bezel + screen
-          scr = w * 0.55; bez_ = scr * 1.15
-          sy = top + loopH + eggH * 0.415
-          bz = [S/2 - bez_/2, sy - bez_/2, S/2 + bez_/2, sy + bez_/2]
-          bm = Image.new("L", (S, S), 0); ImageDraw.Draw(bm).rounded_rectangle(bz, radius=bez_*0.26, fill=255)
-          img.paste(vgrad((S, S), (255, 250, 252), TOP, int(bz[1]), int(bz[3])), (0, 0), bm)
+          # screen frame: the ON's big, thick, coloured surround
+          sy = top + H * 0.43                       # screen centre
+          F = W * 0.74                              # frame outer size
+          fr = [C - F/2, sy - F/2, C + F/2, sy + F/2]
+          d.rounded_rectangle([fr[0], fr[1] + lw*0.9, fr[2], fr[3] + lw*0.9], radius=F*0.30, fill=lerp(FRAME_B, INK, 0.45))
+          img.paste(vgrad(FRAME_T, FRAME_B, fr[1], fr[3]), (0, 0), mask(lambda g: g.rounded_rectangle(fr, radius=F*0.30, fill=255)))
           d = ImageDraw.Draw(img)
-          d.rounded_rectangle(bz, radius=bez_*0.26, outline=INK, width=int(lw))
-          fr = scr * 1.08
-          d.rounded_rectangle([S/2 - fr/2, sy - fr/2, S/2 + fr/2, sy + fr/2], radius=scr*0.12, fill=(31, 26, 46), outline=INK, width=int(lw*0.8))
-          lcd = [S/2 - scr/2, sy - scr/2, S/2 + scr/2, sy + scr/2]
-          d.rounded_rectangle(lcd, radius=scr*0.05, fill=(255, 246, 214))
+          d.rounded_rectangle(fr, radius=F*0.30, outline=INK, width=int(lw))
+          # little hearts on the frame corners
+          def heart(cx, cy, s, fill):
+              pts = [(cx + s*math.sin(t)**3, cy - s*(13*math.cos(t) - 5*math.cos(2*t) - 2*math.cos(3*t) - math.cos(4*t))/16)
+                     for t in [i/90*2*math.pi for i in range(91)]]
+              d.polygon(pts, fill=fill); d.line(pts + [pts[0]], fill=INK, width=max(2, int(lw*0.5)))
+          heart(C, fr[1] + F*0.075, F*0.04, (255, 255, 255))
 
-          # pixel scene: a cute original pet in a sunny room
-          P = scr / 16
-          def px(c, r, col): d.rectangle([lcd[0] + c*P, lcd[1] + r*P, lcd[0] + (c+1)*P - 1, lcd[1] + (r+1)*P - 1], fill=col)
-          for r in range(12, 16):
-              for c in range(16): px(c, r, (186, 232, 168) if (r + c) % 2 else (170, 222, 152))
-          for r in range(0, 12):
-              for c in range(16):
-                  if (r // 3 + c // 3) % 2 == 0: px(c, r, (255, 236, 196))
-          pet = ["....XXXXXX......",
-                 "..XXWWWWWWXX....",
-                 ".XWWWWWWWWWWX...",
-                 "XWWKWWWWWKWWWX..",
-                 "XWWKWWWWWKWWWX..",
-                 "XWPPWWKWWWPPWX..",
-                 "XWWWWWWWWWWWWX..",
-                 ".XWWWWWWWWWWX...",
-                 "..XXWXXXXWXX....",
-                 "....X....X......"]
-          cols = {"X": (52, 40, 80), "W": (255, 255, 255), "K": (52, 40, 80), "P": (255, 150, 180)}
+          # LCD
+          L = F * 0.70
+          lcd = [C - L/2, sy - L/2, C + L/2, sy + L/2]
+          d.rounded_rectangle([lcd[0] - lw*0.6, lcd[1] - lw*0.6, lcd[2] + lw*0.6, lcd[3] + lw*0.6], radius=L*0.10, fill=INK)
+          scene = Image.new("RGB", (16, 16))
+          sd = ImageDraw.Draw(scene)
+          for yy in range(16):
+              sd.line([(0, yy), (15, yy)], fill=lerp((150, 214, 255), (215, 240, 255), yy / 10) if yy < 11 else ((150, 214, 110) if yy % 2 else (132, 200, 96)))
+          for x, y in [(2, 2), (3, 2), (4, 2), (3, 1), (11, 3), (12, 3), (13, 3), (12, 2)]:   # clouds
+              sd.point((x, y), fill=(255, 255, 255))
+          pet = ["....XXXXXX....",
+                 "..XXWWWWWWXX..",
+                 ".XWWWWWWWWWWX.",
+                 "XWWWKWWWWKWWWX",
+                 "XWWWKWWWWKWWWX",
+                 "XWPPWWWWWWPPWX",
+                 "XWWWWWKKWWWWWX",
+                 ".XWWWWWWWWWWX.",
+                 "..XXWXXXXWXX..",
+                 "....X....X...."]
+          cols = {"X": (70, 44, 96), "W": (255, 250, 245), "K": (70, 44, 96), "P": (255, 140, 175)}
           for r, row in enumerate(pet):
               for c, ch in enumerate(row):
-                  if ch in cols: px(c + 2, r + 4, cols[ch])
-          for c, r in [(13, 2), (14, 1), (14, 3), (15, 2)]: px(c, r, (255, 200, 60))   # sparkle
-          px(14, 2, (255, 240, 150))
-          d.rounded_rectangle(lcd, radius=scr*0.05, outline=(31, 26, 46), width=int(lw*0.6))
+                  if ch in cols: sd.point((c + 1, r + 5), fill=cols[ch])
+          lcd_img = scene.resize((int(L), int(L)), Image.NEAREST)
+          lm = Image.new("L", lcd_img.size, 0); ImageDraw.Draw(lm).rounded_rectangle([0, 0, lcd_img.size[0]-1, lcd_img.size[1]-1], radius=L*0.09, fill=255)
+          img.paste(lcd_img, (int(lcd[0]), int(lcd[1])), lm)
+          d = ImageDraw.Draw(img)
+          # screen glare
+          gl2 = mask(lambda g: g.polygon([(lcd[0], lcd[1] + L*0.35), (lcd[0] + L*0.35, lcd[1]), (lcd[0] + L*0.55, lcd[1]), (lcd[0], lcd[1] + L*0.55)], fill=60))
+          img.paste((255, 255, 255), (0, 0), ImageChops.multiply(gl2, mask(lambda g: g.rounded_rectangle(lcd, radius=L*0.09, fill=255))))
+          d = ImageDraw.Draw(img)
 
-          # buttons (A, B lower, C)
-          bd = w * 0.135
-          by = top + loopH + eggH * 0.785
-          for i, off in ((-1, 0), (0, 0.32), (1, 0)):
-              x = S/2 + i * (bd + w*0.085); y = by + off * bd * 0.8
-              d.ellipse([x - bd/2, y - bd/2 + bd*0.07, x + bd/2, y + bd/2 + bd*0.07], fill=lerp(BOT, INK, 0.5))
-              d.ellipse([x - bd/2, y - bd/2, x + bd/2, y + bd/2], fill=BTN, outline=INK, width=int(lw))
-              d.ellipse([x - bd*0.28, y - bd*0.30, x - bd*0.02, y - bd*0.08], fill=(255, 255, 240))
+          # three buttons in a smile: A, B (lower), C
+          bd = W * 0.145
+          by = top + H * 0.815
+          for i, drop in ((-1, 0.0), (0, 0.30), (1, 0.0)):
+              x = C + i * W * 0.24
+              y = by + drop * bd * 0.55 - (0 if i == 0 else bd * 0.05)
+              d.ellipse([x - bd/2, y - bd/2 + bd*0.10, x + bd/2, y + bd/2 + bd*0.10], fill=lerp(SHELL_B, INK, 0.55))
+              bm = mask(lambda g: g.ellipse([x - bd/2, y - bd/2, x + bd/2, y + bd/2], fill=255))
+              img.paste(vgrad(BTN_T, BTN_B, y - bd/2, y + bd/2), (0, 0), bm)
+              d = ImageDraw.Draw(img)
+              d.ellipse([x - bd/2, y - bd/2, x + bd/2, y + bd/2], outline=INK, width=int(lw))
+              d.ellipse([x - bd*0.27, y - bd*0.30, x - bd*0.03, y - bd*0.10], fill=(255, 255, 245))
 
           img = img.resize((SIZE, SIZE), Image.LANCZOS)
           img.save(OUT)
@@ -1131,7 +2144,7 @@ jobs:
                   OTHER_LDFLAGS: -ltamaios
                   ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
                   TARGETED_DEVICE_FAMILY: "1"
-                  MARKETING_VERSION: "1.2"
+                  MARKETING_VERSION: "1.4"
                   CURRENT_PROJECT_VERSION: "1"
                   CODE_SIGNING_ALLOWED: NO
                   CODE_SIGNING_REQUIRED: NO
@@ -1228,6 +2241,27 @@ jobs:
           void tg_script_press(Emu *e, int32_t key, double delay);
           void tg_read_cstr(Emu *e, uint32_t addr, uint8_t **out, size_t *out_len);
           void tg_set_wall_clock(Emu *e, double rtc_now);
+
+          /* Bluetooth module: the built-in phone app talks through these */
+          void tg_radio_enable(Emu *e, int32_t on);
+          void tg_radio_connect(Emu *e, int32_t on);
+          int32_t tg_radio_ready(Emu *e);
+          int32_t tg_radio_write(Emu *e, const uint8_t *d, size_t n);
+          int32_t tg_radio_read(Emu *e, uint8_t **out, size_t *out_len);
+          void tg_radio_trace(Emu *e, uint8_t **out, size_t *out_len);
+
+          /* Tama Town: marriage */
+          int32_t tg_mm_load_zip(const uint8_t *p, size_t n);
+          size_t tg_mm_ids(uint16_t *out, size_t max);
+          int32_t tg_mm_compose(uint16_t b, int32_t bp, uint16_t m, uint16_t a, int32_t ap, uint16_t k, int32_t kp, uint32_t *out);
+          int32_t tg_mm_palette(int32_t pal, uint32_t *out);
+          void tg_mm_packet(uint8_t op, uint8_t cmd, uint8_t **out, size_t *out_len);
+          int32_t tg_mm_visit_info(const uint8_t *p, size_t n);
+          void tg_mm_visit_name(const uint8_t *p, size_t n, uint8_t **out, size_t *out_len);
+          int32_t tg_mm_marriage(const uint8_t *visit, size_t visit_len,
+                                 uint16_t b, int32_t bp, uint16_t m, uint16_t a, int32_t ap, uint16_t k, int32_t kp,
+                                 uint8_t baby_sex, uint8_t lang, uint8_t kind, const char *name, uint64_t seed,
+                                 uint8_t **out, size_t *out_len);
 
           #endif
           TAMA_EOF
@@ -1488,7 +2522,7 @@ jobs:
                               Text("Tamagotchi Meets: Fairy, Magical, Pastel, Sanrio, Sweets, Fantasy (JP)")
                           }
                           Section("Not available") {
-                              Text("Bluetooth (the phone app, downloads, camera) and infrared (playdates, gifts, marriage) can't be used. If you choose them, the toy is put back to just before.")
+                              Text("Connection › App works with TamaiOS's built-in Tama App: gifts, Gotchi Points, and TamaiOS Town for dating, marriage and gene mixing. Infrared (Connection › Tamagotchi: playdates, gifts, marriage with another toy) can't be used — if you choose it, the toy is put back to just before.")
                           }
                       }
                       .navigationTitle("Getting your ROM")
@@ -1986,6 +3020,31 @@ jobs:
                           return a.isEmpty ? "(autorun empty)" : a.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
                       }
 
+                  case "radio":
+                      let sub = args.first ?? "status"
+                      if sub == "log" {
+                          emu.withCore { tg_radio_enable($0, 2) }
+                          return (emu.coreText { tg_radio_trace($0, $1, $2) } ?? noToy) + "\n(logging on)"
+                      }
+                      if sub == "off" { emu.withCore { tg_radio_enable($0, 0) }; return "Bluetooth module removed (app connections blocked)" }
+                      if sub == "on" { emu.withCore { tg_radio_enable($0, 1) }; return "Bluetooth module on" }
+                      let r = emu.withCore { tg_radio_ready($0) } ?? 0
+                      return "waiting for app: \(r == 1)  (radio log | on | off)"
+
+                  case "town":
+                      guard let t = emu.toy else { return noToy }
+                      let town = Town.shared
+                      var x = town.state(t)
+                      switch args.first ?? "" {
+                      case "home": x.away = false; x.pending = .none; x.suitor = nil
+                      case "away": x.away = true; x.pending = .none
+                      case "reset": x = Town.State()
+                      default: break
+                      }
+                      DispatchQueue.main.async { town.save(x, t) }
+                      let v = town.visitData(t)
+                      return "pack: \(town.pack)  characters: \(town.ids.count)\naway: \(x.away)  pending: \(x.pending.rawValue)  partner: \(x.suitor?.name ?? "-")\nvisit data: \(v.count) bytes  weddings: \(x.married.count)"
+
                   case "beep":
                       emu.audio.beep()
                       return "beep (audio running: \(emu.audio.isRunning), queued: \(emu.audio.queued))"
@@ -2120,7 +3179,8 @@ jobs:
               MEMORY
                 peek <hexaddr> [len]   poke <hexaddr> <hexbytes>   str <hexaddr>
               OTHER
-                beep  audio  notify  redraw  clear
+                town [home|away|reset]  Town state (away/pending)
+                radio [log|on|off]   beep  audio  notify  redraw  clear
               """
           }
           TAMA_EOF
@@ -2178,6 +3238,8 @@ jobs:
               @Published var loading = false
               @Published var toy: Toy?
               @Published var calling = false
+              /// The toy is on "WAITING FOR APP CONNECT" (Connection › App).
+              @Published var appWaiting = false
 
               let audio = AudioOut()
               private let lock = NSLock()
@@ -2358,6 +3420,8 @@ jobs:
                   var needFrame = true
                   var lastPublish = 0.0
                   var asleep = false
+                  var nextRadio = last
+                  var radioReady = false
                   while !stopFlag {
                       if paused {
                           _ = wake.wait(timeout: .now() + 0.1)
@@ -2395,6 +3459,12 @@ jobs:
                       flags = tg_take_flags(h)
                       n = tg_take_audio(h, audioBuf, 44100)
                       asleep = tg_is_asleep(h) != 0
+                      var radioChanged = false
+                      if now >= nextRadio {
+                          nextRadio = now + 0.25
+                          let r = tg_radio_ready(h) != 0
+                          if r != radioReady { radioReady = r; radioChanged = true }
+                      }
                       if flags & 1 != 0 { needFrame = true }
                       if needFrame && visible && now - lastPublish >= 1.0 / lp.fps {
                           isDark = pixels.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) } != 0
@@ -2414,6 +3484,11 @@ jobs:
 
                       audio.push(audioBuf, n)
                       if published { publish(pixels, dark: isDark) }
+                      if radioChanged {
+                          let r = radioReady
+                          note(r ? "toy is waiting for the app" : "toy stopped waiting for the app")
+                          DispatchQueue.main.async { self.appWaiting = r }
+                      }
                       if flags & 2 != 0 { careCall() }
                       if flags & 16 != 0 {
                           note("clock synced to iPhone time")
@@ -2858,6 +3933,14 @@ jobs:
                               }
                           }
 
+                          Section {
+                              NavigationLink { TamaAppView().environmentObject(emu) } label: {
+                                  Label("Tama App — send gifts", systemImage: "gift.fill")
+                              }
+                          } footer: {
+                              Text("Works like the old Tamagotchi app: on the toy choose Connection › App › Download and it opens by itself.")
+                          }
+
                           Section("Help") {
                               NavigationLink { DumpHelpContent() } label: { Label("Getting your ROM", systemImage: "questionmark.circle") }
                               NavigationLink { ConsoleView() } label: { Label("Console", systemImage: "terminal.fill") }
@@ -3256,6 +4339,1151 @@ jobs:
               }
           }
           TAMA_EOF
+          cat > ios/TamaiOS/TamaAppView.swift <<'TAMA_EOF'
+          import SwiftUI
+
+          /// TamaiOS's built-in replacement for the Tamagotchi app: the toy connects to
+          /// it through its own Connection › App menu, like the real one.
+          struct TamaAppView: View {
+              @EnvironmentObject var emu: Emulator
+              @Environment(\.dismiss) private var dismiss
+
+              @State private var items: [WebMeets.Item] = []
+              @State private var loadError: String?
+              @State private var category = "food"
+              @State private var search = ""
+              @State private var points = 0
+              @State private var picked: WebMeets.Item?
+              @State private var sending = false
+              @State private var progress = ""
+              @State private var result: String?
+              @State private var resultOK = false
+              @State private var tab = 0
+
+              private var shown: [WebMeets.Item] {
+                  let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+                  return items.filter { $0.item_type == category && (q.isEmpty || $0.name.lowercased().contains(q)) }
+              }
+
+              var body: some View {
+                  NavigationStack {
+                      ScrollView {
+                          VStack(alignment: .leading, spacing: 16) {
+                              Picker("", selection: $tab) {
+                                  Text("💕 Town").tag(0)
+                                  Text("🎁 Gifts").tag(1)
+                              }
+                              .pickerStyle(.segmented)
+                              if tab == 0 {
+                                  TownView()
+                              } else {
+                                  gifts
+                              }
+                          }
+                          .padding(16)
+                      }
+                      .searchable(text: $search, prompt: "Search items")
+                      .navigationTitle("Tama App")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                      .task { await load() }
+                      .overlay { if sending { BusyOverlay(text: progress) } }
+                      .confirmationDialog(picked.map { "Send \($0.name)?" } ?? "", isPresented: Binding(get: { picked != nil }, set: { if !$0 { picked = nil } }), titleVisibility: .visible) {
+                          Button(points > 0 ? "Send with \(points) Gotchi Points" : "Send gift") { if let p = picked { send(p) } }
+                          Button("Cancel", role: .cancel) { picked = nil }
+                      }
+                      .alert(resultOK ? "Delivered! 🎁" : "Not delivered", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
+                          Button("OK") { if resultOK { dismiss() } }
+                      } message: { Text(result ?? "") }
+                  }
+              }
+
+              @ViewBuilder
+              private var gifts: some View {
+                              statusCard
+                              pointsCard
+                              Picker("Kind", selection: $category) {
+                                  ForEach(WebMeets.categories, id: \.key) { c in Text(c.title).tag(c.key) }
+                              }
+                              .pickerStyle(.segmented)
+                              grid
+                              Text("Gifts and item catalog by WebMeets (tamagotchicenter.com) — thank you!")
+                                  .font(.caption).foregroundStyle(.secondary)
+                                  .frame(maxWidth: .infinity)
+              }
+
+              private var statusCard: some View {
+                  HStack(spacing: 12) {
+                      Image(systemName: emu.appWaiting ? "dot.radiowaves.left.and.right" : "hand.point.up.left.fill")
+                          .font(.title2)
+                          .foregroundStyle(emu.appWaiting ? .green : .orange)
+                          .frame(width: 36)
+                      VStack(alignment: .leading, spacing: 2) {
+                          Text(emu.appWaiting ? "\(emu.toy?.name ?? "Your Tama") is waiting for the app" : "Get your Tama ready")
+                              .font(.system(.headline, design: .rounded))
+                          Text(emu.appWaiting ? "Pick a gift below to send it (choose Connection › App › Download on the toy)." : "On the toy choose Connection › App › Download. This screen sees it straight away.")
+                              .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
+                      }
+                  }
+                  .padding(14)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(.secondarySystemBackground)))
+              }
+
+              private var pointsCard: some View {
+                  HStack {
+                      Image(systemName: "bag.fill").foregroundStyle(.yellow)
+                      Text("Add Gotchi Points").font(.system(.subheadline, design: .rounded))
+                      Spacer()
+                      Text("\(points)").font(.system(.body, design: .rounded).monospacedDigit().weight(.semibold))
+                      Stepper("", value: $points, in: 0...99999, step: 500).labelsHidden()
+                  }
+                  .padding(.horizontal, 14).padding(.vertical, 8)
+                  .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(.secondarySystemBackground)))
+              }
+
+              @ViewBuilder
+              private var grid: some View {
+                  if let e = loadError, items.isEmpty {
+                      VStack(spacing: 10) {
+                          Text("Couldn't load the gift catalog").font(.headline)
+                          Text(e).font(.caption).foregroundStyle(.secondary)
+                          Button("Try again") { Task { await load() } }
+                      }
+                      .frame(maxWidth: .infinity).padding(30)
+                  } else if items.isEmpty {
+                      ProgressView("Loading gifts…").frame(maxWidth: .infinity).padding(40)
+                  } else {
+                      LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 12)], spacing: 12) {
+                          ForEach(shown) { it in
+                              Button { picked = it } label: { cell(it) }
+                                  .buttonStyle(.plain)
+                          }
+                      }
+                      if shown.isEmpty {
+                          Text("Nothing here").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding()
+                      }
+                  }
+              }
+
+              private func cell(_ it: WebMeets.Item) -> some View {
+                  VStack(spacing: 6) {
+                      AsyncImage(url: it.imageURL) { img in
+                          img.interpolation(.none).resizable().scaledToFit()
+                      } placeholder: {
+                          Color(.tertiarySystemFill)
+                      }
+                      .frame(width: it.item_type == "wallpaper" ? 80 : 48, height: it.item_type == "wallpaper" ? 80 : 48)
+                      .clipShape(RoundedRectangle(cornerRadius: 6))
+                      Text(it.name).font(.system(.caption, design: .rounded).weight(.semibold))
+                          .lineLimit(2).multilineTextAlignment(.center)
+                      if let p = it.item_price {
+                          Text("\(p) G").font(.caption2).foregroundStyle(.secondary)
+                      }
+                  }
+                  .padding(8)
+                  .frame(maxWidth: .infinity, minHeight: 120)
+                  .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(.secondarySystemBackground)))
+              }
+
+              private func load() async {
+                  loadError = nil
+                  do { items = try await WebMeets.items() } catch { loadError = error.localizedDescription }
+              }
+
+              private func send(_ it: WebMeets.Item) {
+                  picked = nil
+                  sending = true
+                  progress = "Getting the gift…"
+                  let pts = points
+                  Task {
+                      do {
+                          async let start = WebMeets.startPacket()
+                          let pkt = try await WebMeets.itemPacket(it, points: pts)
+                          let st = await start
+                          let link = TamaLink(emu: emu)
+                          try await Task.detached(priority: .userInitiated) {
+                              try link.sendGift(start: st, item: pkt) { msg in
+                                  DispatchQueue.main.async { progress = msg }
+                              }
+                          }.value
+                          emu.note("gift sent: \(it.file_name) points=\(pts)")
+                          sending = false
+                          resultOK = true
+                          result = "\(emu.toy?.name ?? "Your Tama") got \(it.name)\(pts > 0 ? " and \(pts) Gotchi Points" : ""). Watch the toy!"
+                      } catch {
+                          emu.note("gift failed: \(error.localizedDescription)")
+                          sending = false
+                          resultOK = false
+                          result = error.localizedDescription
+                      }
+                  }
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/TamaLink.swift <<'TAMA_EOF'
+          import Foundation
+
+          /// The built-in "phone app": talks to the toy's (emulated) Bluetooth module
+          /// the way the official Tamagotchi app did. Transport as used by WebMeets:
+          /// a packet goes as F0 8D, 20-byte writes 15 ms apart, F0 CD. The toy answers
+          /// F0 0C <received u16> (0x0200 = finished); the app then asks for data with
+          /// F0 8E 0D and gets F0 0D <len u16>, the data, F0 4D.
+          final class TamaLink {
+              enum LinkError: LocalizedError {
+                  case notRunning, noAnswer, writeFailed
+                  var errorDescription: String? {
+                      switch self {
+                      case .notRunning: return "No toy is running."
+                      case .noAnswer: return "Your Tama didn't answer. On the toy, choose Connection › App › Download, then try again."
+                      case .writeFailed: return "Couldn't send to your Tama. Try again."
+                      }
+                  }
+              }
+
+              let emu: Emulator
+              init(emu: Emulator) { self.emu = emu }
+
+              var ready: Bool { (emu.withCore { tg_radio_ready($0) } ?? 0) != 0 }
+
+              func connect(_ on: Bool) { emu.withCore { tg_radio_connect($0, on ? 1 : 0) } }
+
+              private func write(_ d: [UInt8]) throws {
+                  for _ in 0..<400 {
+                      guard let r = emu.withCore({ h in d.withUnsafeBufferPointer { tg_radio_write(h, $0.baseAddress, $0.count) } }) else {
+                          throw LinkError.notRunning
+                      }
+                      if r == 1 { return }
+                      Thread.sleep(forTimeInterval: 0.005)
+                  }
+                  throw LinkError.writeFailed
+              }
+
+              private func read() -> [UInt8]? {
+                  emu.withCore { h -> [UInt8]? in
+                      var p: UnsafeMutablePointer<UInt8>? = nil
+                      var n = 0
+                      guard tg_radio_read(h, &p, &n) == 1, let p else { return nil }
+                      let a = Array(UnsafeBufferPointer(start: p, count: n))
+                      tg_free(p, n)
+                      return a
+                  } ?? nil
+              }
+
+              /// Throw away anything the toy sent that nobody asked for.
+              func drain(_ seconds: Double) {
+                  let end = Date().addingTimeInterval(seconds)
+                  while Date() < end {
+                      if read() == nil { Thread.sleep(forTimeInterval: 0.01) }
+                  }
+              }
+
+              /// Send one packet.
+              func send(_ pkt: [UInt8]) throws {
+                  Thread.sleep(forTimeInterval: 0.5)
+                  try write([0xF0, 0x8D])
+                  Thread.sleep(forTimeInterval: 0.06)
+                  var i = 0
+                  while i < pkt.count {
+                      let j = min(i + 20, pkt.count)
+                      try write(Array(pkt[i..<j]))
+                      Thread.sleep(forTimeInterval: 0.015)
+                      i = j
+                  }
+                  Thread.sleep(forTimeInterval: 0.06)
+                  try write([0xF0, 0xCD])
+              }
+
+              /// Wait for the toy's answer to a packet; returns the data it sent back.
+              func answer(firstTimeout: Double = 4, idleTimeout: Double = 4) throws -> [UInt8] {
+                  var gotAny = false
+                  var buffer: [UInt8] = []
+                  var expected = -1
+                  var acked = false
+                  let start = Date()
+                  var last = Date()
+                  while true {
+                      if let n = read() {
+                          gotAny = true
+                          last = Date()
+                          let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
+                          if expected >= 0 && buffer.count < expected && tag != 0x4DF0 {
+                              buffer += n                                  // data chunk
+                          } else if tag == 0x0CF0 {                        // received / finished
+                              acked = true
+                              let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
+                              if status == 0x0200 { return buffer }
+                              try write([0xF0, 0x8E, 0x0D])                // "send me your data"
+                          } else if tag == 0x0DF0 {                        // data follows
+                              expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
+                              buffer.removeAll(keepingCapacity: true)
+                          } else if tag == 0x4DF0 || tag == 0x5CF0 {      // data done
+                              return buffer
+                          } else if expected >= 0 {
+                              buffer += n
+                          }
+                          continue
+                      }
+                      let now = Date()
+                      if !gotAny && now.timeIntervalSince(start) > firstTimeout { throw LinkError.noAnswer }
+                      if gotAny && now.timeIntervalSince(last) > idleTimeout {
+                          if acked { return buffer }
+                          throw LinkError.noAnswer
+                      }
+                      Thread.sleep(forTimeInterval: 0.01)
+                  }
+              }
+
+              /// The full gift flow: start packet, the toy's profile, then the item.
+              /// Returns the toy's 512-byte profile.
+              @discardableResult
+              func sendGift(start: [UInt8], item: [UInt8], progress: (String) -> Void) throws -> [UInt8] {
+                  guard emu.isLoaded else { throw LinkError.notRunning }
+                  drain(0.05)
+                  connect(true)
+                  defer {
+                      drain(0.3)
+                      connect(false)
+                  }
+                  progress("Saying hello…")
+                  try send(start)
+                  let profile = try answer()
+                  drain(0.3)
+                  progress("Sending your gift…")
+                  try send(item)
+                  _ = try answer(firstTimeout: 6, idleTimeout: 3)
+                  return profile
+              }
+          }
+
+          extension TamaLink {
+              static func packet(op: UInt8, cmd: UInt8) -> [UInt8] {
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  tg_mm_packet(op, cmd, &p, &n)
+                  guard let p else { return [] }
+                  let a = Array(UnsafeBufferPointer(start: p, count: n))
+                  tg_free(p, n)
+                  return a
+              }
+
+              /// Hello (op, cmd 0), then the op's own packet; returns what the toy sends back.
+              private func exchange(op: UInt8, then second: [UInt8]?, progress: (String) -> Void, firstTimeout: Double = 4) throws -> [UInt8] {
+                  guard emu.isLoaded else { throw LinkError.notRunning }
+                  drain(0.05)
+                  connect(true)
+                  defer {
+                      drain(0.3)
+                      connect(false)
+                  }
+                  progress("Saying hello…")
+                  try send(TamaLink.packet(op: op, cmd: 0))
+                  _ = try answer(firstTimeout: firstTimeout)
+                  drain(0.3)
+                  guard let second else { return [] }
+                  try send(second)
+                  Thread.sleep(forTimeInterval: 0.05)
+                  return try answer(firstTimeout: 8, idleTimeout: 4)
+              }
+
+              /// The toy visits the app (Connection › App › Visit). Returns its visit data.
+              func visit(progress: (String) -> Void) throws -> [UInt8] {
+                  progress("Welcoming your Tama to town…")
+                  let d = try exchange(op: 0x14, then: TamaLink.packet(op: 0x14, cmd: 0x34), progress: progress)
+                  guard d.count >= 512 else { throw LinkError.noAnswer }
+                  return d
+              }
+
+              /// Send the toy home without a wedding (GO BACK? › YES on the toy).
+              func back(progress: (String) -> Void) throws {
+                  progress("Walking your Tama home…")
+                  _ = try exchange(op: 0x15, then: TamaLink.packet(op: 0x15, cmd: 0x36), progress: progress)
+              }
+
+              /// The wedding (GO BACK? › YES on the toy): the toy comes home married.
+              func marry(_ packet: [UInt8], progress: (String) -> Void) throws {
+                  progress("The wedding is starting… 💍")
+                  _ = try exchange(op: 0x16, then: packet, progress: progress)
+              }
+          }
+
+          /// WebMeets (tamagotchicenter.com): free item catalog and gift packets for the
+          /// Meets/On, made by the Tamagotchi Center community.
+          enum WebMeets {
+              static let base = "https://tamagotchicenter.com/api/webmeets"
+
+              struct Item: Codable, Identifiable, Hashable {
+                  let lang: String?
+                  let lang_dir: String
+                  let file_name: String
+                  let item_name: String
+                  let item_price: Int?
+                  let item_type: String
+                  let food_type: String?
+                  var id: String { lang_dir + "/" + file_name }
+                  var name: String {
+                      item_name.replacingOccurrences(of: "\u{3000}", with: " ").trimmingCharacters(in: .whitespaces)
+                  }
+                  var imageURL: URL? {
+                      let f = file_name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file_name
+                      return URL(string: "\(WebMeets.base)/resources/item-image/\(lang_dir)/\(f)")
+                  }
+              }
+
+              /// The hello packet every transfer starts with (as served by WebMeets).
+              static let fallbackStart: [UInt8] = {
+                  var p = [UInt8](repeating: 0, count: 258)
+                  for (i, b) in [(0, 84), (1, 65), (2, 77), (3, 65), (4, 71), (5, 79), (72, 2), (73, 1), (76, 23),
+                                 (82, 124), (83, 104), (84, 72), (85, 151), (86, 117), (87, 166), (88, 78), (89, 153),
+                                 (252, 16), (254, 1), (255, 4), (256, 173), (257, 5)] { p[i] = UInt8(b) }
+                  return p
+              }()
+
+              static func get(_ path: String, query: [URLQueryItem] = []) async throws -> Data {
+                  var c = URLComponents(string: base + path)!
+                  if !query.isEmpty { c.queryItems = query }
+                  var req = URLRequest(url: c.url!)
+                  req.timeoutInterval = 20
+                  let (d, r) = try await URLSession.shared.data(for: req)
+                  guard (r as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+                  return d
+              }
+
+              static func items() async throws -> [Item] {
+                  let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("webmeets-items.json")
+                  do {
+                      let d = try await get("/v1/items")
+                      try? d.write(to: cache, options: .atomic)
+                      return try JSONDecoder().decode([Item].self, from: d)
+                  } catch {
+                      if let d = try? Data(contentsOf: cache), let v = try? JSONDecoder().decode([Item].self, from: d) { return v }
+                      throw error
+                  }
+              }
+
+              static func startPacket() async -> [UInt8] {
+                  if let d = try? await get("/v1/item-start"), d.count >= 64, d.prefix(6) == Data("TAMAGO".utf8) { return [UInt8](d) }
+                  return fallbackStart
+              }
+
+              static func itemPacket(_ item: Item, points: Int) async throws -> [UInt8] {
+                  var q = [URLQueryItem(name: "lang", value: item.lang_dir), URLQueryItem(name: "item", value: item.file_name)]
+                  if points > 0 { q.append(URLQueryItem(name: "points", value: String(min(points, 99999)))) }
+                  let d = try await get("/v1/item-message", query: q)
+                  guard d.count >= 64, d.prefix(6) == Data("TAMAGO".utf8) else { throw URLError(.cannotParseResponse) }
+                  return [UInt8](d)
+              }
+
+              static let categories: [(key: String, title: String, icon: String)] = [
+                  ("food", "Food", "fork.knife"), ("item", "Items", "gift.fill"), ("accessory", "Accessories", "sparkles"),
+                  ("wallpaper", "Wallpapers", "photo.fill"), ("stations", "Places", "map.fill"), ("games", "Games", "gamecontroller.fill"),
+              ]
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/Town.swift <<'TAMA_EOF'
+          import SwiftUI
+          import UIKit
+
+          /// A partner your Tama can marry: four parts (Body, Face, Head, Back) each
+          /// taken from a character, three of them recoloured.
+          struct Suitor: Identifiable, Codable, Equatable {
+              var id = UUID()
+              var name: String
+              var body: UInt16
+              var face: UInt16
+              var head: UInt16
+              var back: UInt16
+              var bodyColor: Int
+              var headColor: Int
+              var backColor: Int
+              var blurb: String
+
+              var isMix: Bool { !(body == face && face == head && head == back) }
+          }
+
+          /// TamaiOS Town: the dating and marriage part of the built-in Tama App.
+          final class Town: ObservableObject {
+              static let shared = Town()
+
+              enum Pack: Equatable { case missing, loading, ready(Int), failed(String) }
+              enum Pending: String, Codable { case none, marry, back }
+
+              @Published var pack: Pack = .missing
+              @Published var ids: [UInt16] = []
+              @Published var suitors: [Suitor] = []
+
+              static let packURL = URL(string: "https://tamatown.com/wp-content/uploads/2020/11/MyMeets2_3_7.zip")!
+              static var packFile: URL {
+                  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("TownPack.zip")
+              }
+
+              private var imageCache: [String: CGImage] = [:]
+
+              // MARK: character pack
+
+              func loadIfPresent() {
+                  guard case .missing = pack, FileManager.default.fileExists(atPath: Town.packFile.path) else { return }
+                  load(from: Town.packFile)
+              }
+
+              func download() {
+                  pack = .loading
+                  Task.detached(priority: .userInitiated) {
+                      do {
+                          var req = URLRequest(url: Town.packURL)
+                          req.timeoutInterval = 120
+                          let (d, r) = try await URLSession.shared.data(for: req)
+                          guard (r as? HTTPURLResponse)?.statusCode == 200, d.count > 100_000 else { throw URLError(.badServerResponse) }
+                          try d.write(to: Town.packFile, options: .atomic)
+                          await MainActor.run { self.load(from: Town.packFile) }
+                      } catch {
+                          await MainActor.run { self.pack = .failed(error.localizedDescription) }
+                      }
+                  }
+              }
+
+              func importPack(_ data: Data) {
+                  do {
+                      try data.write(to: Town.packFile, options: .atomic)
+                      load(from: Town.packFile)
+                  } catch { pack = .failed(error.localizedDescription) }
+              }
+
+              private func load(from url: URL) {
+                  pack = .loading
+                  Task.detached(priority: .userInitiated) {
+                      let d = (try? Data(contentsOf: url)) ?? Data()
+                      let n = d.withUnsafeBytes { tg_mm_load_zip($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+                      var ids = [UInt16](repeating: 0, count: 512)
+                      let c = ids.withUnsafeMutableBufferPointer { tg_mm_ids($0.baseAddress, 512) }
+                      await MainActor.run {
+                          if n > 0 {
+                              self.ids = Array(ids.prefix(c))
+                              self.imageCache = [:]
+                              self.pack = .ready(Int(n))
+                              if self.suitors.isEmpty { self.shuffle() }
+                          } else {
+                              self.pack = .failed("The character pack couldn't be read. Try downloading it again.")
+                          }
+                      }
+                  }
+              }
+
+              // MARK: pictures
+
+              func image(_ s: Suitor) -> CGImage? {
+                  image(body: s.body, bodyColor: s.bodyColor, face: s.face, head: s.head, headColor: s.headColor, back: s.back, backColor: s.backColor)
+              }
+
+              func image(body: UInt16, bodyColor: Int, face: UInt16, head: UInt16, headColor: Int, back: UInt16, backColor: Int) -> CGImage? {
+                  let key = "\(body).\(bodyColor).\(face).\(head).\(headColor).\(back).\(backColor)"
+                  if let c = imageCache[key] { return c }
+                  var px = [UInt32](repeating: 0, count: 64 * 64)
+                  let ok = px.withUnsafeMutableBufferPointer {
+                      tg_mm_compose(body, Int32(bodyColor), face, head, Int32(headColor), back, Int32(backColor), $0.baseAddress)
+                  }
+                  guard ok == 1 else { return nil }
+                  let data = px.withUnsafeBufferPointer { Data(buffer: $0) }
+                  guard let prov = CGDataProvider(data: data as CFData),
+                        let img = CGImage(width: 64, height: 64, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 256,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                                          provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+                  else { return nil }
+                  imageCache[key] = img
+                  return img
+              }
+
+              static func swatch(_ pal: Int) -> Color {
+                  var c = [UInt32](repeating: 0, count: 8)
+                  _ = c.withUnsafeMutableBufferPointer { tg_mm_palette(Int32(pal), $0.baseAddress) }
+                  let v = c[2]
+                  return Color(red: Double((v >> 16) & 255) / 255, green: Double((v >> 8) & 255) / 255, blue: Double(v & 255) / 255)
+              }
+
+              // MARK: suitors
+
+              static let names = ["LUNA", "MOCHI", "PIP", "KIKI", "SUNNY", "MILO", "POPPY", "BIBI", "COCO", "NOVA", "TOFU", "PEACH",
+                                  "BUBBLE", "MAPLE", "ZIGGY", "HONEY", "PUDDING", "SKY", "BEAN", "CLOVER", "JUNO", "PIXIE", "SUGAR",
+                                  "TWINKLE", "BOBA", "DAISY", "FIZZ", "GIGI", "HOPPY", "IVY", "JELLY", "KOBE", "LULU", "MINT",
+                                  "NUGGET", "OLIVE", "PRINCE", "QUILL", "ROSIE", "SPROUT", "TIKI", "UMI", "VIOLET", "WAFFLE", "YUZU", "ZUZU"]
+              static let blurbs = ["Loves picnics and long walks in the park.", "Collects shiny stickers.", "Best dancer in TamaiOS Town!",
+                                   "Bakes the fluffiest cakes.", "Always up for an adventure.", "Writes little poems about the stars.",
+                                   "Never misses a game night.", "Grows the prettiest flowers in town.", "Can't stop humming happy tunes.",
+                                   "Dreams of travelling the world.", "Super gentle and great with babies.", "Tells the funniest jokes.",
+                                   "Knows every snack shop in town.", "A sleepyhead who loves cosy naps.", "Brave, kind and a little bit shy."]
+
+              func randomSuitor(mix: Bool) -> Suitor? {
+                  guard !ids.isEmpty else { return nil }
+                  let pick = { self.ids.randomElement()! }
+                  let base = pick()
+                  let s = Suitor(name: Town.names.randomElement()!,
+                                 body: base, face: mix ? pick() : base, head: mix ? pick() : base, back: mix ? pick() : base,
+                                 bodyColor: Int.random(in: 0...12), headColor: Int.random(in: 0...12), backColor: Int.random(in: 0...12),
+                                 blurb: Town.blurbs.randomElement()!)
+                  return image(s) == nil ? nil : s
+              }
+
+              func shuffle() {
+                  var out: [Suitor] = []
+                  var tries = 0
+                  while out.count < 8 && tries < 60 {
+                      tries += 1
+                      if let s = randomSuitor(mix: out.count >= 6), !out.contains(where: { $0.body == s.body && !s.isMix }) {
+                          out.append(s)
+                      }
+                  }
+                  suitors = out
+              }
+
+              // MARK: per-toy state (the Tama away in town, a wedding waiting)
+
+              struct State: Codable {
+                  var away = false
+                  var pending: Pending = .none
+                  var suitor: Suitor?
+                  var babySex = 2          // 0 boy, 1 girl, 2 surprise
+                  var genes = 0            // 0 like the app, 2 random
+                  var married: [String] = []
+              }
+
+              private func stateURL(_ toy: Toy) -> URL { ToyStore.dir(toy.id).appendingPathComponent("town.json") }
+              func visitURL(_ toy: Toy) -> URL { ToyStore.dir(toy.id).appendingPathComponent("visit.bin") }
+
+              func state(_ toy: Toy) -> State {
+                  guard let d = try? Data(contentsOf: stateURL(toy)), let s = try? JSONDecoder().decode(State.self, from: d) else { return State() }
+                  return s
+              }
+
+              func save(_ s: State, _ toy: Toy) {
+                  if let d = try? JSONEncoder().encode(s) { try? d.write(to: stateURL(toy), options: .atomic) }
+                  objectWillChange.send()
+              }
+
+              func visitData(_ toy: Toy) -> [UInt8] { (try? Data(contentsOf: visitURL(toy))).map { [UInt8]($0) } ?? [] }
+
+              func visitInfo(_ toy: Toy) -> (name: String, adult: Bool, sex: Int)? {
+                  let v = visitData(toy)
+                  guard v.count > 0x70 else { return nil }
+                  let info = v.withUnsafeBufferPointer { tg_mm_visit_info($0.baseAddress, $0.count) }
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  v.withUnsafeBufferPointer { tg_mm_visit_name($0.baseAddress, $0.count, &p, &n) }
+                  var name = ""
+                  if let p { name = String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self); tg_free(p, n) }
+                  return (name, info & 1 != 0, Int((info >> 1) & 1))
+              }
+
+              func marriagePacket(_ toy: Toy, _ s: Suitor, babySex: Int, genes: Int) -> [UInt8]? {
+                  let visit = visitData(toy)
+                  let lang: UInt8 = toy.romName.contains("(JP") ? 4 : 8
+                  let sex: UInt8 = babySex == 2 ? UInt8.random(in: 0...1) : UInt8(babySex)
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  let ok = visit.withUnsafeBufferPointer { v in
+                      s.name.withCString { name in
+                          tg_mm_marriage(v.baseAddress, v.count, s.body, Int32(s.bodyColor), s.face, s.head, Int32(s.headColor),
+                                         s.back, Int32(s.backColor), sex, lang, UInt8(genes), name, UInt64.random(in: 1...UInt64.max), &p, &n)
+                      }
+                  }
+                  guard ok == 1, let p else { return nil }
+                  let a = Array(UnsafeBufferPointer(start: p, count: n))
+                  tg_free(p, n)
+                  return a
+              }
+          }
+
+          /// A pixel-sharp character picture.
+          struct CharacterPicture: View {
+              let image: CGImage?
+              var body: some View {
+                  Group {
+                      if let image {
+                          Image(decorative: image, scale: 1).interpolation(.none).resizable().scaledToFit()
+                      } else {
+                          Image(systemName: "questionmark").font(.title).foregroundStyle(.secondary)
+                      }
+                  }
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/TownView.swift <<'TAMA_EOF'
+          import SwiftUI
+
+          /// TamaiOS Town: your Tama visits, goes on dates and gets married — the part of
+          /// the old Tamagotchi app that sent your Tama home with a baby.
+          struct TownView: View {
+              @EnvironmentObject var emu: Emulator
+              @ObservedObject var town = Town.shared
+
+              @State private var busy = false
+              @State private var progress = ""
+              @State private var alert: (title: String, text: String)?
+              @State private var chosen: Suitor?
+              @State private var designing = false
+              @State private var importing = false
+              @State private var autoTried = false
+
+              private var toy: Toy? { emu.toy }
+              private var packError: String? {
+                  if case .failed(let e) = town.pack { return e }
+                  return nil
+              }
+              private var st: Town.State { toy.map { town.state($0) } ?? Town.State() }
+              private var tamaName: String {
+                  if let t = toy, let n = town.visitInfo(t)?.name, !n.isEmpty { return n.capitalized }
+                  return toy?.name ?? "Your Tama"
+              }
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 16) {
+                      switch town.pack {
+                      case .ready: ready
+                      case .loading: ProgressView("Getting TamaiOS Town ready…").frame(maxWidth: .infinity).padding(40)
+                      case .missing, .failed: packCard
+                      }
+                  }
+                  .overlay { if busy { BusyOverlay(text: progress) } }
+                  .onAppear { town.loadIfPresent(); maybeAuto() }
+                  .onChange(of: emu.appWaiting) { w in if w { autoTried = false; maybeAuto() } }
+                  .onChange(of: town.pack) { _ in maybeAuto() }
+                  .sheet(item: $chosen) { s in
+                      SuitorSheet(suitor: s, tamaName: tamaName, adult: toy.flatMap { town.visitInfo($0)?.adult } ?? true) { babySex, genes in
+                          propose(s, babySex: babySex, genes: genes)
+                      }
+                  }
+                  .sheet(isPresented: $designing) { DesignView { s in designing = false; chosen = s } }
+                  .sheet(isPresented: $importing) {
+                      DocumentPicker { u in
+                          if let d = try? Data(contentsOf: u) { town.importPack(d) }
+                      }.ignoresSafeArea()
+                  }
+                  .alert(alert?.title ?? "", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) {
+                      Button("OK") {}
+                  } message: { Text(alert?.text ?? "") }
+              }
+
+              // MARK: character pack
+
+              private var packCard: some View {
+                  TownCard(tint: .pink) {
+                      Label("Open TamaiOS Town", systemImage: "house.and.flag.fill")
+                          .font(.system(.headline, design: .rounded)).foregroundStyle(.pink)
+                      Text("Town needs the Tamagotchi characters to date and marry. TamaiOS downloads the free character pack from TamaTown (MyMeets) once — about 20 MB.")
+                          .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
+                      if let e = packError {
+                          Text(e).font(.caption).foregroundStyle(.orange)
+                      }
+                      Button { town.download() } label: {
+                          Label("Download characters", systemImage: "arrow.down.circle.fill").frame(maxWidth: .infinity)
+                      }
+                      .buttonStyle(.borderedProminent).tint(.pink)
+                      Button("I have MyMeets2_3_7.zip — choose file") { importing = true }
+                          .font(.footnote)
+                  }
+              }
+
+              // MARK: main town
+
+              @ViewBuilder
+              private var ready: some View {
+                  if !st.away {
+                      visitCard
+                  } else if st.pending != .none {
+                      pendingCard
+                  } else {
+                      awayHeader
+                      suitorGrid
+                      Button { setPending(.back, nil) } label: {
+                          Label("Bring \(tamaName) home without marrying", systemImage: "house.fill").frame(maxWidth: .infinity)
+                      }
+                      .buttonStyle(.bordered).tint(.secondary)
+                  }
+                  if !st.married.isEmpty {
+                      TownCard(tint: .yellow) {
+                          Label("Family album", systemImage: "heart.text.square.fill")
+                              .font(.system(.headline, design: .rounded)).foregroundStyle(.orange)
+                          ForEach(Array(st.married.enumerated().reversed()), id: \.offset) { _, line in
+                              Text(line).font(.system(.footnote, design: .rounded))
+                          }
+                      }
+                  }
+                  Text("Characters from the MyMeets pack (TamaTown). Genes mixed on your iPhone, the way the official app did.")
+                      .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+              }
+
+              private var visitCard: some View {
+                  TownCard(tint: .pink) {
+                      Label("Visit TamaiOS Town", systemImage: "figure.walk.motion")
+                          .font(.system(.headline, design: .rounded)).foregroundStyle(.pink)
+                      step(1, "On the toy choose Connection › App › Visit.")
+                      step(2, "When it says it's waiting, tap the button below (it lights up by itself).")
+                      step(3, "Your Tama leaves home and comes here to find a partner. 💕")
+                      Button { doVisit() } label: {
+                          Label(emu.appWaiting ? "Welcome \(toy?.name ?? "your Tama") to town" : "Waiting for your Tama…",
+                                systemImage: emu.appWaiting ? "sparkles" : "hourglass")
+                              .frame(maxWidth: .infinity)
+                      }
+                      .buttonStyle(.borderedProminent).tint(.pink)
+                      .disabled(!emu.appWaiting)
+                      if let t = toy, FileManager.default.fileExists(atPath: town.visitURL(t).path) {
+                          Button("My Tama already left home (shows I'M OUT)") {
+                              var x = town.state(t); x.away = true; x.pending = .none; town.save(x, t)
+                          }
+                          .font(.footnote)
+                      }
+                  }
+              }
+
+              private var awayHeader: some View {
+                  let info = toy.flatMap { town.visitInfo($0) }
+                  return TownCard(tint: .purple) {
+                      HStack {
+                          Text("💕").font(.largeTitle)
+                          VStack(alignment: .leading, spacing: 2) {
+                              Text("\(tamaName) is in town!").font(.system(.headline, design: .rounded))
+                              Text("Tap someone to go on a date. When it's love, propose!")
+                                  .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
+                          }
+                      }
+                      if let info, !info.adult {
+                          Label("\(tamaName) isn't a grown-up yet. The official app only let adults marry — it may still work, but the toy might refuse.", systemImage: "exclamationmark.triangle.fill")
+                              .font(.footnote).foregroundStyle(.orange)
+                      }
+                  }
+              }
+
+              private var suitorGrid: some View {
+                  VStack(alignment: .leading, spacing: 10) {
+                      HStack {
+                          Text("Singles nearby").font(.system(.title3, design: .rounded).weight(.bold))
+                          Spacer()
+                          Button { withAnimation { town.shuffle() } } label: { Label("Shuffle", systemImage: "shuffle") }
+                              .buttonStyle(.bordered)
+                      }
+                      LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
+                          ForEach(town.suitors) { s in
+                              Button { chosen = s } label: {
+                                  VStack(spacing: 4) {
+                                      CharacterPicture(image: town.image(s)).frame(width: 80, height: 80)
+                                      Text(s.name).font(.system(.subheadline, design: .rounded).weight(.bold))
+                                      if s.isMix { Text("one of a kind").font(.caption2).foregroundStyle(.pink) }
+                                  }
+                                  .padding(8)
+                                  .frame(maxWidth: .infinity, minHeight: 128)
+                                  .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemBackground)))
+                              }
+                              .buttonStyle(.plain)
+                          }
+                          Button { designing = true } label: {
+                              VStack(spacing: 8) {
+                                  Image(systemName: "paintpalette.fill").font(.largeTitle).foregroundStyle(.pink)
+                                  Text("Design your own").font(.system(.subheadline, design: .rounded).weight(.bold))
+                              }
+                              .frame(maxWidth: .infinity, minHeight: 128)
+                              .background(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.pink.opacity(0.5), style: StrokeStyle(lineWidth: 2, dash: [6])))
+                          }
+                          .buttonStyle(.plain)
+                      }
+                  }
+              }
+
+              private var pendingCard: some View {
+                  TownCard(tint: .pink) {
+                      if st.pending == .marry, let s = st.suitor {
+                          HStack(spacing: 12) {
+                              CharacterPicture(image: town.image(s)).frame(width: 72, height: 72)
+                              VStack(alignment: .leading) {
+                                  Text("\(s.name) said YES! 💍").font(.system(.title3, design: .rounded).weight(.bold))
+                                  Text("Now send \(tamaName) home for the wedding.").font(.subheadline).foregroundStyle(.secondary)
+                              }
+                          }
+                      } else {
+                          Text("Heading home 🏠").font(.system(.title3, design: .rounded).weight(.bold))
+                      }
+                      step(1, "Close this screen and press any button on the toy.")
+                      step(2, "It asks GO BACK? — choose YES.")
+                      step(3, "TamaiOS finishes the rest by itself.")
+                      Button { doPending() } label: {
+                          Label(emu.appWaiting ? "Go now" : "Waiting for GO BACK › YES…", systemImage: emu.appWaiting ? "heart.fill" : "hourglass")
+                              .frame(maxWidth: .infinity)
+                      }
+                      .buttonStyle(.borderedProminent).tint(.pink).disabled(!emu.appWaiting)
+                      Button("Change my mind") { setPending(.none, nil) }.font(.footnote)
+                  }
+              }
+
+              private func step(_ n: Int, _ s: String) -> some View {
+                  HStack(alignment: .top, spacing: 10) {
+                      Text("\(n)").font(.system(.caption, design: .rounded).weight(.heavy)).foregroundStyle(.white)
+                          .frame(width: 22, height: 22).background(Circle().fill(Color.pink))
+                      Text(s).font(.system(.subheadline, design: .rounded))
+                  }
+              }
+
+              // MARK: actions
+
+              private func setPending(_ p: Town.Pending, _ s: Suitor?, babySex: Int = 2, genes: Int = 0) {
+                  guard let t = toy else { return }
+                  var x = town.state(t)
+                  x.pending = p
+                  x.suitor = s
+                  x.babySex = babySex
+                  x.genes = genes
+                  town.save(x, t)
+                  if emu.appWaiting && p != .none { doPending() }
+              }
+
+              private func propose(_ s: Suitor, babySex: Int, genes: Int) {
+                  chosen = nil
+                  setPending(.marry, s, babySex: babySex, genes: genes)
+              }
+
+              private func maybeAuto() {
+                  guard !autoTried, !busy, emu.appWaiting, let t = toy, case .ready = town.pack else { return }
+                  let x = town.state(t)
+                  if x.away && x.pending != .none { autoTried = true; doPending() }
+              }
+
+              private func run(_ work: @escaping (TamaLink, @escaping (String) -> Void) throws -> Void, done: @escaping (Error?) -> Void) {
+                  busy = true
+                  progress = "Connecting…"
+                  let link = TamaLink(emu: emu)
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      var err: Error?
+                      do { try work(link) { m in DispatchQueue.main.async { progress = m } } } catch { err = error }
+                      DispatchQueue.main.async { busy = false; done(err) }
+                  }
+              }
+
+              private func doVisit() {
+                  guard let t = toy else { return }
+                  var data: [UInt8] = []
+                  run({ link, p in data = try link.visit(progress: p) }) { err in
+                      if let err {
+                          emu.note("visit failed: \(err.localizedDescription)")
+                          alert = ("Your Tama didn't come", "On the toy choose Connection › App › Visit, then try again.\n\n\(err.localizedDescription)")
+                          return
+                      }
+                      try? Data(data).write(to: town.visitURL(t), options: .atomic)
+                      var x = town.state(t)
+                      x.away = true
+                      x.pending = .none
+                      town.save(x, t)
+                      town.shuffle()
+                      emu.note("visit ok: \(data.count) bytes")
+                      emu.saveNow()
+                  }
+              }
+
+              private func doPending() {
+                  guard !busy, let t = toy else { return }
+                  let x = town.state(t)
+                  switch x.pending {
+                  case .none: return
+                  case .back:
+                      run({ link, p in try link.back(progress: p) }) { err in
+                          if let err { alert = ("Not home yet", err.localizedDescription); return }
+                          var y = town.state(t); y.away = false; y.pending = .none; y.suitor = nil
+                          town.save(y, t); emu.saveNow()
+                          alert = ("Welcome home! 🏠", "\(tamaName) is back home.")
+                      }
+                  case .marry:
+                      guard let s = x.suitor, let pkt = town.marriagePacket(t, s, babySex: x.babySex, genes: x.genes) else {
+                          alert = ("Couldn't plan the wedding", "Bring your Tama to town again (Connection › App › Visit) and try once more.")
+                          return
+                      }
+                      run({ link, p in try link.marry(pkt, progress: p) }) { err in
+                          if let err {
+                              emu.note("marriage failed: \(err.localizedDescription)")
+                              alert = ("The wedding didn't finish", "Choose GO BACK › YES on the toy again — TamaiOS will retry.\n\n\(err.localizedDescription)")
+                              return
+                          }
+                          var y = town.state(t)
+                          let f = DateFormatter(); f.dateStyle = .medium
+                          y.married.append("\(f.string(from: Date())): \(tamaName) married \(s.name) 💍")
+                          y.away = false; y.pending = .none; y.suitor = nil
+                          town.save(y, t)
+                          emu.note("married \(s.name) b\(s.body) m\(s.face) a\(s.head) k\(s.back)")
+                          emu.saveNow()
+                          alert = ("Just married! 💍🎉", "\(tamaName) and \(s.name) are married! \(tamaName) is coming home with an egg — watch the toy.")
+                      }
+                  }
+              }
+          }
+
+          // MARK: - pieces
+
+          struct TownCard<C: View>: View {
+              let tint: Color
+              @ViewBuilder let content: C
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 12) { content }
+                      .padding(16)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(tint.opacity(0.10)))
+                      .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(tint.opacity(0.35), lineWidth: 1.5))
+              }
+          }
+
+          struct BusyOverlay: View {
+              let text: String
+              var body: some View {
+                  ZStack {
+                      Color.black.opacity(0.35).ignoresSafeArea()
+                      VStack(spacing: 14) {
+                          ProgressView().scaleEffect(1.4)
+                          Text(text).font(.system(.headline, design: .rounded)).multilineTextAlignment(.center)
+                          Text("Keep TamaiOS open").font(.caption).foregroundStyle(.secondary)
+                      }
+                      .padding(28)
+                      .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(.regularMaterial))
+                  }
+              }
+          }
+
+          /// A date: meet the suitor, then propose.
+          struct SuitorSheet: View {
+              let suitor: Suitor
+              let tamaName: String
+              let adult: Bool
+              let onPropose: (_ babySex: Int, _ genes: Int) -> Void
+              @Environment(\.dismiss) private var dismiss
+              @ObservedObject var town = Town.shared
+              @State private var babySex = 2
+              @State private var genes = 0
+              @State private var hearts = 0
+
+              var body: some View {
+                  NavigationStack {
+                      ScrollView {
+                          VStack(spacing: 18) {
+                              ZStack {
+                                  Circle().fill(LinearGradient(colors: [.pink.opacity(0.25), .purple.opacity(0.2)], startPoint: .top, endPoint: .bottom))
+                                  CharacterPicture(image: town.image(suitor)).padding(30)
+                              }
+                              .frame(width: 220, height: 220)
+                              Text(suitor.name).font(.system(size: 30, weight: .heavy, design: .rounded))
+                              Text(suitor.blurb).font(.system(.body, design: .rounded)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                              HStack(spacing: 4) {
+                                  ForEach(0..<5, id: \.self) { i in
+                                      Image(systemName: i < hearts ? "heart.fill" : "heart").foregroundStyle(.pink)
+                                  }
+                              }
+                              .font(.title2)
+                              Button { withAnimation(.spring()) { hearts = min(5, hearts + 1 + Int.random(in: 0...1)) } } label: {
+                                  Label(hearts >= 5 ? "It's love! 💘" : "Go on a date with \(tamaName)", systemImage: "cup.and.saucer.fill")
+                                      .frame(maxWidth: .infinity)
+                              }
+                              .buttonStyle(.bordered).tint(.pink).disabled(hearts >= 5)
+
+                              VStack(alignment: .leading, spacing: 10) {
+                                  Text("Baby").font(.headline)
+                                  Picker("Baby", selection: $babySex) {
+                                      Text("Surprise").tag(2); Text("Boy").tag(0); Text("Girl").tag(1)
+                                  }.pickerStyle(.segmented)
+                                  Text("Genes").font(.headline)
+                                  Picker("Genes", selection: $genes) {
+                                      Text("Like the app").tag(0); Text("Wild mix").tag(2)
+                                  }.pickerStyle(.segmented)
+                                  Text(genes == 0 ? "Mixes the parents the same way the official app did." : "Gives the baby a more random blend of both parents.")
+                                      .font(.caption).foregroundStyle(.secondary)
+                              }
+                              if !adult {
+                                  Label("\(tamaName) isn't a grown-up yet — the toy may refuse.", systemImage: "exclamationmark.triangle.fill")
+                                      .font(.footnote).foregroundStyle(.orange)
+                              }
+                              Button { onPropose(babySex, genes) } label: {
+                                  Label("Propose 💍", systemImage: "heart.circle.fill")
+                                      .font(.system(.title3, design: .rounded).weight(.bold))
+                                      .frame(maxWidth: .infinity).padding(.vertical, 6)
+                              }
+                              .buttonStyle(.borderedProminent).tint(.pink)
+                              .disabled(hearts < 5)
+                              if hearts < 5 {
+                                  Text("Go on dates until the hearts are full.").font(.caption).foregroundStyle(.secondary)
+                              }
+                          }
+                          .padding(20)
+                      }
+                      .navigationTitle("Date")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
+                  }
+              }
+          }
+
+          /// Build a partner from parts and colours.
+          struct DesignView: View {
+              let onDone: (Suitor) -> Void
+              @Environment(\.dismiss) private var dismiss
+              @ObservedObject var town = Town.shared
+              @State private var s: Suitor = Suitor(name: "", body: 0, face: 0, head: 0, back: 0, bodyColor: 0, headColor: 0, backColor: 0, blurb: "Made just for you.")
+              @State private var part = 0
+
+              private let parts = ["Body", "Face", "Head", "Back"]
+
+              var body: some View {
+                  NavigationStack {
+                      VStack(spacing: 12) {
+                          CharacterPicture(image: town.image(s)).frame(width: 160, height: 160)
+                              .background(Circle().fill(Color.pink.opacity(0.12)))
+                          TextField("Name (A–Z)", text: Binding(get: { s.name }, set: { s.name = String($0.uppercased().filter { $0.isLetter && $0.isASCII }.prefix(8)) }))
+                              .textFieldStyle(.roundedBorder).multilineTextAlignment(.center).frame(maxWidth: 220)
+                          Picker("Part", selection: $part) { ForEach(0..<4, id: \.self) { Text(parts[$0]).tag($0) } }
+                              .pickerStyle(.segmented)
+                          if part != 1 {
+                              ScrollView(.horizontal, showsIndicators: false) {
+                                  HStack(spacing: 8) {
+                                      ForEach(0..<13, id: \.self) { p in
+                                          Circle().fill(Town.swatch(p)).frame(width: 30, height: 30)
+                                              .overlay(Circle().stroke(Color.primary, lineWidth: color == p ? 3 : 0.5))
+                                              .onTapGesture { setColor(p) }
+                                      }
+                                  }.padding(.horizontal, 4)
+                              }
+                          }
+                          ScrollView {
+                              LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8)], spacing: 8) {
+                                  ForEach(town.ids, id: \.self) { id in
+                                      CharacterPicture(image: town.image(body: id, bodyColor: 0, face: id, head: id, headColor: 0, back: id, backColor: 0))
+                                          .frame(width: 56, height: 56)
+                                          .padding(4)
+                                          .background(RoundedRectangle(cornerRadius: 10).fill(current == id ? Color.pink.opacity(0.3) : Color(.secondarySystemBackground)))
+                                          .onTapGesture { setPart(id) }
+                                  }
+                              }
+                          }
+                      }
+                      .padding(16)
+                      .navigationTitle("Design your own")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                          ToolbarItem(placement: .confirmationAction) {
+                              Button("Meet") {
+                                  var x = s
+                                  if x.name.isEmpty { x.name = Town.names.randomElement()! }
+                                  onDone(x)
+                              }.disabled(town.image(s) == nil)
+                          }
+                      }
+                      .onAppear {
+                          if let r = town.randomSuitor(mix: false) { s.body = r.body; s.face = r.face; s.head = r.head; s.back = r.back; s.bodyColor = 0; s.headColor = 0; s.backColor = 0 }
+                      }
+                  }
+              }
+
+              private var current: UInt16 { [s.body, s.face, s.head, s.back][part] }
+              private var color: Int { [s.bodyColor, 0, s.headColor, s.backColor][part] }
+              private func setPart(_ id: UInt16) {
+                  switch part { case 0: s.body = id; case 1: s.face = id; case 2: s.head = id; default: s.back = id }
+              }
+              private func setColor(_ p: Int) {
+                  switch part { case 0: s.bodyColor = p; case 2: s.headColor = p; default: s.backColor = p }
+              }
+          }
+          TAMA_EOF
           cat > ios/TamaiOS/ToyView.swift <<'TAMA_EOF'
           import SwiftUI
 
@@ -3416,8 +5644,8 @@ jobs:
               @EnvironmentObject var emu: Emulator
               @AppStorage("showHints") private var showHints = true
               @State private var showSettings = false
-              @State private var wiggle = false
               @State private var restoreError = false
+              @State private var showApp = false
               @Environment(\.displayScale) private var displayScale
 
               var body: some View {
@@ -3433,7 +5661,6 @@ jobs:
                               topBar(theme)
                               Spacer(minLength: 0)
                               toy(theme, m)
-                                  .rotationEffect(.degrees(wiggle ? 2.5 : 0), anchor: .top)
                               Spacer(minLength: 0)
                               if showHints { hint(theme).padding(.bottom, 6) }
                           }
@@ -3459,10 +5686,10 @@ jobs:
                       .animation(.spring(), value: emu.toast)
                   }
                   .sheet(isPresented: $showSettings) { SettingsView().environmentObject(model).environmentObject(emu) }
-                  .onChange(of: emu.calling) { c in
-                      guard c else { return }
-                      withAnimation(.easeInOut(duration: 0.09).repeatCount(8, autoreverses: true)) { wiggle = true }
-                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { withAnimation { wiggle = false } }
+                  .background(Color.clear.sheet(isPresented: $showApp) { TamaAppView().environmentObject(emu) })
+                  .onChange(of: emu.appWaiting) { waiting in
+                      // the toy chose Connection › App: open the built-in app, like the phone did
+                      if waiting && !showSettings { showApp = true }
                   }
                   .confirmationDialog("Restore this backup?", isPresented: Binding(get: { model.pendingBackup != nil }, set: { if !$0 { model.pendingBackup = nil } }), titleVisibility: .visible) {
                       Button("Restore", role: .destructive) {
@@ -3630,7 +5857,234 @@ jobs:
               }
           }
           TAMA_EOF
-          echo "Wrote $(ls -R ffi ios tools | wc -l) entries"
+          mkdir -p patches
+          base64 --decode > patches/radio.patch <<'TAMA_EOF'
+          ZGlmZiAtLWdpdCBhL2NvcmUvc3JjL2xpYi5ycyBiL2NvcmUvc3JjL2xpYi5ycwppbmRleCA3ODRl
+          ZDhiLi5kMGEyOTA5IDEwMDY0NAotLS0gYS9jb3JlL3NyYy9saWIucnMKKysrIGIvY29yZS9zcmMv
+          bGliLnJzCkBAIC03LDYgKzcsNyBAQAogcHViIG1vZCBjcHU7CiBwdWIgbW9kIG1hY2hpbmU7CiBw
+          dWIgbW9kIHBuZzsKK3B1YiBtb2QgcmFkaW87CiBwdWIgbW9kIHJvbXM7CiBwdWIgbW9kIHNhdmU7
+          CiBwdWIgbW9kIHNpZ3M7CmRpZmYgLS1naXQgYS9jb3JlL3NyYy9tYWNoaW5lLnJzIGIvY29yZS9z
+          cmMvbWFjaGluZS5ycwppbmRleCAwYmY0NmQ0Li5mNDc2ZTA1IDEwMDY0NAotLS0gYS9jb3JlL3Ny
+          Yy9tYWNoaW5lLnJzCisrKyBiL2NvcmUvc3JjL21hY2hpbmUucnMKQEAgLTIyNSw2ICsyMjUsMTAg
+          QEAgaW1wbCBNYWNoaW5lIHsKICAgICAgICAgICAgICAgICB0cnVlCiAgICAgICAgICAgICB9CiAg
+          ICAgICAgICAgICBIb29rOjpTcGkyVHJhbnNmZXIgPT4geworICAgICAgICAgICAgICAgIGlmIHNl
+          bGYuc3lzLnJhZGlvLmlzX3NvbWUoKSB7CisgICAgICAgICAgICAgICAgICAgIHNlbGYuYmx1ZXRv
+          b3RoX3VzZWQgPSB0cnVlOworICAgICAgICAgICAgICAgICAgICByZXR1cm4gZmFsc2U7IC8vIHRo
+          ZSByZWFsIGRyaXZlciB0YWxrcyB0byB0aGUgZW11bGF0ZWQgbW9kdWxlCisgICAgICAgICAgICAg
+          ICAgfQogICAgICAgICAgICAgICAgIGlmICFzZWxmLmJsdWV0b290aF91c2VkIHsKICAgICAgICAg
+          ICAgICAgICAgICAgLy8gbm90aGluZyBpbiBub3JtYWwgcGxheSB0b3VjaGVzIHRoaXMgYnVzOiB0
+          aGUgZ2FtZSBpcwogICAgICAgICAgICAgICAgICAgICAvLyBzdGFydGluZyBCbHVldG9vdGg7IHN0
+          b3Agc28gdGhlIHdpbmRvdyBjYW4gdW5kbyB0aGUgcHJlc3MKQEAgLTQ5MSw3ICs0OTUsNyBAQCBp
+          bXBsIE1hY2hpbmUgewogICAgICAgICBpZiBzZWxmLmJsZV9mYWlsZWQgewogICAgICAgICAgICAg
+          cmV0dXJuIFNvbWUoT3V0Y29tZTo6QmxlRmFpbCk7CiAgICAgICAgIH0KLSAgICAgICAgaWYgc2Vs
+          Zi5ibHVldG9vdGhfdXNlZCAmJiBzZWxmLnN0b3Bfb25fYmx1ZXRvb3RoIHsKKyAgICAgICAgaWYg
+          c2VsZi5ibHVldG9vdGhfdXNlZCAmJiBzZWxmLnN0b3Bfb25fYmx1ZXRvb3RoICYmIHNlbGYuc3lz
+          LnJhZGlvLmlzX25vbmUoKSB7CiAgICAgICAgICAgICByZXR1cm4gU29tZShPdXRjb21lOjpCbHVl
+          dG9vdGgpOwogICAgICAgICB9CiAgICAgICAgIGlmIHNlbGYuc3lzLmluZnJhcmVkX3VzZWQgJiYg
+          IXNlbGYuc3lzLnVhcnRfaXNfcmFtIHsKQEAgLTY5Niw2ICs3MDAsNyBAQCBpbXBsIE1hY2hpbmUg
+          ewogICAgICAgICBxLmxjZC5mcmFtZXMgPSBzLmxjZC5mcmFtZXM7CiAgICAgICAgIHEubGNkLmxh
+          c3RfdnN5bmMgPSAocS5ub3cgKiBzeXM6OlZTWU5DX0haKSBhcyB1NjQ7CiAgICAgICAgIHEudHJh
+          Y2VfbW1pbyA9IHMudHJhY2VfbW1pbzsKKyAgICAgICAgcS5yYWRpbyA9IHMucmFkaW8udGFrZSgp
+          OwogICAgICAgICAqc2VsZiA9IGZyZXNoOwogICAgIH0KIApkaWZmIC0tZ2l0IGEvY29yZS9zcmMv
+          cmFkaW8ucnMgYi9jb3JlL3NyYy9yYWRpby5ycwpuZXcgZmlsZSBtb2RlIDEwMDY0NAppbmRleCAw
+          MDAwMDAwLi5mMjQ5NjM1Ci0tLSAvZGV2L251bGwKKysrIGIvY29yZS9zcmMvcmFkaW8ucnMKQEAg
+          LTAsMCArMSwyNjAgQEAKKy8vISBUaGUgTWVldHMvT24gQmx1ZXRvb3RoIG1vZHVsZSAoYSBDQzI2
+          NTAgYmVoaW5kIFNQSSAweEMwMDgwMDAwLCBjaGlwCisvLyEgc2VsZWN0IEdQSU8gMHhDMDAwMDA2
+          NCBiaXQgMTIsIGFjdGl2ZSBsb3cpLCBhbnN3ZXJlZCBsaWtlIHRoZSByZWFsIG9uZS4KKy8vIQor
+          Ly8hIEJ5dGUgcHJvdG9jb2wsIHBlciBjaGlwLXNlbGVjdCBjeWNsZTogYHJlZ3wxYCByZWFkcyBh
+          IDE2LWJpdCByZWdpc3RlcgorLy8hICgweDBBIHN0YXR1czogMHg4MDQwIGJvb3QgUk9NLCAweDgw
+          MDAgcGF0Y2hlZCwgMHg4NDAwIHJ1bm5pbmcsICs0IHdoZW4gYQorLy8hIHBob25lIGlzIGNvbm5l
+          Y3RlZDsgMHgwOCBieXRlcyB3YWl0aW5nIDw8IDYpOyBgMHg2MHxuYCBmZXRjaGVzIG4gcXVldWVk
+          CisvLyEgYnl0ZXM7IGAweEEwfG5gIHNlbmRzIG4gYnl0ZXMgb2YgYSBtZXNzYWdlLCB3aGljaCBt
+          YXkgc3BhbiBjeWNsZXMuCisvLyEgTWVzc2FnZXMgZnJvbSB0aGUgZmlybXdhcmU6IDIyIGRhdGEg
+          Zm9yIHRoZSBwaG9uZSwgMjUgc2V0dXAsIDU2IG1vZHVsZQorLy8hIG1lbW9yeSByZWFkLCA1NSBt
+          ZW1vcnkgd3JpdGUsIDAxIEhDSSBjb21tYW5kLiBEYXRhIGZyb20gdGhlIHBob25lIGlzCisvLyEg
+          cXVldWVkIGFzIGAyMiBsZW4gZGF0YWAuIEJlaGF2aW91ciBhcyBkb2N1bWVudGVkIGJ5IFBhcmFt
+          aXggU3R1ZGlvJ3MKKy8vISBUMThFbXUgbm90ZXM7IHRoaXMgaXMgYW4gaW5kZXBlbmRlbnQgaW1w
+          bGVtZW50YXRpb24uCisKK3VzZSBzdGQ6OmNvbGxlY3Rpb25zOjpWZWNEZXF1ZTsKKworI1tkZXJp
+          dmUoQ2xvbmUsIERlZmF1bHQpXQorcHViIHN0cnVjdCBSYWRpbyB7CisgICAgcHViIHNlbGVjdGVk
+          OiBib29sLAorICAgIHRyOiBWZWM8dTg+LAorICAgIGFuc3dlcjogW3U4OyAyXSwKKyAgICBhbnN3
+          ZXJpbmc6IHU4LAorICAgIGZldGNoOiB1OCwKKyAgICBtc2c6IFZlYzx1OD4sCisgICAgcXVldWU6
+          IFZlY0RlcXVlPHU4PiwKKyAgICBlbmRzOiBWZWNEZXF1ZTx1c2l6ZT4sCisgICAgcG9wcGVkOiB1
+          c2l6ZSwKKyAgICBwdXNoZWQ6IHVzaXplLAorICAgIGFjX2NvdW50OiB1OCwKKyAgICBzdGFnZTog
+          dTgsCisgICAgcHViIHNldHVwX2RvbmU6IGJvb2wsCisgICAgbGFzdF9zZXR1cDogdTgsCisgICAg
+          cHViIGNvbm5lY3RlZDogYm9vbCwKKyAgICBtZW06IFt1ODsgMTZdLAorICAgIC8vLyBEYXRhIHRo
+          ZSBmaXJtd2FyZSBzZW50IHRvIHRoZSBwaG9uZSAoZmZmMSBub3RpZmljYXRpb25zKSwgb2xkZXN0
+          IGZpcnN0LgorICAgIHB1YiB0b19waG9uZTogVmVjRGVxdWU8VmVjPHU4Pj4sCisgICAgLy8vIEV2
+          ZXJ5IG1lc3NhZ2UsIGZvciByZXNlYXJjaCAoY2FwcGVkKS4KKyAgICBwdWIgdHJhY2U6IFZlYzxT
+          dHJpbmc+LAorICAgIHB1YiB0cmFjaW5nOiBib29sLAorfQorCitpbXBsIFJhZGlvIHsKKyAgICBw
+          dWIgZm4gbmV3KCkgLT4gUmFkaW8geworICAgICAgICBsZXQgbXV0IHIgPSBSYWRpbzo6ZGVmYXVs
+          dCgpOworICAgICAgICByLm1lbVswXSA9IDB4RkY7CisgICAgICAgIHIubWVtWzFdID0gMHhGRjsK
+          KyAgICAgICAgci5tZW1bOF0gPSAweEZGOworICAgICAgICByLm1lbVs5XSA9IDB4RkY7CisgICAg
+          ICAgIHIKKyAgICB9CisKKyAgICBmbiBub3RlKCZtdXQgc2VsZiwgZGlyOiAmc3RyLCBkOiAmW3U4
+          XSkgeworICAgICAgICBpZiBzZWxmLnRyYWNpbmcgJiYgc2VsZi50cmFjZS5sZW4oKSA8IDIwMDAw
+          IHsKKyAgICAgICAgICAgIGxldCBoZXg6IFZlYzxTdHJpbmc+ID0gZC5pdGVyKCkubWFwKHxifCBm
+          b3JtYXQhKCJ7OjAyeH0iLCBiKSkuY29sbGVjdCgpOworICAgICAgICAgICAgc2VsZi50cmFjZS5w
+          dXNoKGZvcm1hdCEoInt9IHt9IiwgZGlyLCBoZXguam9pbigiICIpKSk7CisgICAgICAgIH0KKyAg
+          ICB9CisKKyAgICBmbiBwdXNoKCZtdXQgc2VsZiwgZDogJlt1OF0pIHsKKyAgICAgICAgaWYgZC5p
+          c19lbXB0eSgpIHx8IHNlbGYucXVldWUubGVuKCkgKyBkLmxlbigpID4gNDA5NiB7CisgICAgICAg
+          ICAgICByZXR1cm47CisgICAgICAgIH0KKyAgICAgICAgc2VsZi5xdWV1ZS5leHRlbmQoZC5pdGVy
+          KCkuY29waWVkKCkpOworICAgICAgICBzZWxmLnB1c2hlZCArPSBkLmxlbigpOworICAgICAgICBz
+          ZWxmLmVuZHMucHVzaF9iYWNrKHNlbGYucHVzaGVkKTsKKyAgICB9CisKKyAgICAvLy8gQnl0ZXMg
+          dXAgdG8gdGhlIGVuZCBvZiB0aGUgbmV4dCBxdWV1ZWQgbWVzc2FnZS4KKyAgICBmbiB0b19lbmQo
+          Jm11dCBzZWxmKSAtPiB1c2l6ZSB7CisgICAgICAgIHdoaWxlIGxldCBTb21lKCZlKSA9IHNlbGYu
+          ZW5kcy5mcm9udCgpIHsKKyAgICAgICAgICAgIGlmIGUgPD0gc2VsZi5wb3BwZWQgeworICAgICAg
+          ICAgICAgICAgIHNlbGYuZW5kcy5wb3BfZnJvbnQoKTsKKyAgICAgICAgICAgIH0gZWxzZSB7Cisg
+          ICAgICAgICAgICAgICAgcmV0dXJuIGUgLSBzZWxmLnBvcHBlZDsKKyAgICAgICAgICAgIH0KKyAg
+          ICAgICAgfQorICAgICAgICBzZWxmLnF1ZXVlLmxlbigpCisgICAgfQorCisgICAgZm4gcG9wKCZt
+          dXQgc2VsZikgLT4gdTggeworICAgICAgICBtYXRjaCBzZWxmLnF1ZXVlLnBvcF9mcm9udCgpIHsK
+          KyAgICAgICAgICAgIFNvbWUoYikgPT4geworICAgICAgICAgICAgICAgIHNlbGYucG9wcGVkICs9
+          IDE7CisgICAgICAgICAgICAgICAgYgorICAgICAgICAgICAgfQorICAgICAgICAgICAgTm9uZSA9
+          PiAwLAorICAgICAgICB9CisgICAgfQorCisgICAgcHViIGZuIHNlbGVjdCgmbXV0IHNlbGYsIHNl
+          bDogYm9vbCkgeworICAgICAgICBpZiBzZWwgPT0gc2VsZi5zZWxlY3RlZCB7CisgICAgICAgICAg
+          ICByZXR1cm47CisgICAgICAgIH0KKyAgICAgICAgc2VsZi5zZWxlY3RlZCA9IHNlbDsKKyAgICAg
+          ICAgaWYgIXNlbCB7CisgICAgICAgICAgICBpZiBzZWxmLnRyLmxlbigpID4gMSAmJiBzZWxmLnRy
+          WzBdICYgMHhFMCA9PSAweEEwIHsKKyAgICAgICAgICAgICAgICBpZiBzZWxmLm1zZy5sZW4oKSA+
+          IDQwOTYgeworICAgICAgICAgICAgICAgICAgICBzZWxmLm1zZy5jbGVhcigpOworICAgICAgICAg
+          ICAgICAgIH0KKyAgICAgICAgICAgICAgICBsZXQgYm9keSA9IHNlbGYudHJbMS4uXS50b192ZWMo
+          KTsKKyAgICAgICAgICAgICAgICBzZWxmLm1zZy5leHRlbmRfZnJvbV9zbGljZSgmYm9keSk7Cisg
+          ICAgICAgICAgICAgICAgbGV0IG5lZWQgPSBtYXRjaCAoc2VsZi5tc2cuZmlyc3QoKSwgc2VsZi5t
+          c2cuZ2V0KDEpKSB7CisgICAgICAgICAgICAgICAgICAgIChTb21lKDB4NTUpLCBTb21lKCZuKSkg
+          PT4gOCArIG4gYXMgdXNpemUgKiA0LAorICAgICAgICAgICAgICAgICAgICAoU29tZSgweDIyKSwg
+          U29tZSgmbikpID0+IDIgKyBuIGFzIHVzaXplLAorICAgICAgICAgICAgICAgICAgICBfID0+IHNl
+          bGYubXNnLmxlbigpLAorICAgICAgICAgICAgICAgIH07CisgICAgICAgICAgICAgICAgaWYgc2Vs
+          Zi5tc2cubGVuKCkgPj0gbmVlZCB7CisgICAgICAgICAgICAgICAgICAgIGxldCBtID0gc3RkOjpt
+          ZW06OnRha2UoJm11dCBzZWxmLm1zZyk7CisgICAgICAgICAgICAgICAgICAgIHNlbGYubWVzc2Fn
+          ZSgmbVsuLm5lZWQubWF4KDEpLm1pbihtLmxlbigpKV0pOworICAgICAgICAgICAgICAgIH0KKyAg
+          ICAgICAgICAgIH0KKyAgICAgICAgICAgIHNlbGYudHIuY2xlYXIoKTsKKyAgICAgICAgICAgIHNl
+          bGYuYW5zd2VyaW5nID0gMDsKKyAgICAgICAgICAgIHNlbGYuZmV0Y2ggPSAwOworICAgICAgICB9
+          CisgICAgfQorCisgICAgLy8vIE9uZSBieXRlIG92ZXIgU1BJOyByZXR1cm5zIHRoZSBieXRlIGNs
+          b2NrZWQgYmFjay4KKyAgICBwdWIgZm4geGZlcigmbXV0IHNlbGYsIGI6IHU4KSAtPiB1OCB7Cisg
+          ICAgICAgIHNlbGYudHIucHVzaChiKTsKKyAgICAgICAgaWYgc2VsZi5mZXRjaCA+IDAgeworICAg
+          ICAgICAgICAgc2VsZi5mZXRjaCAtPSAxOworICAgICAgICAgICAgcmV0dXJuIHNlbGYucG9wKCk7
+          CisgICAgICAgIH0KKyAgICAgICAgaWYgc2VsZi50ci5sZW4oKSA9PSAxIHsKKyAgICAgICAgICAg
+          IGlmIGIgPT0gMHhBQyB7CisgICAgICAgICAgICAgICAgc2VsZi5hY19jb3VudCA9IHNlbGYuYWNf
+          Y291bnQuc2F0dXJhdGluZ19hZGQoMSk7CisgICAgICAgICAgICB9CisgICAgICAgICAgICBpZiBi
+          ICYgMHhFMCA9PSAweDYwIHsKKyAgICAgICAgICAgICAgICBzZWxmLmZldGNoID0gYiAmIDB4MUY7
+          CisgICAgICAgICAgICAgICAgcmV0dXJuIDA7CisgICAgICAgICAgICB9CisgICAgICAgICAgICBp
+          ZiBiICYgMSAhPSAwIHsKKyAgICAgICAgICAgICAgICBsZXQgciA9IGIgLSAxOworICAgICAgICAg
+          ICAgICAgIGxldCBtdXQgdzogdTE2ID0gMDsKKyAgICAgICAgICAgICAgICBpZiByID09IDB4MEEg
+          eworICAgICAgICAgICAgICAgICAgICB3ID0gaWYgc2VsZi5hY19jb3VudCA+PSA0IHx8IHNlbGYu
+          c3RhZ2UgPT0gMiB7IDB4ODQwMCB9IGVsc2UgaWYgc2VsZi5zdGFnZSA9PSAxIHsgMHg4MDAwIH0g
+          ZWxzZSB7IDB4ODA0MCB9OworICAgICAgICAgICAgICAgICAgICBpZiBzZWxmLmNvbm5lY3RlZCAm
+          JiBzZWxmLnNldHVwX2RvbmUgeworICAgICAgICAgICAgICAgICAgICAgICAgdyB8PSAweDAwMDQ7
+          CisgICAgICAgICAgICAgICAgICAgIH0KKyAgICAgICAgICAgICAgICB9IGVsc2UgaWYgciA9PSAw
+          eDA4ICYmICFzZWxmLnF1ZXVlLmlzX2VtcHR5KCkgeworICAgICAgICAgICAgICAgICAgICBsZXQg
+          ayA9IHNlbGYudG9fZW5kKCkubWluKDMxKSBhcyB1MTY7CisgICAgICAgICAgICAgICAgICAgIHcg
+          PSBrIDw8IDY7CisgICAgICAgICAgICAgICAgfQorICAgICAgICAgICAgICAgIHNlbGYuYW5zd2Vy
+          ID0gWyh3ID4+IDgpIGFzIHU4LCB3IGFzIHU4XTsKKyAgICAgICAgICAgICAgICBzZWxmLmFuc3dl
+          cmluZyA9IDE7CisgICAgICAgICAgICB9CisgICAgICAgICAgICByZXR1cm4gMDsKKyAgICAgICAg
+          fQorICAgICAgICBtYXRjaCBzZWxmLmFuc3dlcmluZyB7CisgICAgICAgICAgICAxID0+IHsKKyAg
+          ICAgICAgICAgICAgICBzZWxmLmFuc3dlcmluZyA9IDI7CisgICAgICAgICAgICAgICAgc2VsZi5h
+          bnN3ZXJbMF0KKyAgICAgICAgICAgIH0KKyAgICAgICAgICAgIDIgPT4geworICAgICAgICAgICAg
+          ICAgIHNlbGYuYW5zd2VyaW5nID0gMDsKKyAgICAgICAgICAgICAgICBzZWxmLmFuc3dlclsxXQor
+          ICAgICAgICAgICAgfQorICAgICAgICAgICAgXyA9PiAwLAorICAgICAgICB9CisgICAgfQorCisg
+          ICAgZm4gbWVtX2F0KCZtdXQgc2VsZiwgYTogdTMyLCBuOiB1c2l6ZSkgLT4gT3B0aW9uPCZtdXQg
+          W3U4XT4geworICAgICAgICBpZiBhID49IDB4QTUwMF8wMEY4ICYmIGEgYXMgdTY0ICsgbiBhcyB1
+          NjQgPD0gMHhBNTAwXzAxMDAgeworICAgICAgICAgICAgbGV0IG8gPSAoYSAtIDB4QTUwMF8wMEY4
+          KSBhcyB1c2l6ZTsKKyAgICAgICAgICAgIHJldHVybiBTb21lKCZtdXQgc2VsZi5tZW1bby4ubyAr
+          IG5dKTsKKyAgICAgICAgfQorICAgICAgICBpZiBhID49IDB4QTUwMF8yNEI4ICYmIGEgYXMgdTY0
+          ICsgbiBhcyB1NjQgPD0gMHhBNTAwXzI0QzAgeworICAgICAgICAgICAgbGV0IG8gPSA4ICsgKGEg
+          LSAweEE1MDBfMjRCOCkgYXMgdXNpemU7CisgICAgICAgICAgICByZXR1cm4gU29tZSgmbXV0IHNl
+          bGYubWVtW28uLm8gKyBuXSk7CisgICAgICAgIH0KKyAgICAgICAgTm9uZQorICAgIH0KKworICAg
+          IGZuIG1lc3NhZ2UoJm11dCBzZWxmLCBwOiAmW3U4XSkgeworICAgICAgICBpZiBwLmxlbigpIDwg
+          MiB7CisgICAgICAgICAgICByZXR1cm47CisgICAgICAgIH0KKyAgICAgICAgbWF0Y2ggcFswXSB7
+          CisgICAgICAgICAgICAweDIyID0+IHsKKyAgICAgICAgICAgICAgICBsZXQgbGVuID0gKHBbMV0g
+          YXMgdXNpemUpLm1pbihwLmxlbigpIC0gMik7CisgICAgICAgICAgICAgICAgbGV0IGRhdGEgPSBw
+          WzIuLjIgKyBsZW5dLnRvX3ZlYygpOworICAgICAgICAgICAgICAgIHNlbGYubm90ZSgiVE9ZPkFQ
+          UCIsICZkYXRhKTsKKyAgICAgICAgICAgICAgICBzZWxmLnRvX3Bob25lLnB1c2hfYmFjayhkYXRh
+          KTsKKyAgICAgICAgICAgICAgICBpZiBzZWxmLnRvX3Bob25lLmxlbigpID4gMjU2IHsKKyAgICAg
+          ICAgICAgICAgICAgICAgc2VsZi50b19waG9uZS5wb3BfZnJvbnQoKTsKKyAgICAgICAgICAgICAg
+          ICB9CisgICAgICAgICAgICAgICAgc2VsZi5wdXNoKCZbMHgyNiwgMHgyMiwgMHgwMF0pOworICAg
+          ICAgICAgICAgfQorICAgICAgICAgICAgMHgyNSA9PiB7CisgICAgICAgICAgICAgICAgc2VsZi5u
+          b3RlKCJzZXR1cCIsIHApOworICAgICAgICAgICAgICAgIGxldCBwYXkgPSAocC5sZW4oKSAtIDIp
+          Lm1pbigzMik7CisgICAgICAgICAgICAgICAgbGV0IG11dCBhID0gdmVjIVsweDIxLCBwWzFdLCBw
+          YXkgYXMgdThdOworICAgICAgICAgICAgICAgIGEuZXh0ZW5kX2Zyb21fc2xpY2UoJnBbMi4uMiAr
+          IHBheV0pOworICAgICAgICAgICAgICAgIHNlbGYucHVzaCgmYSk7CisgICAgICAgICAgICAgICAg
+          aWYgKHBbMV0gPT0gMHgzOCAmJiBzZWxmLmxhc3Rfc2V0dXAgIT0gMHgzMSkgfHwgcFsxXSA9PSAw
+          eDVGIHsKKyAgICAgICAgICAgICAgICAgICAgc2VsZi5zZXR1cF9kb25lID0gZmFsc2U7CisgICAg
+          ICAgICAgICAgICAgICAgIHNlbGYuYWNfY291bnQgPSAwOworICAgICAgICAgICAgICAgICAgICBz
+          ZWxmLnN0YWdlID0gMDsKKyAgICAgICAgICAgICAgICB9CisgICAgICAgICAgICAgICAgaWYgcFsx
+          XSA9PSAweDQwIHsKKyAgICAgICAgICAgICAgICAgICAgc2VsZi5zZXR1cF9kb25lID0gdHJ1ZTsK
+          KyAgICAgICAgICAgICAgICB9CisgICAgICAgICAgICAgICAgc2VsZi5sYXN0X3NldHVwID0gcFsx
+          XTsKKyAgICAgICAgICAgICAgICBpZiBwWzFdID09IDB4M0UgeworICAgICAgICAgICAgICAgICAg
+          ICBzZWxmLnB1c2goJlsweDI2LCAweEZGLCAweDExXSk7CisgICAgICAgICAgICAgICAgfQorICAg
+          ICAgICAgICAgfQorICAgICAgICAgICAgMHg1NiBpZiBwLmxlbigpID49IDYgPT4geworICAgICAg
+          ICAgICAgICAgIGxldCBhID0gdTMyOjpmcm9tX2xlX2J5dGVzKFtwWzJdLCBwWzNdLCBwWzRdLCBw
+          WzVdXSk7CisgICAgICAgICAgICAgICAgbGV0IGNudCA9IChwWzFdIGFzIHVzaXplKS5taW4oNTIp
+          OworICAgICAgICAgICAgICAgIGxldCBtdXQgbyA9IHZlYyFbMHg1NywgKChjbnQgKyAzKSAvIDQp
+          IGFzIHU4LCAwLCAwLCBwWzJdLCBwWzNdLCBwWzRdLCBwWzVdXTsKKyAgICAgICAgICAgICAgICBt
+          YXRjaCBzZWxmLm1lbV9hdChhLCBjbnQpIHsKKyAgICAgICAgICAgICAgICAgICAgU29tZShtKSA9
+          PiB7CisgICAgICAgICAgICAgICAgICAgICAgICBsZXQgdiA9IG0udG9fdmVjKCk7CisgICAgICAg
+          ICAgICAgICAgICAgICAgICBvLmV4dGVuZF9mcm9tX3NsaWNlKCZ2KTsKKyAgICAgICAgICAgICAg
+          ICAgICAgfQorICAgICAgICAgICAgICAgICAgICBOb25lID0+IG8uZXh0ZW5kKHN0ZDo6aXRlcjo6
+          cmVwZWF0KDApLnRha2UoY250KSksCisgICAgICAgICAgICAgICAgfQorICAgICAgICAgICAgICAg
+          IHNlbGYucHVzaCgmbyk7CisgICAgICAgICAgICB9CisgICAgICAgICAgICAweDU1IGlmIHAubGVu
+          KCkgPj0gOCA9PiB7CisgICAgICAgICAgICAgICAgbGV0IGEgPSB1MzI6OmZyb21fbGVfYnl0ZXMo
+          W3BbNF0sIHBbNV0sIHBbNl0sIHBbN11dKTsKKyAgICAgICAgICAgICAgICBsZXQgZGF0YSA9IHBb
+          OC4uXS50b192ZWMoKTsKKyAgICAgICAgICAgICAgICBpZiBsZXQgU29tZShtKSA9IHNlbGYubWVt
+          X2F0KGEsIGRhdGEubGVuKCkpIHsKKyAgICAgICAgICAgICAgICAgICAgbS5jb3B5X2Zyb21fc2xp
+          Y2UoJmRhdGEpOworICAgICAgICAgICAgICAgIH0KKyAgICAgICAgICAgICAgICBpZiBhID09IDB4
+          MDAyMF8xRjgwICYmIHAubGVuKCkgPj0gMTIgeworICAgICAgICAgICAgICAgICAgICBpZiB1MzI6
+          OmZyb21fbGVfYnl0ZXMoW3BbOF0sIHBbOV0sIHBbMTBdLCBwWzExXV0pICE9IDAgeworICAgICAg
+          ICAgICAgICAgICAgICAgICAgc2VsZi5zdGFnZSA9IDE7CisgICAgICAgICAgICAgICAgICAgIH0g
+          ZWxzZSBpZiBzZWxmLnN0YWdlID09IDEgeworICAgICAgICAgICAgICAgICAgICAgICAgc2VsZi5z
+          dGFnZSA9IDI7CisgICAgICAgICAgICAgICAgICAgIH0KKyAgICAgICAgICAgICAgICB9CisgICAg
+          ICAgICAgICB9CisgICAgICAgICAgICAweDAxIGlmIHAubGVuKCkgPj0gMyA9PiB7CisgICAgICAg
+          ICAgICAgICAgc2VsZi5ub3RlKCJoY2kiLCBwKTsKKyAgICAgICAgICAgICAgICBpZiBwWzFdID09
+          IDB4MUYgJiYgcFsyXSA9PSAweDIwIHsKKyAgICAgICAgICAgICAgICAgICAgc2VsZi5wdXNoKCZb
+          MHgwNCwgMHgwRSwgNiwgMHgwMSwgcFsxXSwgcFsyXSwgMHgwMCwgMCwgMF0pOworICAgICAgICAg
+          ICAgICAgIH0gZWxzZSB7CisgICAgICAgICAgICAgICAgICAgIHNlbGYucHVzaCgmWzB4MDQsIDB4
+          MEUsIDQsIDB4MDEsIHBbMV0sIHBbMl0sIDB4MDBdKTsKKyAgICAgICAgICAgICAgICB9CisgICAg
+          ICAgICAgICB9CisgICAgICAgICAgICBfID0+IHNlbGYubm90ZSgib3RoZXIiLCBwKSwKKyAgICAg
+          ICAgfQorICAgIH0KKworICAgIC8vLyBBIHdyaXRlIGZyb20gdGhlIHBob25lIChjaGFyYWN0ZXJp
+          c3RpYyBmZmYyKS4gRmFsc2UgaWYgdGhlcmUgaXMgbm8gcm9vbSB5ZXQuCisgICAgcHViIGZuIGZy
+          b21fcGhvbmUoJm11dCBzZWxmLCBkOiAmW3U4XSkgLT4gYm9vbCB7CisgICAgICAgIGlmIGQuaXNf
+          ZW1wdHkoKSB7CisgICAgICAgICAgICByZXR1cm4gdHJ1ZTsKKyAgICAgICAgfQorICAgICAgICBp
+          ZiBzZWxmLnF1ZXVlLmxlbigpICsgZC5sZW4oKSArIDIgPiAyMDQ4IHsKKyAgICAgICAgICAgIHJl
+          dHVybiBmYWxzZTsKKyAgICAgICAgfQorICAgICAgICBzZWxmLm5vdGUoIkFQUD5UT1kiLCBkKTsK
+          KyAgICAgICAgbGV0IG11dCBtID0gdmVjIVsweDIyLCBkLmxlbigpIGFzIHU4XTsKKyAgICAgICAg
+          bS5leHRlbmRfZnJvbV9zbGljZShkKTsKKyAgICAgICAgc2VsZi5wdXNoKCZtKTsKKyAgICAgICAg
+          dHJ1ZQorICAgIH0KK30KZGlmZiAtLWdpdCBhL2NvcmUvc3JjL3N5cy5ycyBiL2NvcmUvc3JjL3N5
+          cy5ycwppbmRleCA2Zjc2NzQ2Li5hNDk3MGMwIDEwMDY0NAotLS0gYS9jb3JlL3NyYy9zeXMucnMK
+          KysrIGIvY29yZS9zcmMvc3lzLnJzCkBAIC0zNDAsNiArMzQwLDggQEAgcHViIHN0cnVjdCBTeXN0
+          ZW0gewogICAgIC8vLyBBIHF1aWNrIHRhcCBzdGF5cyBoZWxkIHVudGlsIHRoaXMgdGltZS4KICAg
+          ICBwdWIgaG9sZF91bnRpbDogW2Y2NDsgM10sCiAgICAgcHViIGdwaW9fYXBwbGllZDogW3UzMjsg
+          OF0sCisgICAgLy8vIFRoZSBCbHVldG9vdGggbW9kdWxlLCB3aGVuIGVtdWxhdGVkIChOb25lOiBh
+          YnNlbnQsIGFzIGJlZm9yZSkuCisgICAgcHViIHJhZGlvOiBPcHRpb248Y3JhdGU6OnJhZGlvOjpS
+          YWRpbz4sCiAKICAgICBwdWIgbW1pb193cml0ZXM6IHU2NCwKICAgICAvLy8gU2V0IGJ5IG1lbW9y
+          eSB3cml0ZXMgdGhhdCBjaGFuZ2UgYSB2YWx1ZSAoaWRsZSBkZXRlY3Rpb24pLgpAQCAtMzkwLDYg
+          KzM5Miw3IEBAIGltcGwgU3lzdGVtIHsKICAgICAgICAgICAgIGxpdmVfa2V5czogW2ZhbHNlOyAz
+          XSwKICAgICAgICAgICAgIGhvbGRfdW50aWw6IFswLjA7IDNdLAogICAgICAgICAgICAgZ3Bpb19h
+          cHBsaWVkOiBbMDsgOF0sCisgICAgICAgICAgICByYWRpbzogTm9uZSwKICAgICAgICAgICAgIG1t
+          aW9fd3JpdGVzOiAwLAogICAgICAgICAgICAgY2hhbmdlZDogZmFsc2UsCiAgICAgICAgICAgICB0
+          cmFja2luZzogZmFsc2UsCkBAIC05NDUsNyArOTQ4LDE1IEBAIGltcGwgU3lzdGVtIHsKICAgICAg
+          ICAgICAgIDB4QzAxNV8wMDAwID0+IHNlbGYuZmxhc2hfc2VsZWN0KG5ldyAmIDB4NDAgIT0gMCks
+          CiAgICAgICAgICAgICAweEMwMTVfMDAwOCA9PiBzZWxmLmZsYXNoX3hmZXIobmV3IGFzIHU4KSwK
+          ICAgICAgICAgICAgIDB4QzAwOF8wMDA4ID0+IHsKLSAgICAgICAgICAgICAgICBzZWxmLnJlZ3Mu
+          aW5zZXJ0KFNQSTJfQkFTRSArIDB4MTAsIFNQSTJfSURMRSk7CisgICAgICAgICAgICAgICAgbGV0
+          IHJ4ID0gbWF0Y2ggc2VsZi5yYWRpby5hc19tdXQoKSB7CisgICAgICAgICAgICAgICAgICAgIFNv
+          bWUocikgPT4geworICAgICAgICAgICAgICAgICAgICAgICAgbGV0IHNlbCA9IHUzMjo6ZnJvbV9s
+          ZV9ieXRlcyhbc2VsZi5ncGlvWzB4NjRdLCBzZWxmLmdwaW9bMHg2NV0sIHNlbGYuZ3Bpb1sweDY2
+          XSwgc2VsZi5ncGlvWzB4NjddXSkgJiAweDEwMDAgPT0gMDsKKyAgICAgICAgICAgICAgICAgICAg
+          ICAgIHIuc2VsZWN0KHNlbCk7CisgICAgICAgICAgICAgICAgICAgICAgICBpZiBzZWwgeyByLnhm
+          ZXIobmV3IGFzIHU4KSBhcyB1MzIgfSBlbHNlIHsgMCB9CisgICAgICAgICAgICAgICAgICAgIH0K
+          KyAgICAgICAgICAgICAgICAgICAgTm9uZSA9PiBTUEkyX0lETEUsCisgICAgICAgICAgICAgICAg
+          fTsKKyAgICAgICAgICAgICAgICBzZWxmLnJlZ3MuaW5zZXJ0KFNQSTJfQkFTRSArIDB4MTAsIHJ4
+          KTsKICAgICAgICAgICAgICAgICBsZXQgYyA9IHNlbGYucmVnKFNQSTJfQkFTRSArIDB4MEMpIHwg
+          MTsKICAgICAgICAgICAgICAgICBzZWxmLnJlZ3MuaW5zZXJ0KFNQSTJfQkFTRSArIDB4MEMsIGMp
+          OwogICAgICAgICAgICAgfQpAQCAtMTExNyw2ICsxMTI4LDEwIEBAIGltcGwgU3lzdGVtIHsKICAg
+          ICAgICAgICAgICAgICBmb3IgaSBpbiAwLi5zaXplIGFzIHVzaXplIHsKICAgICAgICAgICAgICAg
+          ICAgICAgbVtvICsgaV0gPSAodmFsID4+ICg4ICogaSkpIGFzIHU4OwogICAgICAgICAgICAgICAg
+          IH0KKyAgICAgICAgICAgICAgICBpZiBhZGRyICYgITMgPT0gR1BJT19CQVNFICsgMHg2NCAmJiBz
+          ZWxmLnJhZGlvLmlzX3NvbWUoKSB7CisgICAgICAgICAgICAgICAgICAgIGxldCBzZWwgPSB1MzI6
+          OmZyb21fbGVfYnl0ZXMoW3NlbGYuZ3Bpb1sweDY0XSwgc2VsZi5ncGlvWzB4NjVdLCBzZWxmLmdw
+          aW9bMHg2Nl0sIHNlbGYuZ3Bpb1sweDY3XV0pICYgMHgxMDAwID09IDA7CisgICAgICAgICAgICAg
+          ICAgICAgIHNlbGYucmFkaW8uYXNfbXV0KCkudW53cmFwKCkuc2VsZWN0KHNlbCk7CisgICAgICAg
+          ICAgICAgICAgfQogICAgICAgICAgICAgfQogICAgICAgICAgICAgU29tZShfKSA9PiB7fQogICAg
+          ICAgICAgICAgTm9uZSA9PiBzZWxmLm1taW9fd3JpdGUoYWRkciwgc2l6ZSwgdmFsKSwK
+          TAMA_EOF
+          echo "Wrote $(ls -R ffi ios tools patches | wc -l) entries"
 
       - name: Build in your firmware (firmware/*.bin, if you added one)
         run: |
@@ -3644,10 +6098,12 @@ jobs:
             echo "No firmware/*.bin in the repo - the app will ask you to pick a ROM"
           fi
 
-      - name: Get the emulator core (tg18-emu by oreo-fox, MIT licence)
+      - name: Get the emulator core (tg18-emu by oreo-fox, MIT licence) + Bluetooth patch
         run: |
           git clone https://github.com/oreo-fox/tg18-emu upstream
           git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
+          # TamaiOS addition: the Bluetooth module, so the built-in Tama App works
+          git -C upstream apply ../patches/radio.patch
 
       - name: Build the emulator core for iPhone
         run: |

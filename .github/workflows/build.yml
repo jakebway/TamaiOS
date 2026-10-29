@@ -1,0 +1,3152 @@
+# TamaiOS — Tamagotchi ON / Meets emulator for iPhone (bring your own ROM).
+# Upload this file to .github/workflows/build.yml in a GitHub repo.
+# Every push (or "Run workflow" on the Actions tab) builds an unsigned
+# TamaiOS.ipa, downloadable from the run's "Artifacts" section.
+name: Build TamaiOS
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Write the app's source files
+        run: |
+          mkdir -p ffi ffi/src ios ios/TamaiOS ios/TamaiOS/Assets.xcassets ios/TamaiOS/Assets.xcassets/AppIcon.appiconset ios/TamaiOS/Assets.xcassets/LaunchColor.colorset tools
+          cat > ffi/Cargo.toml <<'TAMA_EOF'
+          [package]
+          name = "tamaios-ffi"
+          version = "0.1.0"
+          edition = "2021"
+          license = "MIT"
+
+          [lib]
+          name = "tamaios"
+          crate-type = ["staticlib", "rlib"]
+
+          [dependencies]
+          tg18-core = { path = "../upstream/core" }
+          miniz_oxide = "0.8"
+          serde_json = "1"
+
+          [profile.release]
+          opt-level = 3
+          lto = "fat"
+          codegen-units = 1
+
+          debug = false
+          TAMA_EOF
+          cat > ffi/src/lib.rs <<'TAMA_EOF'
+          //! C interface between the iPhone app and the tg18 (Tamagotchi ON / Meets)
+          //! emulator core. Every entry point catches panics so a bug in the core shows
+          //! up as an error code instead of crashing the app.
+
+          use std::ffi::{c_char, CStr};
+          use std::panic::{catch_unwind, AssertUnwindSafe};
+          use std::sync::Arc;
+
+          use tg18::cpu::Bus;
+          use tg18::save::{self, SaveMeta};
+          use tg18::snapshot::Snapshot;
+          use tg18::sound::{CallDetector, ToneSynth};
+          use tg18::{Key, Machine, Outcome, CPU_HZ, FLASH_SIZE};
+
+          pub const AUDIO_RATE: u32 = 44100;
+
+          // tick results
+          pub const TG_OK: i32 = 0;
+          pub const TG_BLUETOOTH: i32 = 1;
+          pub const TG_INFRARED: i32 = 2;
+          pub const TG_BLE_RESTART: i32 = 3;
+          pub const TG_CRASH: i32 = 4;
+          pub const TG_STUCK: i32 = 5;
+          pub const TG_PANIC: i32 = 6;
+
+          // flags returned by tg_take_flags
+          pub const F_FRAME: u32 = 1;
+          pub const F_CALL: u32 = 2;
+          pub const F_SLEPT: u32 = 4;
+          pub const F_WOKE: u32 = 8;
+
+          /// Tunables the console can change at runtime.
+          #[derive(Clone)]
+          struct Params {
+              max_step: f64,
+              max_behind: f64,
+              max_catchup: f64,
+              min_hold: f64,
+              rewind_gap: f64,
+          }
+
+          impl Default for Params {
+              fn default() -> Self {
+                  Params { max_step: 0.02, max_behind: 0.25, max_catchup: 10.0, min_hold: 0.05, rewind_gap: 1.0 }
+              }
+          }
+
+          pub struct Emu {
+              m: Machine,
+              image: Arc<Vec<u8>>,
+              synth: ToneSynth,
+              calls: CallDetector,
+              audio: Vec<i16>,
+              audio_t: Option<f64>,
+              behind: f64,
+              rewind: Option<Snapshot>,
+              rewind_at: f64,
+              down: [bool; 3],
+              frames_seen: u64,
+              was_asleep: bool,
+              flags: u32,
+              stopped: Option<i32>,
+              log: std::collections::VecDeque<String>,
+              params: Params,
+              last_speed: f64,
+              boot_note: String,
+          }
+
+          fn log_line(e: &mut Emu, s: String) {
+              if e.log.len() >= 400 {
+                  e.log.pop_front();
+              }
+              e.log.push_back(s);
+          }
+
+          fn key_of(k: i32) -> Option<Key> {
+              match k {
+                  0 => Some(Key::A),
+                  1 => Some(Key::B),
+                  2 => Some(Key::C),
+                  _ => None,
+              }
+          }
+
+          unsafe fn bytes<'a>(p: *const u8, n: usize) -> Option<&'a [u8]> {
+              if p.is_null() || n == 0 {
+                  None
+              } else {
+                  Some(std::slice::from_raw_parts(p, n))
+              }
+          }
+
+          unsafe fn cstr(p: *const c_char) -> Option<String> {
+              if p.is_null() {
+                  None
+              } else {
+                  Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+              }
+          }
+
+          /// Hand a Rust buffer to Swift; freed with tg_free.
+          fn give(v: Vec<u8>, out: *mut *mut u8, out_len: *mut usize) {
+              let mut b = v.into_boxed_slice();
+              unsafe {
+                  *out_len = b.len();
+                  *out = b.as_mut_ptr();
+              }
+              std::mem::forget(b);
+          }
+
+          fn give_string(s: String, out: *mut *mut u8, out_len: *mut usize) {
+              give(s.into_bytes(), out, out_len)
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_free(p: *mut u8, n: usize) {
+              if !p.is_null() {
+                  unsafe { drop(Box::from_raw(std::slice::from_raw_parts_mut(p, n))) };
+              }
+          }
+
+          // --- ROM checking ---------------------------------------------------------------
+
+          #[repr(C)]
+          pub struct TgRomInfo {
+              pub hash: u64,
+              pub known: i32,
+              pub name: [u8; 64],
+              pub stem: [u8; 96],
+          }
+
+          fn put(dst: &mut [u8], s: &str) {
+              let b = s.as_bytes();
+              let n = b.len().min(dst.len() - 1);
+              dst[..n].copy_from_slice(&b[..n]);
+              dst[n] = 0;
+          }
+
+          /// Check a file the user picked.
+          ///  0 = Tamagotchi ON/Meets dump (first 8 MiB used; bigger dumps are trimmed)
+          /// -1 = too small, -2 = not a tg18 flash dump, -3 = empty/erased.
+          #[no_mangle]
+          pub extern "C" fn tg_check_rom(p: *const u8, n: usize, info: *mut TgRomInfo) -> i32 {
+              let data = match unsafe { bytes(p, n) } {
+                  Some(d) => d,
+                  None => return -1,
+              };
+              if data.len() < FLASH_SIZE {
+                  return -1;
+              }
+              let img = &data[..FLASH_SIZE];
+              if img.iter().take(4096).all(|&b| b == 0xFF) || img.iter().take(4096).all(|&b| b == 0) {
+                  return -3;
+              }
+              if !tg18::is_image(img) {
+                  return -2;
+              }
+              if !info.is_null() {
+                  let i = unsafe { &mut *info };
+                  i.hash = tg18::code_hash(img);
+                  match tg18::roms::identify_hash(i.hash) {
+                      Some(k) => {
+                          i.known = 1;
+                          put(&mut i.name, &k.display_name());
+                          put(&mut i.stem, &k.stem());
+                      }
+                      None => {
+                          i.known = 0;
+                          put(&mut i.name, "Unknown version");
+                          put(&mut i.stem, &format!("fw_tg18_unknown_{:016x}", i.hash));
+                      }
+                  }
+              }
+              0
+          }
+
+          /// Look inside a .zip for a tg18 dump. Returns 0 and the 8 MiB image, or -1.
+          #[no_mangle]
+          pub extern "C" fn tg_rom_from_zip(p: *const u8, n: usize, out: *mut *mut u8, out_len: *mut usize) -> i32 {
+              let data = match unsafe { bytes(p, n) } {
+                  Some(d) => d,
+                  None => return -1,
+              };
+              match catch_unwind(|| zip_find(data)) {
+                  Ok(Some(img)) => {
+                      give(img, out, out_len);
+                      0
+                  }
+                  _ => -1,
+              }
+          }
+
+          fn u16le(d: &[u8], o: usize) -> Option<usize> {
+              d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
+          }
+          fn u32le(d: &[u8], o: usize) -> Option<usize> {
+              d.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+          }
+
+          fn zip_find(d: &[u8]) -> Option<Vec<u8>> {
+              if d.len() < 22 {
+                  return None;
+              }
+              let start = d.len().saturating_sub(22 + 65535);
+              let eocd = (start..=d.len() - 22).rev().find(|&i| d[i..i + 4] == [0x50, 0x4B, 0x05, 0x06])?;
+              let count = u16le(d, eocd + 10)?;
+              let mut off = u32le(d, eocd + 16)?;
+              for _ in 0..count {
+                  if d.get(off..off + 4)? != [0x50, 0x4B, 0x01, 0x02] {
+                      return None;
+                  }
+                  let method = u16le(d, off + 10)?;
+                  let csize = u32le(d, off + 20)?;
+                  let usize_ = u32le(d, off + 24)?;
+                  let nlen = u16le(d, off + 28)?;
+                  let xlen = u16le(d, off + 30)?;
+                  let clen = u16le(d, off + 32)?;
+                  let local = u32le(d, off + 42)?;
+                  off += 46 + nlen + xlen + clen;
+                  if usize_ < FLASH_SIZE {
+                      continue;
+                  }
+                  let lnlen = u16le(d, local + 26)?;
+                  let lxlen = u16le(d, local + 28)?;
+                  let body = d.get(local + 30 + lnlen + lxlen..local + 30 + lnlen + lxlen + csize)?;
+                  let raw = match method {
+                      0 => body.to_vec(),
+                      8 => match miniz_oxide::inflate::decompress_to_vec(body) {
+                          Ok(v) => v,
+                          Err(_) => continue,
+                      },
+                      _ => continue,
+                  };
+                  if raw.len() >= FLASH_SIZE && tg18::is_image(&raw[..FLASH_SIZE]) {
+                      return Some(raw[..FLASH_SIZE].to_vec());
+                  }
+              }
+              None
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_rtc_seconds(y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> f64 {
+              tg18::rtc_seconds(y, mo, d, h, mi, s)
+          }
+
+          // --- creating ------------------------------------------------------------------
+
+          /// Boot a toy from its newest save. `snap` = autosave snapshot bytes,
+          /// `flash` = the toy's own flash save with `meta` (its JSON), any may be null.
+          /// `rtc_now` = tg_rtc_seconds for the local time now. On success `elapsed`
+          /// gets the seconds the clock was moved forward by (0 if none).
+          #[no_mangle]
+          pub extern "C" fn tg_create(
+              rom: *const u8,
+              rom_len: usize,
+              snap: *const u8,
+              snap_len: usize,
+              flash: *const u8,
+              flash_len: usize,
+              meta: *const c_char,
+              rtc_now: f64,
+              elapsed: *mut f64,
+          ) -> *mut Emu {
+              let rom = match unsafe { bytes(rom, rom_len) } {
+                  Some(r) if r.len() >= FLASH_SIZE => r[..FLASH_SIZE].to_vec(),
+                  _ => return std::ptr::null_mut(),
+              };
+              let snap = unsafe { bytes(snap, snap_len) }.map(|s| s.to_vec());
+              let flash = unsafe { bytes(flash, flash_len) }.map(|s| s.to_vec());
+              let meta: Option<SaveMeta> = unsafe { cstr(meta) }.and_then(|t| serde_json::from_str(&t).ok());
+              let r = catch_unwind(move || boot(rom, snap, flash, meta, rtc_now));
+              match r {
+                  Ok(Some((e, el))) => {
+                      if !elapsed.is_null() {
+                          unsafe { *elapsed = el };
+                      }
+                      Box::into_raw(Box::new(e))
+                  }
+                  _ => std::ptr::null_mut(),
+              }
+          }
+
+          fn new_emu(m: Machine, image: Arc<Vec<u8>>) -> Emu {
+              let mut m = m;
+              m.stop_on_bluetooth = true;
+              Emu {
+                  m,
+                  image,
+                  synth: ToneSynth::new(AUDIO_RATE, 0.6),
+                  calls: CallDetector::default(),
+                  audio: Vec::new(),
+                  audio_t: None,
+                  behind: 0.0,
+                  rewind: None,
+                  rewind_at: -1e9,
+                  down: [false; 3],
+                  frames_seen: u64::MAX,
+                  was_asleep: false,
+                  flags: F_FRAME,
+                  stopped: None,
+                  log: Default::default(),
+                  params: Params::default(),
+                  last_speed: 1.0,
+                  boot_note: String::new(),
+              }
+          }
+
+          fn boot(rom: Vec<u8>, snap: Option<Vec<u8>>, flash: Option<Vec<u8>>, meta: Option<SaveMeta>, rtc_now: f64) -> Option<(Emu, f64)> {
+              let image = Arc::new(rom);
+              let flash_at = meta.as_ref().map(|m| m.saved_at).unwrap_or(-1.0);
+              // the snapshot, if it is the newest save and still matches the ROM
+              if let Some(s) = snap.and_then(|b| Snapshot::from_bytes(&b).ok()) {
+                  if s.saved_at() >= flash_at {
+                      let mut m = Machine::new(image.clone(), &image, 0.0);
+                      if s.restore(&mut m).is_ok() {
+                          let mut e = new_emu(m, image.clone());
+                          let away = (tg18::unix_now() - s.saved_at()).max(0.0);
+                          e.boot_note = "Resumed from autosave".into();
+                          let mut moved = 0.0;
+                          if away > 30.0 {
+                              if advance_clock(&mut e, away) {
+                                  moved = away;
+                              } else {
+                                  e.m.sys.rtc.base_ticks += (away * 32768.0) as i64;
+                                  moved = away;
+                              }
+                          }
+                          return Some((e, moved));
+                      }
+                  }
+              }
+              // the toy's own flash save
+              if let Some(f) = flash {
+                  if f.len() == FLASH_SIZE && f[..tg18::CODE_CHECK_LEN] == image[..tg18::CODE_CHECK_LEN] {
+                      let mut m = Machine::new(image.clone(), &f, rtc_now);
+                      let mut moved = 0.0;
+                      if let Some(meta) = &meta {
+                          save::restore_rtc(&mut m, meta, true);
+                          if meta.asleep {
+                              m.press(0.0, Key::B);
+                          }
+                          moved = (tg18::unix_now() - meta.saved_at).max(0.0);
+                      }
+                      let mut e = new_emu(m, image.clone());
+                      e.boot_note = "Resumed from the toy's own save".into();
+                      return Some((e, moved));
+                  }
+              }
+              let m = Machine::new(image.clone(), &image, rtc_now);
+              let mut e = new_emu(m, image);
+              e.boot_note = "New toy".into();
+              Some((e, 0.0))
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_destroy(e: *mut Emu) {
+              if !e.is_null() {
+                  unsafe { drop(Box::from_raw(e)) };
+              }
+          }
+
+          fn with<R: Default>(e: *mut Emu, f: impl FnOnce(&mut Emu) -> R) -> R {
+              if e.is_null() {
+                  return R::default();
+              }
+              let em = unsafe { &mut *e };
+              catch_unwind(AssertUnwindSafe(|| f(em))).unwrap_or_default()
+          }
+
+          // --- running -------------------------------------------------------------------
+
+          /// Run for `real_dt` seconds of wall time. Returns a TG_* code.
+          #[no_mangle]
+          pub extern "C" fn tg_tick(e: *mut Emu, real_dt: f64) -> i32 {
+              if e.is_null() {
+                  return TG_PANIC;
+              }
+              let em = unsafe { &mut *e };
+              match catch_unwind(AssertUnwindSafe(|| tick(em, real_dt))) {
+                  Ok(c) => c,
+                  Err(_) => {
+                      em.stopped = Some(TG_PANIC);
+                      TG_PANIC
+                  }
+              }
+          }
+
+          fn tick(e: &mut Emu, real: f64) -> i32 {
+              if let Some(c) = e.stopped {
+                  return c;
+              }
+              let p = e.params.clone();
+              let mut debt = e.behind + real.max(0.0);
+              let dropped = (debt - p.max_behind).max(0.0);
+              debt -= dropped;
+              let step = debt.min(p.max_step);
+              e.behind = debt - step;
+              let t_start = e.m.now();
+              let target = e.m.executed + (step * CPU_HZ) as u64;
+              e.m.sys.turbo = if step > 0.0 { ((step + dropped) / step).min(p.max_catchup) } else { 1.0 };
+              e.last_speed = e.m.sys.turbo;
+
+              if e.m.sys.powered_off {
+                  let now = e.m.now();
+                  if e.m.never_sleep && !e.m.sys.key_script.iter().any(|&(t, _)| t >= now) {
+                      e.m.press(now, Key::B);
+                  }
+                  if !e.m.power_cycle(target) {
+                      e.m.sys.game_time += (target - e.m.executed) as f64 / CPU_HZ * e.m.sys.turbo;
+                      e.m.executed = target;
+                      e.m.sys.now = target as f64 / CPU_HZ;
+                  }
+              } else {
+                  match e.m.run(target) {
+                      out @ (Outcome::Bluetooth | Outcome::Infrared) => {
+                          let code = if out == Outcome::Bluetooth { TG_BLUETOOTH } else { TG_INFRARED };
+                          log_line(e, format!("game asked for {:?}; rewinding", out));
+                          if !rewind(e) {
+                              e.m.restart();
+                              reset_timing(e);
+                              return TG_BLE_RESTART;
+                          }
+                          return code;
+                      }
+                      Outcome::BleFail => {
+                          log_line(e, "BLE init fail; restarting".into());
+                          e.m.restart();
+                          reset_timing(e);
+                          return TG_BLE_RESTART;
+                      }
+                      out @ (Outcome::Crash | Outcome::Stuck) => {
+                          let c = if out == Outcome::Crash { TG_CRASH } else { TG_STUCK };
+                          log_line(e, format!("stopped {:?} pc={:08X} fault={:?}", out, e.m.cpu.pc(), e.m.fault()));
+                          e.stopped = Some(c);
+                          return c;
+                      }
+                      _ => {}
+                  }
+              }
+              for l in std::mem::take(&mut e.m.log) {
+                  log_line(e, format!("[fw] {}", l));
+              }
+              let t_end = e.m.now();
+              let events = std::mem::take(&mut e.m.sys.sound.events);
+              if e.calls.feed(&events) {
+                  e.flags |= F_CALL;
+              }
+              let start = *e.audio_t.get_or_insert(t_start);
+              let rate = AUDIO_RATE as f64;
+              let n = ((t_end - start) * rate).max(0.0) as usize;
+              e.synth.render(&events, start, start + n as f64 / rate, n, &mut e.audio);
+              e.audio_t = Some(start + n as f64 / rate);
+              if e.audio.len() > AUDIO_RATE as usize {
+                  let cut = e.audio.len() - AUDIO_RATE as usize / 4;
+                  e.audio.drain(..cut);
+              }
+              let asleep = e.m.sys.powered_off;
+              if asleep && !e.was_asleep {
+                  e.flags |= F_SLEPT;
+              }
+              if !asleep && e.was_asleep {
+                  e.flags |= F_WOKE;
+              }
+              if asleep != e.was_asleep || e.m.sys.lcd.frames != e.frames_seen {
+                  e.flags |= F_FRAME;
+              }
+              e.was_asleep = asleep;
+              TG_OK
+          }
+
+          fn reset_timing(e: &mut Emu) {
+              e.behind = 0.0;
+              e.audio_t = None;
+              e.frames_seen = u64::MAX;
+              e.flags |= F_FRAME;
+          }
+
+          fn rewind(e: &mut Emu) -> bool {
+              release_all(e);
+              let snap = match e.rewind.take() {
+                  Some(s) => s,
+                  None => return false,
+              };
+              let mut m = Machine::new(e.image.clone(), &e.image, 0.0);
+              if snap.restore(&mut m).is_err() {
+                  return false;
+              }
+              m.stop_on_bluetooth = true;
+              m.never_sleep = e.m.never_sleep;
+              m.idle_skip = e.m.idle_skip;
+              e.m = m;
+              reset_timing(e);
+              true
+          }
+
+          fn release_all(e: &mut Emu) {
+              e.down = [false; 3];
+              e.m.sys.live_keys = [false; 3];
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_take_flags(e: *mut Emu) -> u32 {
+              with(e, |e| std::mem::take(&mut e.flags))
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_press(e: *mut Emu, key: i32, wall: f64) {
+              with(e, |e| {
+                  let k = match key_of(key) {
+                      Some(k) => k,
+                      None => return,
+                  };
+                  let i = k.index();
+                  if e.down[i] {
+                      return;
+                  }
+                  e.down[i] = true;
+                  if !e.m.sys.powered_off && wall - e.rewind_at >= e.params.rewind_gap {
+                      e.rewind = Some(Snapshot::capture(&e.m));
+                      e.rewind_at = wall;
+                  }
+                  e.m.sys.live_keys[i] = true;
+                  e.m.alarm_wake = false;
+                  let now = e.m.now();
+                  e.m.sys.hold_until[i] = now + e.params.min_hold;
+                  if e.m.sys.powered_off {
+                      e.m.sys.key_script.retain(|&(t, _)| t > now - 1.0);
+                      e.m.press(now, k);
+                  }
+              })
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_release(e: *mut Emu, key: i32) {
+              with(e, |e| {
+                  if let Some(k) = key_of(key) {
+                      e.down[k.index()] = false;
+                      e.m.sys.live_keys[k.index()] = false;
+                  }
+              })
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_release_all(e: *mut Emu) {
+              with(e, |e| release_all(e))
+          }
+
+          /// Copy the 128x128 screen as 0x00RRGGBB into `out` (16384 u32).
+          /// Returns 1 when the screen is dark (asleep / backlight off).
+          #[no_mangle]
+          pub extern "C" fn tg_frame(e: *mut Emu, out: *mut u32) -> i32 {
+              with(e, |e| {
+                  if out.is_null() {
+                      return 0;
+                  }
+                  e.frames_seen = e.m.sys.lcd.frames;
+                  let px = unsafe { std::slice::from_raw_parts_mut(out, 128 * 128) };
+                  e.m.sys.lcd.argb(px);
+                  (e.m.sys.powered_off || e.m.alarm_wake) as i32
+              })
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_is_asleep(e: *mut Emu) -> i32 {
+              with(e, |e| e.m.sys.powered_off as i32)
+          }
+
+          /// Move up to `max` audio samples (44.1 kHz mono i16) into `out`.
+          #[no_mangle]
+          pub extern "C" fn tg_take_audio(e: *mut Emu, out: *mut i16, max: usize) -> usize {
+              with(e, |e| {
+                  if out.is_null() {
+                      return 0;
+                  }
+                  let n = e.audio.len().min(max);
+                  unsafe { std::ptr::copy_nonoverlapping(e.audio.as_ptr(), out, n) };
+                  e.audio.drain(..n);
+                  n
+              })
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_set_volume(e: *mut Emu, v: f64) {
+              with(e, |e| e.synth.set_volume(v.clamp(0.0, 1.5)))
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_set_never_sleep(e: *mut Emu, on: i32) {
+              with(e, |e| e.m.never_sleep = on != 0)
+          }
+
+          // --- saving, sleeping, the clock -------------------------------------------------
+
+          #[no_mangle]
+          pub extern "C" fn tg_snapshot(e: *mut Emu, out: *mut *mut u8, out_len: *mut usize) -> i32 {
+              with(e, |e| {
+                  give(Snapshot::capture(&e.m).to_bytes(), out, out_len);
+                  1
+              })
+          }
+
+          /// Write the toy's own flash save to `path` (+ path.json).
+          #[no_mangle]
+          pub extern "C" fn tg_flash_save(e: *mut Emu, path: *const c_char) -> i32 {
+              let path = match unsafe { cstr(path) } {
+                  Some(p) => p,
+                  None => return 0,
+              };
+              with(e, |e| {
+                  let asleep = e.m.sys.powered_off;
+                  save::write_machine(&e.m, &path, asleep, asleep).is_ok() as i32
+              })
+          }
+
+          fn force_sleep(e: &mut Emu, limit: f64) -> bool {
+              let m = &mut e.m;
+              if m.sys.powered_off {
+                  return true;
+              }
+              let counter = match m.idle_counter {
+                  Some(c) => c,
+                  None => return false,
+              };
+              let never = m.never_sleep;
+              m.never_sleep = false;
+              let end = m.executed + (limit * CPU_HZ) as u64;
+              while !m.sys.powered_off && m.executed < end {
+                  m.sys.poke(counter, &[0xFE]);
+                  let out = m.run(end.min(m.executed + CPU_HZ as u64 / 10));
+                  if !matches!(out, Outcome::Limit | Outcome::PowerOff) {
+                      break;
+                  }
+              }
+              m.never_sleep = never;
+              m.sys.sound.events.clear();
+              m.sys.powered_off
+          }
+
+          fn change_clock(e: &mut Emu, ticks: impl Fn(&Machine) -> i64) -> bool {
+              if !force_sleep(e, 10.0) {
+                  return false;
+              }
+              let m = &mut e.m;
+              let shift = ticks(m) - m.sys.rtc.ticks(m.sys.game_time);
+              m.sys.rtc.base_ticks += shift;
+              let now = m.now();
+              m.press(now, Key::B);
+              let limit = m.executed + CPU_HZ as u64;
+              m.power_cycle(limit);
+              reset_timing(e);
+              true
+          }
+
+          fn advance_clock(e: &mut Emu, secs: f64) -> bool {
+              let add = (secs * 32768.0) as i64;
+              change_clock(e, |m| m.sys.rtc.ticks(m.sys.game_time) + add)
+          }
+
+          /// Put the toy to sleep now (it saves itself, like the real one).
+          #[no_mangle]
+          pub extern "C" fn tg_force_sleep(e: *mut Emu) -> i32 {
+              with(e, |e| {
+                  let r = force_sleep(e, 10.0);
+                  e.was_asleep = e.m.sys.powered_off;
+                  reset_timing(e);
+                  r as i32
+              })
+          }
+
+          /// Wake a sleeping toy with the middle button.
+          #[no_mangle]
+          pub extern "C" fn tg_wake(e: *mut Emu) {
+              with(e, |e| {
+                  if e.m.sys.powered_off {
+                      let now = e.m.now();
+                      e.m.press(now, Key::B);
+                  }
+              })
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_advance_clock(e: *mut Emu, secs: f64) -> i32 {
+              with(e, |e| advance_clock(e, secs) as i32)
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_sync_clock(e: *mut Emu, rtc_seconds: f64) -> i32 {
+              with(e, |e| change_clock(e, |_| (rtc_seconds * 32768.0) as i64) as i32)
+          }
+
+          /// Like pulling the batteries: flash and clock stay.
+          #[no_mangle]
+          pub extern "C" fn tg_restart(e: *mut Emu) {
+              with(e, |e| {
+                  e.m.restart();
+                  e.stopped = None;
+                  release_all(e);
+                  reset_timing(e);
+              })
+          }
+
+          // --- console ---------------------------------------------------------------------
+
+          /// Status, log and boot note as text.
+          #[no_mangle]
+          pub extern "C" fn tg_status(e: *mut Emu, out: *mut *mut u8, out_len: *mut usize) {
+              let s = with(e, |e| {
+                  let m = &e.m;
+                  let p = &e.params;
+                  format!(
+                      "boot: {}\nstopped: {:?}\nasleep: {} alarm_wake: {}\npc: {:08X} fault: {:?}\nexecuted: {} ({:.1} s emulated)\ngame_time: {:.1}\nirqs: {} frames: {}\nidle_skip: {} skipped: {} probes: {:?}\nnever_sleep: {} idle_counter: {:?}\nflash writes: {}\nrtc ticks: {} alarm: {:?}\nturbo: {:.2}\nbluetooth_used: {} ble_failed: {}\nparams: max_step={} max_behind={} max_catchup={} min_hold={} rewind_gap={}\naudio queued: {}",
+                      e.boot_note, e.stopped, m.sys.powered_off, m.alarm_wake, m.cpu.pc(), m.fault(), m.executed, m.now(), m.sys.game_time,
+                      m.irqs, m.sys.lcd.frames, m.idle_skip, m.idle_skipped, m.probe_stats, m.never_sleep, m.idle_counter,
+                      m.sys.flash.writes, m.sys.rtc.ticks(m.sys.game_time), m.sys.rtc.alarm_ticks(), e.last_speed,
+                      m.bluetooth_used, m.ble_failed, p.max_step, p.max_behind, p.max_catchup, p.min_hold, p.rewind_gap, e.audio.len()
+                  )
+              });
+              give_string(s, out, out_len)
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_log(e: *mut Emu, out: *mut *mut u8, out_len: *mut usize) {
+              let s = with(e, |e| e.log.iter().cloned().collect::<Vec<_>>().join("\n"));
+              give_string(s, out, out_len)
+          }
+
+          /// Set a tunable: max_step, max_behind, max_catchup, min_hold, rewind_gap,
+          /// idle_skip, never_sleep, print_log, turbo_now. Returns 1 if known.
+          #[no_mangle]
+          pub extern "C" fn tg_set_param(e: *mut Emu, name: *const c_char, v: f64) -> i32 {
+              let name = match unsafe { cstr(name) } {
+                  Some(n) => n,
+                  None => return 0,
+              };
+              with(e, |e| {
+                  let p = &mut e.params;
+                  match name.as_str() {
+                      "max_step" => p.max_step = v.clamp(0.001, 0.5),
+                      "max_behind" => p.max_behind = v.clamp(0.0, 30.0),
+                      "max_catchup" => p.max_catchup = v.clamp(1.0, 1000.0),
+                      "min_hold" => p.min_hold = v.clamp(0.0, 1.0),
+                      "rewind_gap" => p.rewind_gap = v.clamp(0.0, 60.0),
+                      "idle_skip" => e.m.idle_skip = v != 0.0,
+                      "never_sleep" => e.m.never_sleep = v != 0.0,
+                      "stop_on_bluetooth" => e.m.stop_on_bluetooth = v != 0.0,
+                      "unstop" => e.stopped = None,
+                      _ => return 0,
+                  }
+                  1
+              })
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_peek(e: *mut Emu, addr: u32, out: *mut u8, n: usize) -> i32 {
+              with(e, |e| {
+                  if out.is_null() {
+                      return 0;
+                  }
+                  let o = unsafe { std::slice::from_raw_parts_mut(out, n) };
+                  for (i, b) in o.iter_mut().enumerate() {
+                      *b = e.m.sys.read8(addr.wrapping_add(i as u32));
+                  }
+                  1
+              })
+          }
+
+          #[no_mangle]
+          pub extern "C" fn tg_poke(e: *mut Emu, addr: u32, data: *const u8, n: usize) -> i32 {
+              let d = match unsafe { bytes(data, n) } {
+                  Some(d) => d.to_vec(),
+                  None => return 0,
+              };
+              with(e, |e| {
+                  e.m.sys.poke(addr, &d);
+                  1
+              })
+          }
+
+          /// Queue a scripted press `delay` emulated seconds from now (works asleep too).
+          #[no_mangle]
+          pub extern "C" fn tg_script_press(e: *mut Emu, key: i32, delay: f64) {
+              with(e, |e| {
+                  if let Some(k) = key_of(key) {
+                      let t = e.m.now() + delay.max(0.0);
+                      e.m.press(t, k);
+                  }
+              })
+          }
+
+          /// Read a C string from emulated memory (for the console).
+          #[no_mangle]
+          pub extern "C" fn tg_read_cstr(e: *mut Emu, addr: u32, out: *mut *mut u8, out_len: *mut usize) {
+              let s = with(e, |e| e.m.read_cstr(addr, 256));
+              give_string(s, out, out_len)
+          }
+
+          /// 1 if `snap` is a snapshot that can be restored with this ROM.
+          #[no_mangle]
+          pub extern "C" fn tg_check_snapshot(rom: *const u8, rom_len: usize, snap: *const u8, snap_len: usize) -> i32 {
+              let (rom, snap) = match unsafe { (bytes(rom, rom_len), bytes(snap, snap_len)) } {
+                  (Some(r), Some(s)) if r.len() >= FLASH_SIZE => (r[..FLASH_SIZE].to_vec(), s.to_vec()),
+                  _ => return 0,
+              };
+              catch_unwind(move || {
+                  let image = Arc::new(rom);
+                  let s = match Snapshot::from_bytes(&snap) {
+                      Ok(s) => s,
+                      Err(_) => return 0,
+                  };
+                  let mut m = Machine::new(image.clone(), &image, 0.0);
+                  s.restore(&mut m).is_ok() as i32
+              })
+              .unwrap_or(0)
+          }
+          TAMA_EOF
+          cat > tools/icon.py <<'TAMA_EOF'
+          # Draws the TamaiOS app icon (1024x1024, no alpha).
+          import sys
+          from PIL import Image, ImageDraw, ImageFilter
+          S = 1024
+          def lerp(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+          img = Image.new("RGB", (S, S))
+          d = ImageDraw.Draw(img)
+          top, bot = (255, 200, 222), (190, 150, 250)
+          for y in range(S):
+              d.line([(0, y), (S, y)], fill=lerp(top, bot, y / S))
+          # egg
+          def egg(scale, cx, cy):
+              pts = []
+              import math
+              for i in range(720):
+                  a = i / 720 * 2 * math.pi
+                  x = math.sin(a)
+                  y = -math.cos(a)
+                  k = 1 - 0.22 * max(0.0, -y) ** 1.6   # narrower towards the top, smooth at the waist
+                  pts.append((cx + x * scale * 0.80 * k, cy + y * scale * (1.05 if y < 0 else 0.92)))
+              return pts
+          shadow = Image.new("L", (S, S), 0)
+          ImageDraw.Draw(shadow).polygon(egg(400, 512, 560), fill=150)
+          shadow = shadow.filter(ImageFilter.GaussianBlur(30))
+          img.paste((120, 60, 140), (0, 0), shadow)
+          mask = Image.new("L", (S, S), 0)
+          ImageDraw.Draw(mask).polygon(egg(400, 512, 530), fill=255)
+          shell = Image.new("RGB", (S, S))
+          sd = ImageDraw.Draw(shell)
+          for y in range(S):
+              sd.line([(0, y), (S, y)], fill=lerp((255, 236, 246), (247, 112, 170), max(0, min(1, (y - 120) / 800))))
+          img.paste(shell, (0, 0), mask)
+          d = ImageDraw.Draw(img)
+          # gloss
+          gl = Image.new("L", (S, S), 0)
+          ImageDraw.Draw(gl).ellipse([300, 190, 520, 290], fill=140)
+          gl = gl.filter(ImageFilter.GaussianBlur(14))
+          img.paste((255, 255, 255), (0, 0), gl)
+          # screen
+          d.rounded_rectangle([352, 360, 672, 680], radius=46, fill=(30, 26, 40))
+          d.rounded_rectangle([382, 390, 642, 650], radius=18, fill=(150, 230, 200))
+          # pixel pet
+          px = 20
+          pet = ["..XXXX..",
+                 ".XXXXXX.",
+                 "XX.XX.XX",
+                 "XXXXXXXX",
+                 "XX.XX.XX",
+                 "XXX..XXX",
+                 ".XXXXXX.",
+                 "..X..X.."]
+          ox, oy = 512 - 4 * px, 520 - 4 * px
+          for r, row in enumerate(pet):
+              for c, ch in enumerate(row):
+                  if ch == "X":
+                      d.rectangle([ox + c * px, oy + r * px, ox + c * px + px - 1, oy + r * px + px - 1], fill=(40, 70, 70))
+          # buttons
+          for (x, y) in [(400, 770), (512, 800), (624, 770)]:
+              d.ellipse([x - 38, y - 38, x + 38, y + 38], fill=(255, 230, 120), outline=(200, 120, 150), width=5)
+          img.save(sys.argv[1])
+          TAMA_EOF
+          cat > ios/project.yml <<'TAMA_EOF'
+          name: TamaiOS
+          options:
+            bundleIdPrefix: com.jakebway
+            deploymentTarget:
+              iOS: "16.0"
+          targets:
+            TamaiOS:
+              type: application
+              platform: iOS
+              sources:
+                - path: TamaiOS
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.jakebway.tamaios
+                  PRODUCT_NAME: TamaiOS
+                  INFOPLIST_FILE: TamaiOS/Info.plist
+                  GENERATE_INFOPLIST_FILE: NO
+                  SWIFT_OBJC_BRIDGING_HEADER: TamaiOS/Bridge.h
+                  SWIFT_VERSION: "5.0"
+                  LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/lib
+                  OTHER_LDFLAGS: -ltamaios
+                  ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+                  TARGETED_DEVICE_FAMILY: "1"
+                  MARKETING_VERSION: "1.0"
+                  CURRENT_PROJECT_VERSION: "1"
+                  CODE_SIGNING_ALLOWED: NO
+                  CODE_SIGNING_REQUIRED: NO
+                  CODE_SIGN_IDENTITY: ""
+                  ENABLE_BITCODE: NO
+                  DEAD_CODE_STRIPPING: YES
+          TAMA_EOF
+          cat > ios/TamaiOS/Info.plist <<'TAMA_EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key><string>en</string>
+              <key>CFBundleDisplayName</key><string>TamaiOS</string>
+              <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+              <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+              <key>CFBundleName</key><string>TamaiOS</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+              <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+              <key>LSRequiresIPhoneOS</key><true/>
+              <key>UILaunchScreen</key><dict><key>UIColorName</key><string>LaunchColor</string></dict>
+              <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+              <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+              <key>UIRequiresFullScreen</key><true/>
+              <key>UIBackgroundModes</key><array><string>audio</string></array>
+              <key>UIFileSharingEnabled</key><true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key><false/>
+              <key>CFBundleDocumentTypes</key>
+              <array>
+                  <dict>
+                      <key>CFBundleTypeName</key><string>Tamagotchi ON dump or TamaiOS backup</string>
+                      <key>CFBundleTypeRole</key><string>Viewer</string>
+                      <key>LSHandlerRank</key><string>Alternate</string>
+                      <key>LSItemContentTypes</key>
+                      <array><string>public.data</string><string>public.zip-archive</string></array>
+                  </dict>
+              </array>
+          </dict>
+          </plist>
+          TAMA_EOF
+          cat > ios/TamaiOS/Bridge.h <<'TAMA_EOF'
+          #ifndef TAMAIOS_BRIDGE_H
+          #define TAMAIOS_BRIDGE_H
+          #include <stdint.h>
+          #include <stddef.h>
+
+          typedef struct Emu Emu;
+
+          typedef struct {
+              uint64_t hash;
+              int32_t known;
+              uint8_t name[64];
+              uint8_t stem[96];
+          } TgRomInfo;
+
+          void tg_free(uint8_t *p, size_t n);
+          int32_t tg_check_rom(const uint8_t *p, size_t n, TgRomInfo *info);
+          int32_t tg_rom_from_zip(const uint8_t *p, size_t n, uint8_t **out, size_t *out_len);
+          int32_t tg_check_snapshot(const uint8_t *rom, size_t rom_len, const uint8_t *snap, size_t snap_len);
+          double tg_rtc_seconds(int64_t y, uint32_t mo, uint32_t d, uint32_t h, uint32_t mi, uint32_t s);
+
+          Emu *tg_create(const uint8_t *rom, size_t rom_len,
+                         const uint8_t *snap, size_t snap_len,
+                         const uint8_t *flash, size_t flash_len,
+                         const char *meta, double rtc_now, double *elapsed);
+          void tg_destroy(Emu *e);
+
+          int32_t tg_tick(Emu *e, double real_dt);
+          uint32_t tg_take_flags(Emu *e);
+          void tg_press(Emu *e, int32_t key, double wall);
+          void tg_release(Emu *e, int32_t key);
+          void tg_release_all(Emu *e);
+          int32_t tg_frame(Emu *e, uint32_t *out);
+          int32_t tg_is_asleep(Emu *e);
+          size_t tg_take_audio(Emu *e, int16_t *out, size_t max);
+          void tg_set_volume(Emu *e, double v);
+          void tg_set_never_sleep(Emu *e, int32_t on);
+
+          int32_t tg_snapshot(Emu *e, uint8_t **out, size_t *out_len);
+          int32_t tg_flash_save(Emu *e, const char *path);
+          int32_t tg_force_sleep(Emu *e);
+          void tg_wake(Emu *e);
+          int32_t tg_advance_clock(Emu *e, double secs);
+          int32_t tg_sync_clock(Emu *e, double rtc_seconds);
+          void tg_restart(Emu *e);
+
+          void tg_status(Emu *e, uint8_t **out, size_t *out_len);
+          void tg_log(Emu *e, uint8_t **out, size_t *out_len);
+          int32_t tg_set_param(Emu *e, const char *name, double v);
+          int32_t tg_peek(Emu *e, uint32_t addr, uint8_t *out, size_t n);
+          int32_t tg_poke(Emu *e, uint32_t addr, const uint8_t *data, size_t n);
+          void tg_script_press(Emu *e, int32_t key, double delay);
+          void tg_read_cstr(Emu *e, uint32_t addr, uint8_t **out, size_t *out_len);
+
+          #endif
+          TAMA_EOF
+          cat > ios/TamaiOS/Assets.xcassets/Contents.json <<'TAMA_EOF'
+          { "info" : { "author" : "xcode", "version" : 1 } }
+          TAMA_EOF
+          cat > ios/TamaiOS/Assets.xcassets/AppIcon.appiconset/Contents.json <<'TAMA_EOF'
+          { "images" : [ { "filename" : "icon.png", "idiom" : "universal", "platform" : "ios", "size" : "1024x1024" } ], "info" : { "author" : "xcode", "version" : 1 } }
+          TAMA_EOF
+          cat > ios/TamaiOS/Assets.xcassets/LaunchColor.colorset/Contents.json <<'TAMA_EOF'
+          { "colors" : [ { "color" : { "color-space" : "srgb", "components" : { "alpha" : "1.000", "red" : "0.980", "green" : "0.620", "blue" : "0.760" } }, "idiom" : "universal" } ], "info" : { "author" : "xcode", "version" : 1 } }
+          TAMA_EOF
+          cat > ios/TamaiOS/AddToyView.swift <<'TAMA_EOF'
+          import SwiftUI
+          import UniformTypeIdentifiers
+
+          /// Pick a ROM dump, check it, name the toy, pick a colour, hatch.
+          struct AddToyView: View {
+              let firstRun: Bool
+              @EnvironmentObject var model: AppModel
+              @Environment(\.dismiss) private var dismiss
+
+              enum Step { case pick, checking, found(RomCheck), failed(ImportError) }
+              @State private var step: Step = .pick
+              @State private var picking = false
+              @State private var name = ""
+              @State private var color = 0
+              @State private var showHelp = false
+              @State private var existing: Toy?
+
+              var body: some View {
+                  let theme = Theme.of(color)
+                  ZStack {
+                      LinearGradient(colors: [theme.top, theme.bottom], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
+                      ScrollView {
+                          VStack(spacing: 22) {
+                              if !firstRun {
+                                  HStack { Spacer(); Button("Cancel") { dismiss() }.foregroundStyle(theme.ink) }
+                              }
+                              EggBadge(theme: theme).frame(width: 120, height: 150).padding(.top, firstRun ? 30 : 0)
+                              content(theme)
+                          }
+                          .padding(24)
+                          .frame(maxWidth: 520)
+                          .frame(maxWidth: .infinity)
+                      }
+                  }
+                  .fileImporter(isPresented: $picking, allowedContentTypes: [.item], allowsMultipleSelection: false) { r in
+                      if case .success(let urls) = r, let u = urls.first { check(u) }
+                  }
+                  .sheet(isPresented: $showHelp) { DumpHelpView() }
+                  .onAppear(perform: takePending)
+                  .onChange(of: model.pendingImport) { _ in takePending() }
+              }
+
+              @ViewBuilder
+              private func content(_ theme: Theme) -> some View {
+                  switch step {
+                  case .pick:
+                      VStack(spacing: 14) {
+                          Text(firstRun ? "Welcome to TamaiOS" : "Add a toy")
+                              .font(.system(size: 30, weight: .heavy, design: .rounded))
+                          Text("Bring your own Tamagotchi ON or Meets to your iPhone. You'll need the 8 MB flash dump you read from your own toy.")
+                              .font(.system(.body, design: .rounded))
+                              .multilineTextAlignment(.center)
+                              .opacity(0.85)
+                      }
+                      .foregroundStyle(theme.ink)
+                      BigButton(title: "Choose my ROM file", icon: "folder.fill", theme: theme) { picking = true }
+                      Text("A .bin file, or a .zip with one inside. You can also share it to TamaiOS from Files or AirDrop.")
+                          .font(.system(.footnote, design: .rounded)).multilineTextAlignment(.center)
+                          .foregroundStyle(theme.ink.opacity(0.75))
+                      Button { showHelp = true } label: {
+                          Label("How do I get my ROM?", systemImage: "questionmark.circle.fill")
+                              .font(.system(.callout, design: .rounded).weight(.semibold))
+                      }
+                      .foregroundStyle(theme.ink)
+
+                  case .checking:
+                      ProgressView().scaleEffect(1.6).tint(theme.ink).padding(30)
+                      Text("Checking your file…").font(.system(.headline, design: .rounded)).foregroundStyle(theme.ink)
+
+                  case .found(let c):
+                      Card {
+                          VStack(alignment: .leading, spacing: 12) {
+                              Label(c.known ? "Found \(c.name)" : "Tamagotchi ON / Meets dump", systemImage: "checkmark.seal.fill")
+                                  .font(.system(.headline, design: .rounded)).foregroundStyle(.green)
+                              if !c.known {
+                                  Text("This version isn't one TamaiOS has been tested with. It will probably still work — if it doesn't, use Settings › Console › diag and send the result.")
+                                      .font(.system(.footnote, design: .rounded)).foregroundStyle(.secondary)
+                              }
+                              if let e = existing {
+                                  Text("You already have this toy (\"\(e.name)\"). Hatching it again replaces nothing — it just opens your existing one.")
+                                      .font(.system(.footnote, design: .rounded)).foregroundStyle(.secondary)
+                              } else {
+                                  Text("Name").font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                  TextField(c.shortName, text: $name)
+                                      .textFieldStyle(.roundedBorder)
+                                      .font(.system(.body, design: .rounded))
+                                  Text("Shell colour").font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                  ColorPickerRow(selection: $color)
+                              }
+                          }
+                      }
+                      BigButton(title: existing == nil ? "Hatch!" : "Open my toy", icon: "sparkles", theme: theme) { hatch(c) }
+                      Button("Choose a different file") { step = .pick }.foregroundStyle(theme.ink)
+
+                  case .failed(let e):
+                      Card {
+                          VStack(alignment: .leading, spacing: 10) {
+                              Label(e.title, systemImage: "exclamationmark.triangle.fill")
+                                  .font(.system(.headline, design: .rounded)).foregroundStyle(.orange)
+                              Text(e.errorDescription ?? "").font(.system(.body, design: .rounded))
+                          }
+                      }
+                      BigButton(title: "Try another file", icon: "folder.fill", theme: theme) { picking = true }
+                      Button { showHelp = true } label: { Label("How do I get my ROM?", systemImage: "questionmark.circle.fill") }
+                          .foregroundStyle(theme.ink)
+                  }
+              }
+
+              private func takePending() {
+                  if let u = model.pendingImport {
+                      model.pendingImport = nil
+                      check(u)
+                  }
+              }
+
+              private func check(_ url: URL) {
+                  step = .checking
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      let result: Step
+                      do {
+                          let data = try ToyStore.readPicked(url)
+                          result = .found(try ToyStore.check(data))
+                      } catch let e as ImportError {
+                          result = .failed(e)
+                      } catch {
+                          result = .failed(.unreadable(error.localizedDescription))
+                      }
+                      DispatchQueue.main.async {
+                          if case .found(let c) = result {
+                              existing = model.toys.first { $0.id == c.stem }
+                              name = ""
+                          }
+                          withAnimation(.spring()) { step = result }
+                      }
+                  }
+              }
+
+              private func hatch(_ c: RomCheck) {
+                  if let e = existing {
+                      model.showAdd = false
+                      model.play(e)
+                      dismiss()
+                      return
+                  }
+                  do {
+                      let toy = try ToyStore.create(c, name: name.trimmingCharacters(in: .whitespaces), color: color)
+                      model.added(toy)
+                      dismiss()
+                  } catch {
+                      step = .failed(.unreadable(error.localizedDescription))
+                  }
+              }
+          }
+
+          struct BigButton: View {
+              let title: String
+              let icon: String
+              let theme: Theme
+              let action: () -> Void
+              var body: some View {
+                  Button(action: action) {
+                      Label(title, systemImage: icon)
+                          .font(.system(.title3, design: .rounded).weight(.bold))
+                          .frame(maxWidth: .infinity)
+                          .padding(.vertical, 16)
+                          .background(Capsule().fill(theme.ink))
+                          .foregroundStyle(theme.top)
+                          .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+                  }
+                  .buttonStyle(.plain)
+              }
+          }
+
+          struct Card<C: View>: View {
+              @ViewBuilder let content: C
+              var body: some View {
+                  content
+                      .padding(18)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(.regularMaterial))
+              }
+          }
+
+          struct ColorPickerRow: View {
+              @Binding var selection: Int
+              var body: some View {
+                  HStack(spacing: 10) {
+                      ForEach(Theme.all) { t in
+                          Circle()
+                              .fill(LinearGradient(colors: [t.top, t.bottom], startPoint: .top, endPoint: .bottom))
+                              .frame(width: 38, height: 38)
+                              .overlay(Circle().stroke(Color.primary, lineWidth: selection == t.id ? 3 : 0))
+                              .onTapGesture { withAnimation { selection = t.id } }
+                              .accessibilityLabel(t.name)
+                      }
+                  }
+              }
+          }
+
+          /// A small egg for headers.
+          struct EggBadge: View {
+              let theme: Theme
+              var body: some View {
+                  GeometryReader { g in
+                      ZStack {
+                          EggShape().fill(LinearGradient(colors: [theme.top.opacity(0.95), theme.bottom], startPoint: .topLeading, endPoint: .bottomTrailing))
+                          EggShape().stroke(Color.white.opacity(0.7), lineWidth: 3)
+                          RoundedRectangle(cornerRadius: g.size.width * 0.08)
+                              .fill(Color(white: 0.12))
+                              .frame(width: g.size.width * 0.46, height: g.size.width * 0.46)
+                              .overlay(Text("♥").font(.system(size: g.size.width * 0.2)).foregroundStyle(theme.top))
+                              .offset(y: -g.size.height * 0.02)
+                      }
+                      .shadow(color: .black.opacity(0.2), radius: 10, y: 6)
+                  }
+              }
+          }
+
+          struct DumpHelpView: View {
+              @Environment(\.dismiss) private var dismiss
+              var body: some View {
+                  NavigationStack {
+                      DumpHelpContent()
+                          .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                  }
+              }
+          }
+
+          struct DumpHelpContent: View {
+              var body: some View {
+                      List {
+                          Section("What you need") {
+                              Text("A copy (\"dump\") of the 8 MB flash chip inside your own Tamagotchi ON or Tamagotchi Meets. TamaiOS doesn't include any game — it runs the one from your toy.")
+                          }
+                          Section("How people usually dump it") {
+                              Text("1. Open the toy and find the 8-pin flash chip on the board.")
+                              Text("2. Clip a CH341A programmer (set to 3.3 V) onto the chip.")
+                              Text("3. Read the chip with the programmer's software and save the result as a .bin file. Read it twice and check both files match.")
+                              Text("4. Put the .bin in the Files app (iCloud Drive or On My iPhone) or AirDrop it to your phone, then choose it here.")
+                          }
+                          Section("Works with") {
+                              Text("Tamagotchi ON: Fairy, Magic, Wonder Garden (EN)")
+                              Text("Tamagotchi Meets: Fairy, Magical, Pastel, Sanrio, Sweets, Fantasy (JP)")
+                          }
+                          Section("Not available") {
+                              Text("Bluetooth (the phone app, downloads, camera) and infrared (playdates, gifts, marriage) can't be used. If you choose them, the toy is put back to just before.")
+                          }
+                      }
+                      .navigationTitle("Getting your ROM")
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/App.swift <<'TAMA_EOF'
+          import SwiftUI
+          import UniformTypeIdentifiers
+          import UserNotifications
+
+          @main
+          struct TamaiOSApp: App {
+              @UIApplicationDelegateAdaptor(AppDelegate.self) var delegate
+              @StateObject private var model = AppModel()
+              @Environment(\.scenePhase) private var phase
+
+              init() { Prefs.register() }
+
+              var body: some Scene {
+                  WindowGroup {
+                      RootView()
+                          .environmentObject(model)
+                          .environmentObject(model.emu)
+                          .onOpenURL { model.open($0) }
+                  }
+                  .onChange(of: phase) { p in
+                      switch p {
+                      case .background: model.emu.enterBackground()
+                      case .active:
+                          model.emu.enterForeground()
+                          UIApplication.shared.isIdleTimerDisabled = Prefs.flag("keepAwake")
+                      default: break
+                      }
+                  }
+              }
+          }
+
+          final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+                  UNUserNotificationCenter.current().delegate = self
+                  return true
+              }
+              func applicationWillTerminate(_ application: UIApplication) {
+                  AppModel.current?.emu.willTerminate()
+              }
+              func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                          withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+                  completionHandler([])  // in the app you can already hear it
+              }
+          }
+
+          /// The toys and which one is in play.
+          final class AppModel: ObservableObject {
+              static weak var current: AppModel?
+              let emu = Emulator()
+              @Published var toys: [Toy] = []
+              @Published var showAdd = false
+              @Published var pendingImport: URL?
+              @Published var pendingBackup: URL?
+
+              init() {
+                  toys = ToyStore.list()
+                  AppModel.current = self
+                  if let t = currentToy { emu.load(t) }
+              }
+
+              var currentToy: Toy? {
+                  let id = Prefs.d.string(forKey: "currentToy")
+                  return toys.first { $0.id == id } ?? toys.first
+              }
+
+              func play(_ toy: Toy) {
+                  Prefs.d.set(toy.id, forKey: "currentToy")
+                  emu.load(toy)
+                  objectWillChange.send()
+              }
+
+              func added(_ toy: Toy) {
+                  toys = ToyStore.list()
+                  showAdd = false
+                  play(toy)
+                  if Prefs.flag("callAlerts") { Notifier.ask() }
+              }
+
+              func update(_ toy: Toy) {
+                  ToyStore.save(toy)
+                  toys = ToyStore.list()
+                  if emu.toy?.id == toy.id { emu.toy = toy }
+              }
+
+              func remove(_ toy: Toy) {
+                  if emu.toy?.id == toy.id { emu.unload(); emu.toy = nil }
+                  ToyStore.delete(toy.id)
+                  toys = ToyStore.list()
+                  if let t = currentToy { play(t) }
+              }
+
+              /// A file shared into the app (Files "Open in", AirDrop, Share sheet).
+              func open(_ url: URL) {
+                  if url.pathExtension.lowercased() == "tamaios" {
+                      pendingBackup = url
+                  } else {
+                      pendingImport = url
+                      showAdd = true
+                  }
+              }
+          }
+
+          struct Theme: Identifiable {
+              let id: Int
+              let name: String
+              let top: Color
+              let bottom: Color
+              let button: Color
+              let ink: Color
+
+              static let all: [Theme] = [
+                  Theme(id: 0, name: "Bubblegum", top: Color(red: 1.0, green: 0.73, blue: 0.84), bottom: Color(red: 0.96, green: 0.45, blue: 0.66), button: Color(red: 0.99, green: 0.93, blue: 0.62), ink: Color(red: 0.45, green: 0.12, blue: 0.29)),
+                  Theme(id: 1, name: "Sky", top: Color(red: 0.70, green: 0.88, blue: 1.0), bottom: Color(red: 0.33, green: 0.62, blue: 0.95), button: Color(red: 1.0, green: 0.82, blue: 0.86), ink: Color(red: 0.09, green: 0.23, blue: 0.45)),
+                  Theme(id: 2, name: "Mint", top: Color(red: 0.76, green: 0.97, blue: 0.86), bottom: Color(red: 0.32, green: 0.80, blue: 0.62), button: Color(red: 0.98, green: 0.80, blue: 0.95), ink: Color(red: 0.06, green: 0.33, blue: 0.24)),
+                  Theme(id: 3, name: "Lemon", top: Color(red: 1.0, green: 0.96, blue: 0.70), bottom: Color(red: 0.99, green: 0.79, blue: 0.29), button: Color(red: 0.62, green: 0.84, blue: 1.0), ink: Color(red: 0.45, green: 0.30, blue: 0.02)),
+                  Theme(id: 4, name: "Lilac", top: Color(red: 0.89, green: 0.82, blue: 1.0), bottom: Color(red: 0.63, green: 0.50, blue: 0.95), button: Color(red: 0.70, green: 0.97, blue: 0.86), ink: Color(red: 0.25, green: 0.14, blue: 0.48)),
+                  Theme(id: 5, name: "Midnight", top: Color(red: 0.32, green: 0.33, blue: 0.48), bottom: Color(red: 0.12, green: 0.12, blue: 0.22), button: Color(red: 0.98, green: 0.62, blue: 0.80), ink: Color(red: 0.92, green: 0.92, blue: 1.0)),
+              ]
+              static func of(_ i: Int) -> Theme { all[max(0, min(i, all.count - 1))] }
+          }
+
+          struct RootView: View {
+              @EnvironmentObject var model: AppModel
+
+              var body: some View {
+                  Group {
+                      if model.toys.isEmpty {
+                          AddToyView(firstRun: true)
+                      } else {
+                          ToyView()
+                              .sheet(isPresented: $model.showAdd) {
+                                  AddToyView(firstRun: false).environmentObject(model).environmentObject(model.emu)
+                              }
+                      }
+                  }
+                  .preferredColorScheme(nil)
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/Audio.swift <<'TAMA_EOF'
+          import AVFoundation
+          import os
+
+          /// Plays the toy's buzzer. The emulator thread pushes 44.1 kHz samples into a
+          /// ring buffer; the audio thread pulls them. A small cushion is kept against
+          /// dropouts, and extra delay is trimmed so beeps stay in time with the screen.
+          final class AudioOut {
+              static let rate = 44100.0
+              private let engine = AVAudioEngine()
+              private var node: AVAudioSourceNode!
+              private let cap = 44100 * 2
+              private var ring: UnsafeMutablePointer<Float>
+              private var head = 0, count = 0
+              private let lock: UnsafeMutablePointer<os_unfair_lock>
+              private var priming = true
+              var muted = false
+              var minFill = 0.05
+              var maxFill = 0.12
+              private(set) var underruns = 0
+              private(set) var started = false
+              var backgroundMode = true
+
+              init() {
+                  ring = .allocate(capacity: cap)
+                  ring.initialize(repeating: 0, count: cap)
+                  lock = .allocate(capacity: 1)
+                  lock.initialize(to: os_unfair_lock())
+                  let fmt = AVAudioFormat(standardFormatWithSampleRate: AudioOut.rate, channels: 1)!
+                  node = AVAudioSourceNode(format: fmt) { [unowned self] _, _, frames, abl -> OSStatus in
+                      let bufs = UnsafeMutableAudioBufferListPointer(abl)
+                      guard let out = bufs[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+                      self.pull(out, Int(frames))
+                      return noErr
+                  }
+                  engine.attach(node)
+                  engine.connect(node, to: engine.mainMixerNode, format: fmt)
+                  NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+                      guard let self else { return }
+                      let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
+                      let type = AVAudioSession.InterruptionType(rawValue: raw)
+                      if type == .ended { self.restart() }
+                  }
+                  NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+                      self?.restart()
+                  }
+              }
+
+              private func pull(_ out: UnsafeMutablePointer<Float>, _ n: Int) {
+                  os_unfair_lock_lock(lock)
+                  if priming && Double(count) >= minFill * AudioOut.rate { priming = false }
+                  var i = 0
+                  if !priming {
+                      while i < n && count > 0 {
+                          out[i] = muted ? 0 : ring[head]
+                          head = (head + 1) % cap
+                          count -= 1
+                          i += 1
+                      }
+                      if i < n { priming = true; underruns += 1 }
+                  }
+                  os_unfair_lock_unlock(lock)
+                  while i < n { out[i] = 0; i += 1 }
+              }
+
+              func push(_ s: UnsafePointer<Int16>, _ n: Int) {
+                  guard n > 0 else { return }
+                  os_unfair_lock_lock(lock)
+                  for k in 0..<n {
+                      if count == cap { head = (head + 1) % cap; count -= 1 }
+                      ring[(head + count) % cap] = Float(s[k]) / 32768.0
+                      count += 1
+                  }
+                  let high = Int(maxFill * AudioOut.rate), low = Int(minFill * AudioOut.rate)
+                  if count > high {
+                      let drop = count - low
+                      head = (head + drop) % cap
+                      count -= drop
+                  }
+                  os_unfair_lock_unlock(lock)
+              }
+
+              var queued: Int {
+                  os_unfair_lock_lock(lock); defer { os_unfair_lock_unlock(lock) }
+                  return count
+              }
+
+              func configureSession() {
+                  let s = AVAudioSession.sharedInstance()
+                  // .playback keeps the app alive in the background (the pet keeps
+                  // living); mixWithOthers so music/podcasts keep playing.
+                  if backgroundMode {
+                      try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                  } else {
+                      try? s.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+                  }
+                  try? s.setActive(true)
+              }
+
+              func start() {
+                  configureSession()
+                  if !engine.isRunning {
+                      engine.prepare()
+                      do { try engine.start(); started = true } catch { started = false }
+                  }
+              }
+
+              func stop() {
+                  engine.pause()
+                  started = false
+              }
+
+              func restart() {
+                  engine.stop()
+                  start()
+              }
+
+              var isRunning: Bool { engine.isRunning }
+
+              /// A short test beep (console: "beep").
+              func beep() {
+                  var buf = [Int16](repeating: 0, count: 8820)
+                  for i in 0..<buf.count { buf[i] = (i / 20) % 2 == 0 ? 8000 : -8000 }
+                  buf.withUnsafeBufferPointer { push($0.baseAddress!, $0.count) }
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/Console.swift <<'TAMA_EOF'
+          import Foundation
+          import UIKit
+
+          /// Text commands for troubleshooting without rebuilding. Paste one command or
+          /// many (one per line, `#` starts a comment). Settings changed here persist.
+          final class Console: ObservableObject {
+              static let shared = Console()
+              @Published var output: String = "TamaiOS console. Type \"help\" for commands.\n"
+
+              func append(_ s: String) {
+                  output += s.hasSuffix("\n") ? s : s + "\n"
+                  if output.count > 200_000 { output = String(output.suffix(150_000)) }
+              }
+
+              /// Run pasted text (several lines allowed).
+              func runScript(_ text: String, emu: Emulator) {
+                  for raw in text.split(whereSeparator: \.isNewline) {
+                      let line = raw.trimmingCharacters(in: .whitespaces)
+                      if line.isEmpty || line.hasPrefix("#") { continue }
+                      append("> \(line)")
+                      append(run(line, emu: emu))
+                  }
+              }
+
+              static let appKeys: [String: String] = [
+                  "tick_ms": "p.tick_ms", "audio_min_ms": "p.audio_min_ms", "audio_max_ms": "p.audio_max_ms",
+                  "gap_s": "p.gap_s", "autosave_s": "p.autosave_s", "fps": "p.fps", "call_gap_s": "p.call_gap_s",
+                  "volume": "volume",
+              ]
+              static let coreKeys = ["max_step", "max_behind", "max_catchup", "min_hold", "rewind_gap",
+                                     "idle_skip", "never_sleep", "stop_on_bluetooth"]
+              static let flagKeys = ["soundOn", "haptics", "liveInBackground", "callAlerts", "keepAwake", "neverSleep", "showHints"]
+
+              func run(_ line: String, emu: Emulator) -> String {
+                  let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                  guard let cmd = parts.first?.lowercased() else { return "" }
+                  let args = Array(parts.dropFirst())
+                  let noToy = "No toy is running."
+                  switch cmd {
+                  case "help", "?":
+                      return Console.help
+
+                  case "status":
+                      return emu.coreText { tg_status($0, $1, $2) } ?? noToy
+
+                  case "log":
+                      let fw = emu.coreText { tg_log($0, $1, $2) } ?? noToy
+                      let n = Int(args.first ?? "") ?? 60
+                      return fw.split(separator: "\n").suffix(n).joined(separator: "\n")
+
+                  case "applog":
+                      return emu.appLog.suffix(Int(args.first ?? "") ?? 60).joined(separator: "\n")
+
+                  case "diag":
+                      let s = diagnostics(emu)
+                      UIPasteboard.general.string = s
+                      return s + "\n(copied to clipboard — paste it to Claude)"
+
+                  case "clear":
+                      DispatchQueue.main.async { self.output = "" }
+                      return ""
+
+                  case "press", "tap":
+                      guard let k = args.first.flatMap(key) else { return "usage: press A|B|C [hold_ms]" }
+                      let ms = Double(args.dropFirst().first ?? "") ?? 120
+                      emu.press(k)
+                      DispatchQueue.main.asyncAfter(deadline: .now() + ms / 1000) { emu.release(k) }
+                      return "pressed \(args[0].uppercased()) for \(Int(ms)) ms"
+
+                  case "keys":
+                      // keys ABBC [gap_ms] — scripted presses inside the toy's own time
+                      guard let seq = args.first else { return "usage: keys ABC... [gap_ms]" }
+                      let gap = (Double(args.dropFirst().first ?? "") ?? 400) / 1000
+                      var i = 0.0
+                      for ch in seq {
+                          guard let k = key(String(ch)) else { return "unknown key \(ch)" }
+                          emu.withCore { tg_script_press($0, k.rawValue, i * gap + 0.05) }
+                          i += 1
+                      }
+                      return "queued \(Int(i)) presses"
+
+                  case "release":
+                      emu.withCore { tg_release_all($0) }
+                      return "released all buttons"
+
+                  case "wake":
+                      emu.withCore { tg_wake($0) }
+                      return "woke"
+
+                  case "sleep":
+                      emu.sleepNow()
+                      return "asked to sleep"
+
+                  case "restart":
+                      emu.restart()
+                      return "restarted"
+
+                  case "reload":
+                      emu.reload()
+                      return "reloading from saves"
+
+                  case "sync", "syncclock":
+                      emu.syncClock()
+                      return "syncing clock"
+
+                  case "advance":
+                      guard let s = args.first.flatMap(seconds) else { return "usage: advance 90 | 30m | 2h | 1d" }
+                      let r = emu.withCore { tg_advance_clock($0, s) }
+                      return r == 1 ? "clock advanced \(describeDuration(s))" : "toy refused (busy) — clock will catch up later"
+
+                  case "unstop":
+                      emu.withCore { h in "unstop".withCString { tg_set_param(h, $0, 1) } }
+                      DispatchQueue.main.async { emu.stopped = nil }
+                      return "cleared stopped state"
+
+                  case "set":
+                      guard args.count >= 2 else { return "usage: set <name> <value>  (see \"params\")" }
+                      return set(args[0], args[1], emu: emu)
+
+                  case "unset":
+                      guard let k = args.first else { return "usage: unset <name>" }
+                      var p = Prefs.coreParams; p.removeValue(forKey: k); Prefs.coreParams = p
+                      if let ak = Console.appKeys[k] { Prefs.d.removeObject(forKey: ak) }
+                      return "\(k) back to default (core values apply after \"reload\")"
+
+                  case "params":
+                      var out = ["app:"]
+                      for (k, ak) in Console.appKeys.sorted(by: { $0.key < $1.key }) { out.append("  \(k) = \(Prefs.num(ak))") }
+                      out.append("flags:")
+                      for k in Console.flagKeys { out.append("  \(k) = \(Prefs.flag(k))") }
+                      out.append("core overrides (persisted):")
+                      for (k, v) in Prefs.coreParams.sorted(by: { $0.key < $1.key }) { out.append("  \(k) = \(v)") }
+                      out.append("core keys: " + Console.coreKeys.joined(separator: ", "))
+                      return out.joined(separator: "\n")
+
+                  case "reset":
+                      for ak in Console.appKeys.values { Prefs.d.removeObject(forKey: ak) }
+                      Prefs.coreParams = [:]
+                      Prefs.autorun = []
+                      emu.applySettings()
+                      return "all console tweaks and autorun cleared; run \"reload\" to apply core defaults"
+
+                  case "peek":
+                      guard let a = args.first.flatMap(hex) else { return "usage: peek <hexaddr> [len]" }
+                      let n = min(Int(args.dropFirst().first ?? "") ?? 64, 4096)
+                      var buf = [UInt8](repeating: 0, count: n)
+                      guard emu.withCore({ h in buf.withUnsafeMutableBufferPointer { tg_peek(h, a, $0.baseAddress, n) } }) != nil else { return noToy }
+                      return hexdump(buf, base: a)
+
+                  case "poke":
+                      guard args.count >= 2, let a = hex(args[0]) else { return "usage: poke <hexaddr> <hexbytes>" }
+                      let bytes = hexBytes(args.dropFirst().joined())
+                      guard !bytes.isEmpty else { return "no bytes given" }
+                      emu.withCore { h in bytes.withUnsafeBufferPointer { _ = tg_poke(h, a, $0.baseAddress, $0.count) } }
+                      return "wrote \(bytes.count) byte(s) at \(String(format: "%08X", a))"
+
+                  case "str":
+                      guard let a = args.first.flatMap(hex) else { return "usage: str <hexaddr>" }
+                      return emu.coreText { tg_read_cstr($0, a, $1, $2) } ?? noToy
+
+                  case "save":
+                      emu.saveNow()
+                      return "saved"
+
+                  case "files":
+                      guard let t = emu.toy else { return noToy }
+                      let fm = FileManager.default
+                      let items = (try? fm.contentsOfDirectory(at: ToyStore.dir(t.id), includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
+                      return items.map { u in
+                          let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                          return "\(u.lastPathComponent)  \(ToyStore.sizeText(v?.fileSize ?? 0))  \(v?.contentModificationDate.map { "\($0)" } ?? "")"
+                      }.joined(separator: "\n")
+
+                  case "rm":
+                      guard let t = emu.toy, let name = args.first else { return "usage: rm <file>  (rom.bin can't be removed here)" }
+                      guard name != "rom.bin", name != "toy.json", !name.contains("/") else { return "not allowed" }
+                      do { try FileManager.default.removeItem(at: ToyStore.dir(t.id).appendingPathComponent(name)); return "removed \(name)" }
+                      catch { return "\(error.localizedDescription)" }
+
+                  case "restorebak":
+                      guard let t = emu.toy else { return noToy }
+                      let fm = FileManager.default
+                      var done: [String] = []
+                      for u in [ToyStore.snapURL(t.id), ToyStore.flashURL(t.id), ToyStore.flashMetaURL(t.id)] {
+                          let b = u.appendingPathExtension("bak")
+                          if fm.fileExists(atPath: b.path) {
+                              try? fm.removeItem(at: u)
+                              try? fm.moveItem(at: b, to: u)
+                              done.append(u.lastPathComponent)
+                          }
+                      }
+                      if done.isEmpty { return "no .bak files" }
+                      emu.reload()
+                      return "restored \(done.joined(separator: ", ")) and reloaded"
+
+                  case "flag":
+                      guard args.count >= 2, Console.flagKeys.contains(args[0]) else { return "usage: flag <name> on|off   names: " + Console.flagKeys.joined(separator: ", ") }
+                      let on = ["on", "1", "true", "yes"].contains(args[1].lowercased())
+                      Prefs.d.set(on, forKey: args[0])
+                      emu.applySettings()
+                      return "\(args[0]) = \(on)"
+
+                  case "autorun":
+                      let sub = args.first?.lowercased() ?? "list"
+                      switch sub {
+                      case "add":
+                          let c = args.dropFirst().joined(separator: " ")
+                          guard !c.isEmpty else { return "usage: autorun add <command>" }
+                          Prefs.autorun.append(c)
+                          return "will run after every boot: \(c)"
+                      case "clear":
+                          Prefs.autorun = []
+                          return "autorun cleared"
+                      default:
+                          let a = Prefs.autorun
+                          return a.isEmpty ? "(autorun empty)" : a.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+                      }
+
+                  case "beep":
+                      emu.audio.beep()
+                      return "beep (audio running: \(emu.audio.isRunning), queued: \(emu.audio.queued))"
+
+                  case "audio":
+                      emu.audio.restart()
+                      return "audio restarted (running: \(emu.audio.isRunning), underruns: \(emu.audio.underruns))"
+
+                  case "notify":
+                      Notifier.ask { ok in
+                          if ok { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { Notifier.postCall(name: emu.toy?.name ?? "Test") } }
+                      }
+                      return "test notification in 5 s — lock your phone or leave the app"
+
+                  case "perf":
+                      let s = emu.stats
+                      return "ticks: \(s.ticks)  last tick: \(String(format: "%.2f", s.lastTickMs)) ms  frames published: \(s.frames)  audio queued: \(emu.audio.queued)  underruns: \(emu.audio.underruns)"
+
+                  case "redraw":
+                      emu.forceRedraw()
+                      return "redrawn"
+
+                  default:
+                      return "unknown command \"\(cmd)\" — type help"
+                  }
+              }
+
+              private func set(_ name: String, _ value: String, emu: Emulator) -> String {
+                  let lower = value.lowercased()
+                  var parsed: Double? = Double(value)
+                  if parsed == nil && ["on", "true", "yes"].contains(lower) { parsed = 1 }
+                  if parsed == nil && ["off", "false", "no"].contains(lower) { parsed = 0 }
+                  guard let v = parsed else { return "value must be a number or on/off" }
+                  if let ak = Console.appKeys[name] {
+                      Prefs.d.set(v, forKey: ak)
+                      emu.applySettings()
+                      return "\(name) = \(v)"
+                  }
+                  if Console.coreKeys.contains(name) {
+                      let ok = emu.withCore { h in name.withCString { tg_set_param(h, $0, v) } } ?? 1
+                      guard ok == 1 else { return "core rejected \(name)" }
+                      var p = Prefs.coreParams; p[name] = v; Prefs.coreParams = p
+                      return "\(name) = \(v) (saved, re-applied at every boot)"
+                  }
+                  return "unknown parameter \(name) — type \"params\""
+              }
+
+              private func key(_ s: String) -> TGKey? {
+                  switch s.uppercased() { case "A": return .a; case "B": return .b; case "C": return .c; default: return nil }
+              }
+
+              private func hex(_ s: String) -> UInt32? {
+                  UInt32(s.lowercased().replacingOccurrences(of: "0x", with: ""), radix: 16)
+              }
+
+              private func hexBytes(_ s: String) -> [UInt8] {
+                  let clean = s.lowercased().replacingOccurrences(of: "0x", with: "").filter { $0.isHexDigit }
+                  var out: [UInt8] = []
+                  var i = clean.startIndex
+                  while i < clean.endIndex, let j = clean.index(i, offsetBy: 2, limitedBy: clean.endIndex) {
+                      if let b = UInt8(clean[i..<j], radix: 16) { out.append(b) }
+                      i = j
+                  }
+                  return out
+              }
+
+              private func seconds(_ s: String) -> Double? {
+                  let l = s.lowercased()
+                  let mult: [(String, Double)] = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
+                  for (suf, m) in mult where l.hasSuffix(suf) {
+                      if let v = Double(l.dropLast()) { return v * m }
+                  }
+                  return Double(l)
+              }
+
+              private func hexdump(_ b: [UInt8], base: UInt32) -> String {
+                  stride(from: 0, to: b.count, by: 16).map { o in
+                      let row = b[o..<min(o + 16, b.count)]
+                      let hx = row.map { String(format: "%02X", $0) }.joined(separator: " ")
+                      let asc = String(row.map { (32...126).contains($0) ? Character(UnicodeScalar($0)) : "." })
+                      return String(format: "%08X  ", base &+ UInt32(o)) + hx + "  " + asc
+                  }.joined(separator: "\n")
+              }
+
+              func diagnostics(_ emu: Emulator) -> String {
+                  let info = Bundle.main.infoDictionary
+                  var lines = [
+                      "== TamaiOS diagnostics ==",
+                      "app: \(info?["CFBundleShortVersionString"] ?? "?") (\(info?["CFBundleVersion"] ?? "?"))",
+                      "iOS: \(UIDevice.current.systemVersion)  device: \(deviceModel())",
+                      "date: \(Date())  tz: \(TimeZone.current.identifier)",
+                      "toy: \(emu.toy.map { "\($0.name) / \($0.romName) / \($0.id) known=\($0.known)" } ?? "none")",
+                      "stopped: \(emu.stopped.map { "\($0.code)" } ?? "no")  loading: \(emu.loading)  dark: \(emu.dark)",
+                      "audio running: \(emu.audio.isRunning) queued: \(emu.audio.queued) underruns: \(emu.audio.underruns)",
+                      "-- params --", run("params", emu: emu),
+                      "-- autorun --", run("autorun", emu: emu),
+                      "-- perf --", run("perf", emu: emu),
+                      "-- files --", run("files", emu: emu),
+                      "-- core status --", run("status", emu: emu),
+                      "-- core log (last 40) --", run("log 40", emu: emu),
+                      "-- app log (last 40) --", run("applog 40", emu: emu),
+                  ]
+                  lines.append("== end ==")
+                  return lines.joined(separator: "\n")
+              }
+
+              private func deviceModel() -> String {
+                  var s = utsname(); uname(&s)
+                  return withUnsafeBytes(of: &s.machine) { raw -> String in
+                      let bytes = raw.prefix { b in b != 0 }
+                      return String(decoding: bytes, as: UTF8.self)
+                  }
+              }
+
+              static let help = """
+              Paste one command per line (# for comments). Changes persist.
+              INFO
+                diag                 everything, copied to clipboard (send to Claude)
+                status | perf | params | files
+                log [n]  applog [n]  firmware / app log
+              TOY
+                press A|B|C [ms]     keys ABBC [gap_ms]   release
+                wake  sleep  restart  reload  sync  advance 2h  unstop  save
+                restorebak           undo the last backup restore
+                rm <file>            delete a save file (autosave.t18s, game.flash…)
+              TUNING (persisted)
+                set <name> <value>   unset <name>   reset
+                  app:  tick_ms audio_min_ms audio_max_ms gap_s autosave_s fps call_gap_s volume
+                  core: max_step max_behind max_catchup min_hold rewind_gap idle_skip never_sleep stop_on_bluetooth
+                flag <name> on|off   soundOn haptics liveInBackground callAlerts keepAwake neverSleep showHints
+                autorun add <cmd> | autorun list | autorun clear   (runs after every boot)
+              MEMORY
+                peek <hexaddr> [len]   poke <hexaddr> <hexbytes>   str <hexaddr>
+              OTHER
+                beep  audio  notify  redraw  clear
+              """
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/Emulator.swift <<'TAMA_EOF'
+          import Foundation
+          import UIKit
+          import QuartzCore
+          import UserNotifications
+
+          enum Prefs {
+              static let d = UserDefaults.standard
+              static func register() {
+                  d.register(defaults: [
+                      "soundOn": true, "volume": 0.6, "haptics": true, "liveInBackground": true,
+                      "callAlerts": true, "keepAwake": true, "neverSleep": false, "showHints": true,
+                      "p.tick_ms": 4.0, "p.audio_min_ms": 50.0, "p.audio_max_ms": 120.0,
+                      "p.gap_s": 2.0, "p.autosave_s": 180.0, "p.fps": 60.0, "p.call_gap_s": 600.0,
+                  ])
+              }
+              static func num(_ k: String) -> Double { d.double(forKey: k) }
+              static func flag(_ k: String) -> Bool { d.bool(forKey: k) }
+              /// Emulator-core tunables set from the console, re-applied at every boot.
+              static var coreParams: [String: Double] {
+                  get { d.dictionary(forKey: "core.params") as? [String: Double] ?? [:] }
+                  set { d.set(newValue, forKey: "core.params") }
+              }
+              /// Console commands run after every boot.
+              static var autorun: [String] {
+                  get { d.stringArray(forKey: "autorun") ?? [] }
+                  set { d.set(newValue, forKey: "autorun") }
+              }
+          }
+
+          enum TGKey: Int32 { case a = 0, b = 1, c = 2 }
+
+          struct StopInfo: Equatable {
+              let code: Int32
+              var title: String {
+                  switch code {
+                  case 4: return "Your toy crashed"
+                  case 5: return "Your toy froze"
+                  default: return "The emulator hit a problem"
+                  }
+              }
+          }
+
+          /// Owns the running toy: a background thread runs the emulator core and
+          /// publishes the screen; everything that touches the core holds `lock`.
+          final class Emulator: ObservableObject {
+              @Published var screen: CGImage?
+              @Published var dark = false
+              @Published var toast: String?
+              @Published var stopped: StopInfo?
+              @Published var loading = false
+              @Published var toy: Toy?
+              @Published var calling = false
+
+              let audio = AudioOut()
+              private let lock = NSLock()
+              private var handle: OpaquePointer?
+              private var currentID: String?
+              private var thread: Thread?
+              private var stopFlag = false
+              private var paused = false
+              private var visible = true
+              private var backgroundAt: Date?
+              private var lastCall = Date.distantPast
+              private var lastCode: Int32 = 0
+              private var toastWork: DispatchWorkItem?
+              private(set) var stats = (ticks: 0, lastTickMs: 0.0, frames: 0)
+              var appLog: [String] = []
+
+              // MARK: core access
+
+              /// Run `body` with the core locked. Returns nil if no toy is running.
+              @discardableResult
+              func withCore<T>(_ body: (OpaquePointer) -> T) -> T? {
+                  lock.lock(); defer { lock.unlock() }
+                  guard let h = handle else { return nil }
+                  return body(h)
+              }
+
+              func note(_ s: String) {
+                  let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+                  let line = "\(f.string(from: Date())) \(s)"
+                  DispatchQueue.main.async {
+                      self.appLog.append(line)
+                      if self.appLog.count > 300 { self.appLog.removeFirst(self.appLog.count - 300) }
+                  }
+              }
+
+              func say(_ text: String, seconds: Double = 4) {
+                  DispatchQueue.main.async {
+                      self.toastWork?.cancel()
+                      self.toast = text
+                      let w = DispatchWorkItem { [weak self] in self?.toast = nil }
+                      self.toastWork = w
+                      DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: w)
+                  }
+                  note("toast: \(text)")
+              }
+
+              // MARK: loading
+
+              func load(_ toy: Toy, completion: ((Bool) -> Void)? = nil) {
+                  unload()
+                  DispatchQueue.main.async { self.loading = true; self.toy = toy; self.stopped = nil; self.screen = nil }
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      let ok = self.boot(toy)
+                      DispatchQueue.main.async {
+                          self.loading = false
+                          completion?(ok)
+                      }
+                  }
+              }
+
+              private func boot(_ toy: Toy) -> Bool {
+                  guard let rom = try? Data(contentsOf: ToyStore.romURL(toy.id)) else {
+                      say("Couldn't read this toy's ROM file.")
+                      return false
+                  }
+                  let snap = try? Data(contentsOf: ToyStore.snapURL(toy.id))
+                  let flash = try? Data(contentsOf: ToyStore.flashURL(toy.id))
+                  let meta = (try? String(contentsOf: ToyStore.flashMetaURL(toy.id), encoding: .utf8)) ?? ""
+                  var elapsed = 0.0
+                  let empty = Data()
+                  let h: OpaquePointer? = rom.withUnsafeBytes { r in
+                      (snap ?? empty).withUnsafeBytes { s in
+                          (flash ?? empty).withUnsafeBytes { f in
+                              meta.withCString { m in
+                                  tg_create(r.bindMemory(to: UInt8.self).baseAddress, r.count,
+                                            s.bindMemory(to: UInt8.self).baseAddress, s.count,
+                                            f.bindMemory(to: UInt8.self).baseAddress, f.count,
+                                            meta.isEmpty ? nil : m, rtcNow(), &elapsed)
+                              }
+                          }
+                      }
+                  }
+                  guard let h else {
+                      say("This toy couldn't start. Open Settings › Console and run \"diag\".", seconds: 8)
+                      note("tg_create returned null for \(toy.id)")
+                      return false
+                  }
+                  lock.lock()
+                  handle = h
+                  currentID = toy.id
+                  lastCode = 0
+                  lock.unlock()
+                  applySettings()
+                  for (k, v) in Prefs.coreParams { _ = withCore { h in k.withCString { tg_set_param(h, $0, v) } } }
+                  let status = coreText { tg_status($0, $1, $2) } ?? ""
+                  note("booted \(toy.id): \(status.split(separator: "\n").first ?? "")")
+                  if elapsed > 60 { say("Welcome back! Your toy's clock moved ahead \(describeDuration(elapsed)).") }
+                  DispatchQueue.main.async {
+                      for line in Prefs.autorun { _ = Console.shared.run(line, emu: self) }
+                  }
+                  startThread()
+                  return true
+              }
+
+              func unload() {
+                  stopThread()
+                  lock.lock()
+                  if let h = handle {
+                      saveLocked(h, snapshot: true)
+                      tg_destroy(h)
+                      handle = nil
+                  }
+                  lock.unlock()
+              }
+
+              func reload() {
+                  if let t = toy { load(t) }
+              }
+
+              func applySettings() {
+                  audio.muted = !Prefs.flag("soundOn")
+                  audio.minFill = Prefs.num("p.audio_min_ms") / 1000
+                  audio.maxFill = max(audio.minFill + 0.02, Prefs.num("p.audio_max_ms") / 1000)
+                  audio.backgroundMode = Prefs.flag("liveInBackground")
+                  let vol = Prefs.num("volume"), never = Prefs.flag("neverSleep")
+                  withCore { h in
+                      tg_set_volume(h, vol)
+                      tg_set_never_sleep(h, never ? 1 : 0)
+                  }
+              }
+
+              // MARK: the run loop
+
+              private func startThread() {
+                  stopFlag = false
+                  paused = false
+                  audio.start()
+                  let t = Thread { [weak self] in self?.loop() }
+                  t.name = "TamaiOS emulator"
+                  t.qualityOfService = .userInteractive
+                  thread = t
+                  t.start()
+              }
+
+              private func stopThread() {
+                  stopFlag = true
+                  while let t = thread, t.isExecuting { Thread.sleep(forTimeInterval: 0.005) }
+                  thread = nil
+              }
+
+              private func loop() {
+                  var last = CACurrentMediaTime()
+                  var nextAutosave = last + Prefs.num("p.autosave_s")
+                  let audioBuf = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
+                  defer { audioBuf.deallocate() }
+                  var pixels = [UInt32](repeating: 0, count: 128 * 128)
+                  var needFrame = true
+                  var lastPublish = 0.0
+                  while !stopFlag {
+                      let tickMs = max(1, Prefs.num("p.tick_ms"))
+                      if paused {
+                          Thread.sleep(forTimeInterval: 0.05)
+                          last = CACurrentMediaTime()
+                          continue
+                      }
+                      let now = CACurrentMediaTime()
+                      var dt = now - last
+                      last = now
+                      var code: Int32 = 0, flags: UInt32 = 0, n = 0, isDark = false, published = false
+                      lock.lock()
+                      guard let h = handle else { lock.unlock(); break }
+                      if dt > max(0.5, Prefs.num("p.gap_s")) {
+                          // iOS paused the app: move the toy's clock on like the real one
+                          tg_advance_clock(h, dt)
+                          note("gap of \(String(format: "%.1f", dt)) s, clock advanced")
+                          dt = 0
+                      }
+                      let t0 = CACurrentMediaTime()
+                      code = tg_tick(h, dt)
+                      stats.lastTickMs = (CACurrentMediaTime() - t0) * 1000
+                      stats.ticks += 1
+                      flags = tg_take_flags(h)
+                      n = tg_take_audio(h, audioBuf, 44100)
+                      if flags & 1 != 0 { needFrame = true }
+                      let minGap = 1.0 / max(5, Prefs.num("p.fps"))
+                      if needFrame && visible && now - lastPublish >= minGap {
+                          isDark = pixels.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) } != 0
+                          needFrame = false
+                          published = true
+                          lastPublish = now
+                      }
+                      if flags & 4 != 0, let toy = toyID {
+                          // it just went to sleep and saved itself, like the real toy
+                          tg_flash_save(h, ToyStore.flashURL(toy).path)
+                      }
+                      if now >= nextAutosave {
+                          nextAutosave = now + max(30, Prefs.num("p.autosave_s"))
+                          saveLocked(h, snapshot: true)
+                      }
+                      lock.unlock()
+
+                      audio.push(audioBuf, n)
+                      if published { publish(pixels, dark: isDark) }
+                      if flags & 2 != 0 { careCall() }
+                      if code != 0 && code != lastCode { report(code) }
+                      lastCode = code
+                      Thread.sleep(forTimeInterval: tickMs / 1000)
+                  }
+              }
+
+              private var toyID: String? { currentID }
+
+              private func publish(_ px: [UInt32], dark: Bool) {
+                  let data = px.withUnsafeBufferPointer { Data(buffer: $0) }
+                  guard let prov = CGDataProvider(data: data as CFData),
+                        let img = CGImage(width: 128, height: 128, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 512,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                                          provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+                  else { return }
+                  stats.frames += 1
+                  DispatchQueue.main.async {
+                      self.screen = img
+                      if self.dark != dark { self.dark = dark }
+                  }
+              }
+
+              private func report(_ code: Int32) {
+                  switch code {
+                  case 1:
+                      say("Bluetooth features (the phone app, downloads, camera) aren't available in the emulator. Your toy was put back to just before.", seconds: 7)
+                  case 2:
+                      say("Infrared features (playdates, gifts, marriage) aren't available in the emulator. Your toy was put back to just before.", seconds: 7)
+                  case 3:
+                      say("The game froze waiting for Bluetooth, so the toy was restarted (like swapping the batteries). Choose CONTINUE to carry on.", seconds: 8)
+                  default:
+                      note("core stopped with code \(code)")
+                      DispatchQueue.main.async { self.stopped = StopInfo(code: code) }
+                  }
+              }
+
+              private func careCall() {
+                  note("care call heard")
+                  DispatchQueue.main.async {
+                      self.calling = true
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.calling = false }
+                      let active = UIApplication.shared.applicationState == .active
+                      if !active && Prefs.flag("callAlerts") && Date().timeIntervalSince(self.lastCall) > Prefs.num("p.call_gap_s") {
+                          self.lastCall = Date()
+                          Notifier.postCall(name: self.toy?.name ?? "Your pet")
+                      }
+                  }
+              }
+
+              // MARK: input
+
+              func press(_ k: TGKey) {
+                  let wall = CACurrentMediaTime()
+                  withCore { tg_press($0, k.rawValue, wall) }
+              }
+
+              func release(_ k: TGKey) {
+                  withCore { tg_release($0, k.rawValue) }
+              }
+
+              // MARK: saving
+
+              private func saveLocked(_ h: OpaquePointer, snapshot: Bool) {
+                  guard let id = toyID else { return }
+                  if snapshot {
+                      var p: UnsafeMutablePointer<UInt8>? = nil
+                      var n = 0
+                      if tg_snapshot(h, &p, &n) == 1, let p {
+                          let d = Data(bytes: p, count: n)
+                          tg_free(p, n)
+                          do { try d.write(to: ToyStore.snapURL(id), options: .atomic) } catch { note("autosave failed: \(error)") }
+                      }
+                  }
+                  if tg_is_asleep(h) != 0 { tg_flash_save(h, ToyStore.flashURL(id).path) }
+              }
+
+              func saveNow() {
+                  withCore { saveLocked($0, snapshot: true) }
+              }
+
+              /// Make a backup file of the whole toy state to share.
+              func backupFile() -> URL? {
+                  guard let toy else { return nil }
+                  var url: URL?
+                  withCore { h in
+                      var p: UnsafeMutablePointer<UInt8>? = nil
+                      var n = 0
+                      if tg_snapshot(h, &p, &n) == 1, let p {
+                          let d = Data(bytes: p, count: n)
+                          tg_free(p, n)
+                          let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd-HHmm"
+                          let safe = toy.name.replacingOccurrences(of: "/", with: "-")
+                          let u = FileManager.default.temporaryDirectory.appendingPathComponent("\(safe) \(f.string(from: Date())).tamaios")
+                          try? d.write(to: u, options: .atomic)
+                          url = u
+                      }
+                  }
+                  return url
+              }
+
+              /// Restore a backup (.tamaios); false if it doesn't fit this toy's ROM.
+              func restoreBackup(_ data: Data) -> Bool {
+                  guard let toy, let rom = try? Data(contentsOf: ToyStore.romURL(toy.id)) else { return false }
+                  let ok = rom.withUnsafeBytes { r in data.withUnsafeBytes { s in
+                      tg_check_snapshot(r.bindMemory(to: UInt8.self).baseAddress, r.count, s.bindMemory(to: UInt8.self).baseAddress, s.count)
+                  } } == 1
+                  guard ok else { return false }
+                  stopThread()
+                  lock.lock()
+                  if let h = handle { tg_destroy(h); handle = nil }
+                  lock.unlock()
+                  let snap = ToyStore.snapURL(toy.id)
+                  try? FileManager.default.removeItem(at: snap.appendingPathExtension("bak"))
+                  try? FileManager.default.copyItem(at: snap, to: snap.appendingPathExtension("bak"))
+                  try? data.write(to: snap, options: .atomic)
+                  // the flash save is older than the backup's own state: set it aside
+                  for u in [ToyStore.flashURL(toy.id), ToyStore.flashMetaURL(toy.id)] {
+                      try? FileManager.default.removeItem(at: u.appendingPathExtension("bak"))
+                      try? FileManager.default.moveItem(at: u, to: u.appendingPathExtension("bak"))
+                  }
+                  load(toy)
+                  return true
+              }
+
+              // MARK: toy actions
+
+              func syncClock() {
+                  let now = rtcNow()
+                  let ok = withCore { tg_sync_clock($0, now) } ?? 0
+                  say(ok == 1 ? "Clock set to your iPhone's time." : "The toy can't take a new time right now (maybe it's calling, or still in setup). Try again in a moment.")
+              }
+
+              func sleepNow() {
+                  let ok = withCore { tg_force_sleep($0) } ?? 0
+                  say(ok == 1 ? "Your toy is asleep. Press any button to wake it." : "It can't go to sleep right now.")
+                  saveNow()
+              }
+
+              func restart() {
+                  withCore { tg_restart($0) }
+                  DispatchQueue.main.async { self.stopped = nil }
+                  say("Restarted, like taking the batteries out. Your pet is kept.")
+              }
+
+              // MARK: app lifecycle
+
+              func enterBackground() {
+                  visible = false
+                  backgroundAt = Date()
+                  guard handle != nil else { return }
+                  if Prefs.flag("liveInBackground") {
+                      // keep living (the audio session keeps us running); save in case iOS ends us
+                      saveNow()
+                      note("background: staying alive")
+                  } else {
+                      paused = true
+                      withCore { h in
+                          tg_force_sleep(h)
+                          saveLocked(h, snapshot: true)
+                      }
+                      audio.stop()
+                      note("background: asleep and saved")
+                  }
+              }
+
+              func enterForeground() {
+                  visible = true
+                  guard handle != nil else { return }
+                  if paused {
+                      let away = backgroundAt.map { Date().timeIntervalSince($0) } ?? 0
+                      if away > 30 {
+                          withCore { tg_advance_clock($0, away) }
+                          say("Welcome back! Your toy's clock moved ahead \(describeDuration(away)).")
+                      } else {
+                          withCore { tg_wake($0) }
+                      }
+                      paused = false
+                  }
+                  audio.start()
+                  DispatchQueue.main.async { self.forceRedraw() }
+              }
+
+              func forceRedraw() {
+                  var px = [UInt32](repeating: 0, count: 128 * 128)
+                  let d = withCore { h in px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) } }
+                  if let d { publish(px, dark: d != 0) }
+              }
+
+              func willTerminate() {
+                  withCore { saveLocked($0, snapshot: true) }
+              }
+
+              // MARK: text from the core
+
+              func coreText(_ f: (OpaquePointer, UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>, UnsafeMutablePointer<Int>) -> Void) -> String? {
+                  withCore { h in
+                      var p: UnsafeMutablePointer<UInt8>? = nil
+                      var n = 0
+                      f(h, &p, &n)
+                      guard let p else { return "" }
+                      let s = String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
+                      tg_free(p, n)
+                      return s
+                  }
+              }
+
+              var isLoaded: Bool { lock.lock(); defer { lock.unlock() }; return handle != nil }
+          }
+
+          enum Notifier {
+              static func ask(_ done: ((Bool) -> Void)? = nil) {
+                  UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { ok, _ in
+                      DispatchQueue.main.async { done?(ok) }
+                  }
+              }
+
+              static func postCall(name: String) {
+                  let c = UNMutableNotificationContent()
+                  c.title = "\(name) is calling!"
+                  c.body = "Your pet needs you. Tap to see what it wants."
+                  c.sound = .default
+                  let r = UNNotificationRequest(identifier: "call-\(Date().timeIntervalSince1970)", content: c, trigger: nil)
+                  UNUserNotificationCenter.current().add(r)
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/SettingsView.swift <<'TAMA_EOF'
+          import SwiftUI
+          import UniformTypeIdentifiers
+
+          struct SettingsView: View {
+              @EnvironmentObject var model: AppModel
+              @EnvironmentObject var emu: Emulator
+              @Environment(\.dismiss) private var dismiss
+
+              @AppStorage("soundOn") private var soundOn = true
+              @AppStorage("volume") private var volume = 0.6
+              @AppStorage("haptics") private var haptics = true
+              @AppStorage("liveInBackground") private var live = true
+              @AppStorage("callAlerts") private var callAlerts = true
+              @AppStorage("keepAwake") private var keepAwake = true
+              @AppStorage("neverSleep") private var neverSleep = false
+              @AppStorage("showHints") private var showHints = true
+
+              @State private var name = ""
+              @State private var confirmRestart = false
+              @State private var shareURL: URL?
+              @State private var pickBackup = false
+              @State private var restoreFailed = false
+
+              var body: some View {
+                  NavigationStack {
+                      Form {
+                          if let toy = emu.toy {
+                              Section {
+                                  TextField("Name", text: $name)
+                                      .onSubmit { rename(toy) }
+                                  ColorPickerRow(selection: Binding(get: { toy.color }, set: { c in var t = toy; t.color = c; model.update(t) }))
+                                      .padding(.vertical, 4)
+                                  Button { emu.syncClock() } label: { Label("Set clock to iPhone time", systemImage: "clock.arrow.circlepath") }
+                                  Button { emu.sleepNow() } label: { Label("Put to sleep now", systemImage: "moon.zzz.fill") }
+                                  Button(role: .destructive) { confirmRestart = true } label: { Label("Restart toy", systemImage: "arrow.clockwise") }
+                              } header: { Text(toy.romName) }
+                          }
+
+                          Section("Sound & feel") {
+                              Toggle("Sound", isOn: $soundOn)
+                              HStack {
+                                  Image(systemName: "speaker.fill").foregroundStyle(.secondary)
+                                  Slider(value: $volume, in: 0...1.2)
+                                  Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
+                              }
+                              .disabled(!soundOn)
+                              Toggle("Button vibration", isOn: $haptics)
+                              Toggle("Show button hints", isOn: $showHints)
+                          }
+
+                          Section {
+                              Toggle("Keep living in the background", isOn: $live)
+                              Toggle("Alert me when it calls", isOn: $callAlerts)
+                                  .onChange(of: callAlerts) { on in if on { Notifier.ask() } }
+                              Toggle("Keep iPhone screen on while open", isOn: $keepAwake)
+                              Toggle("Toy never turns its screen off", isOn: $neverSleep)
+                          } header: { Text("Life") } footer: {
+                              Text("With \"Keep living\" on, your pet carries on in real time when you leave the app, like the real toy, and can alert you when it needs care. It uses a little battery. With it off, your pet sleeps while the app is closed and its clock catches up when you come back.")
+                          }
+
+                          Section {
+                              Button { makeBackup() } label: { Label("Back up this toy", systemImage: "square.and.arrow.up") }
+                              Button { pickBackup = true } label: { Label("Restore a backup", systemImage: "square.and.arrow.down") }
+                          } header: { Text("Saves") } footer: {
+                              Text("TamaiOS saves automatically. Backups are .tamaios files you can keep in Files or iCloud Drive.")
+                          }
+
+                          Section("Toys") {
+                              NavigationLink { ToysView() } label: { Label("My toys (\(model.toys.count))", systemImage: "square.grid.2x2.fill") }
+                              Button { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.showAdd = true } } label: {
+                                  Label("Add another toy", systemImage: "plus.circle.fill")
+                              }
+                          }
+
+                          Section("Help") {
+                              NavigationLink { DumpHelpContent() } label: { Label("Getting your ROM", systemImage: "questionmark.circle") }
+                              NavigationLink { ConsoleView() } label: { Label("Console", systemImage: "terminal.fill") }
+                          }
+
+                          Section("About") {
+                              Text("TamaiOS runs your own Tamagotchi ON / Meets firmware. It includes no Bandai code or graphics. Emulator core: tg18-emu by oreo-fox (MIT licence). Tamagotchi is a trademark of Bandai; TamaiOS is not affiliated with or endorsed by Bandai.")
+                                  .font(.footnote).foregroundStyle(.secondary)
+                              Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
+                                  .font(.footnote).foregroundStyle(.secondary)
+                          }
+                      }
+                      .navigationTitle("Settings")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { if let t = emu.toy { rename(t) }; dismiss() } } }
+                      .onAppear { name = emu.toy?.name ?? "" }
+                      .onChange(of: soundOn) { _ in emu.applySettings() }
+                      .onChange(of: volume) { _ in emu.applySettings() }
+                      .onChange(of: neverSleep) { _ in emu.applySettings() }
+                      .onChange(of: live) { _ in emu.applySettings(); emu.audio.restart() }
+                      .onChange(of: keepAwake) { v in UIApplication.shared.isIdleTimerDisabled = v }
+                      .confirmationDialog("Restart the toy?", isPresented: $confirmRestart, titleVisibility: .visible) {
+                          Button("Restart", role: .destructive) { emu.restart(); dismiss() }
+                      } message: { Text("Like taking the batteries out and putting them back. Your pet is kept.") }
+                      .sheet(item: Binding(get: { shareURL.map(ShareItem.init) }, set: { shareURL = $0?.url })) { item in
+                          ActivityView(items: [item.url])
+                      }
+                      .fileImporter(isPresented: $pickBackup, allowedContentTypes: [.item]) { r in
+                          if case .success(let u) = r, let d = try? ToyStore.readPicked(u) {
+                              if emu.restoreBackup(d) { dismiss() } else { restoreFailed = true }
+                          }
+                      }
+                      .alert("That backup doesn't fit this toy", isPresented: $restoreFailed) {
+                          Button("OK", role: .cancel) {}
+                      } message: { Text("Pick a .tamaios backup made from this same toy (same ROM version).") }
+                  }
+              }
+
+              private func rename(_ toy: Toy) {
+                  let n = name.trimmingCharacters(in: .whitespaces)
+                  guard !n.isEmpty, n != toy.name else { return }
+                  var t = toy; t.name = n; model.update(t)
+              }
+
+              private func makeBackup() {
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      let u = emu.backupFile()
+                      DispatchQueue.main.async { shareURL = u }
+                  }
+              }
+          }
+
+          struct ShareItem: Identifiable {
+              let url: URL
+              var id: String { url.path }
+          }
+
+          struct ActivityView: UIViewControllerRepresentable {
+              let items: [Any]
+              func makeUIViewController(context: Context) -> UIActivityViewController {
+                  UIActivityViewController(activityItems: items, applicationActivities: nil)
+              }
+              func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+          }
+
+          struct ToysView: View {
+              @EnvironmentObject var model: AppModel
+              @EnvironmentObject var emu: Emulator
+              @Environment(\.dismiss) private var dismiss
+              @State private var deleting: Toy?
+
+              var body: some View {
+                  List {
+                      ForEach(model.toys) { t in
+                          Button {
+                              model.play(t)
+                              dismiss()
+                          } label: {
+                              HStack(spacing: 14) {
+                                  EggBadge(theme: Theme.of(t.color)).frame(width: 34, height: 42)
+                                  VStack(alignment: .leading) {
+                                      Text(t.name).font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
+                                      Text(t.romName).font(.caption).foregroundStyle(.secondary)
+                                  }
+                                  Spacer()
+                                  if emu.toy?.id == t.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                              }
+                          }
+                          .swipeActions {
+                              Button(role: .destructive) { deleting = t } label: { Label("Delete", systemImage: "trash") }
+                          }
+                      }
+                  }
+                  .navigationTitle("My toys")
+                  .confirmationDialog("Delete \(deleting?.name ?? "")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+                      Button("Delete toy and its saves", role: .destructive) {
+                          if let d = deleting { model.remove(d) }
+                          deleting = nil
+                      }
+                  } message: { Text("This removes the ROM and all saves for it from this iPhone. Make a backup first if you might want it back.") }
+              }
+          }
+
+          struct ConsoleView: View {
+              @EnvironmentObject var emu: Emulator
+              @ObservedObject var console = Console.shared
+              @State private var input = ""
+              @FocusState private var focused: Bool
+
+              var body: some View {
+                  VStack(spacing: 0) {
+                      ScrollViewReader { proxy in
+                          ScrollView {
+                              Text(console.output)
+                                  .font(.system(.caption, design: .monospaced))
+                                  .textSelection(.enabled)
+                                  .frame(maxWidth: .infinity, alignment: .leading)
+                                  .padding(10)
+                              Color.clear.frame(height: 1).id("end")
+                          }
+                          .background(Color(white: 0.08))
+                          .foregroundStyle(Color(red: 0.6, green: 1.0, blue: 0.7))
+                          .onChange(of: console.output) { _ in proxy.scrollTo("end", anchor: .bottom) }
+                      }
+                      ScrollView(.horizontal, showsIndicators: false) {
+                          HStack {
+                              ForEach(["diag", "status", "log", "perf", "params", "help"], id: \.self) { c in
+                                  Button(c) { console.runScript(c, emu: emu) }
+                                      .buttonStyle(.bordered)
+                              }
+                          }
+                          .padding(.horizontal, 10).padding(.vertical, 6)
+                      }
+                      HStack(alignment: .bottom, spacing: 8) {
+                          TextField("Paste or type commands…", text: $input, axis: .vertical)
+                              .lineLimit(1...6)
+                              .font(.system(.body, design: .monospaced))
+                              .textInputAutocapitalization(.never)
+                              .autocorrectionDisabled()
+                              .focused($focused)
+                              .padding(8)
+                              .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+                          Button { run() } label: { Image(systemName: "play.fill").padding(10) }
+                              .buttonStyle(.borderedProminent)
+                              .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                      }
+                      .padding(10)
+                  }
+                  .navigationTitle("Console")
+                  .navigationBarTitleDisplayMode(.inline)
+                  .toolbar {
+                      ToolbarItemGroup(placement: .primaryAction) {
+                          Button { if let s = UIPasteboard.general.string { input = s; run() } } label: {
+                              Label("Paste & run", systemImage: "doc.on.clipboard")
+                          }
+                          Menu {
+                              Button { UIPasteboard.general.string = console.output } label: { Label("Copy output", systemImage: "doc.on.doc") }
+                              Button(role: .destructive) { console.output = "" } label: { Label("Clear", systemImage: "trash") }
+                          } label: { Image(systemName: "ellipsis.circle") }
+                      }
+                  }
+              }
+
+              private func run() {
+                  let t = input
+                  input = ""
+                  console.runScript(t, emu: emu)
+              }
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/Store.swift <<'TAMA_EOF'
+          import Foundation
+          import UIKit
+
+          /// A toy the user has hatched: one ROM plus its saves, in Documents/Toys/<id>/.
+          struct Toy: Codable, Identifiable, Equatable {
+              var id: String          // the ROM's stem, e.g. fw_tg18_en_v063_2020-02-13_wondergarden
+              var name: String        // what the user called it
+              var romName: String     // "Wonder Garden (EN v063)"
+              var color: Int
+              var known: Bool
+              var created: Date
+          }
+
+          struct RomCheck {
+              let image: Data
+              let hash: UInt64
+              let known: Bool
+              let name: String
+              let stem: String
+              /// The friendly part of the name ("Wonder Garden") for a default toy name.
+              var shortName: String {
+                  if let i = name.firstIndex(of: "(") { return String(name[..<i]).trimmingCharacters(in: .whitespaces) }
+                  return name
+              }
+          }
+
+          enum ImportError: LocalizedError {
+              case unreadable(String)
+              case tooSmall(Int)
+              case notTG18(Int)
+              case blank
+              case zipNoROM
+
+              var title: String {
+                  switch self {
+                  case .unreadable: return "Couldn't open that file"
+                  case .tooSmall: return "That file is too small"
+                  case .notTG18: return "That's not a Tamagotchi ON dump"
+                  case .blank: return "That dump is empty"
+                  case .zipNoROM: return "No dump inside that zip"
+                  }
+              }
+
+              var errorDescription: String? {
+                  switch self {
+                  case .unreadable(let why):
+                      return "iOS wouldn't let the app read it (\(why)). If it's in iCloud Drive, open the Files app, make sure it has finished downloading, then try again."
+                  case .tooSmall(let n):
+                      return "It's \(ToyStore.sizeText(n)). A Tamagotchi ON / Meets flash dump is exactly 8 MB. Pick the full dump of the flash chip, not a save file or part of it."
+                  case .notTG18(let n):
+                      return "It's \(ToyStore.sizeText(n)) but doesn't look like a Tamagotchi ON / Meets flash dump. Dumps of other models (P1, Pix, Uni, Paradise, Smart…) won't work here."
+                  case .blank:
+                      return "The file is all blank (FF or 00). The chip probably wasn't read correctly — check the clip is seated properly and dump it again."
+                  case .zipNoROM:
+                      return "The zip doesn't contain an 8 MB Tamagotchi ON / Meets dump. Unzip it in the Files app and pick the .bin file instead."
+                  }
+              }
+          }
+
+          enum ToyStore {
+              static let romSize = 8 * 1024 * 1024
+
+              static var root: URL {
+                  let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                  let r = docs.appendingPathComponent("Toys", isDirectory: true)
+                  try? FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+                  return r
+              }
+
+              static func dir(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
+              static func romURL(_ id: String) -> URL { dir(id).appendingPathComponent("rom.bin") }
+              static func snapURL(_ id: String) -> URL { dir(id).appendingPathComponent("autosave.t18s") }
+              static func flashURL(_ id: String) -> URL { dir(id).appendingPathComponent("game.flash") }
+              static func flashMetaURL(_ id: String) -> URL { dir(id).appendingPathComponent("game.flash.json") }
+              static func infoURL(_ id: String) -> URL { dir(id).appendingPathComponent("toy.json") }
+
+              static func list() -> [Toy] {
+                  let fm = FileManager.default
+                  guard let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+                  let dec = JSONDecoder()
+                  return items.compactMap { u in
+                      guard let d = try? Data(contentsOf: u.appendingPathComponent("toy.json")),
+                            let t = try? dec.decode(Toy.self, from: d),
+                            fm.fileExists(atPath: romURL(t.id).path) else { return nil }
+                      return t
+                  }.sorted { $0.created < $1.created }
+              }
+
+              static func save(_ toy: Toy) {
+                  try? FileManager.default.createDirectory(at: dir(toy.id), withIntermediateDirectories: true)
+                  if let d = try? JSONEncoder().encode(toy) { try? d.write(to: infoURL(toy.id), options: .atomic) }
+              }
+
+              static func delete(_ id: String) {
+                  try? FileManager.default.removeItem(at: dir(id))
+              }
+
+              static func sizeText(_ n: Int) -> String {
+                  ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)
+              }
+
+              /// Read a file the user picked (Files, AirDrop, Share sheet).
+              static func readPicked(_ url: URL) throws -> Data {
+                  let scoped = url.startAccessingSecurityScopedResource()
+                  defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                  var err: NSError?
+                  var out: Data?
+                  var readErr: Error?
+                  NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &err) { u in
+                      do { out = try Data(contentsOf: u, options: .mappedIfSafe) } catch { readErr = error }
+                  }
+                  if let d = out { return d }
+                  throw ImportError.unreadable((readErr ?? err)?.localizedDescription ?? "unknown error")
+              }
+
+              /// Validate a picked file (raw .bin, a bigger dump, or a .zip).
+              static func check(_ data: Data) throws -> RomCheck {
+                  var image = data
+                  let isZip = data.count > 4 && data.prefix(4) == Data([0x50, 0x4B, 0x03, 0x04])
+                  if isZip {
+                      var out: UnsafeMutablePointer<UInt8>? = nil
+                      var n = 0
+                      let r = data.withUnsafeBytes { raw in
+                          tg_rom_from_zip(raw.bindMemory(to: UInt8.self).baseAddress, raw.count, &out, &n)
+                      }
+                      guard r == 0, let p = out else { throw ImportError.zipNoROM }
+                      image = Data(bytes: p, count: n)
+                      tg_free(p, n)
+                  }
+                  var info = TgRomInfo()
+                  let code = image.withUnsafeBytes { raw in
+                      tg_check_rom(raw.bindMemory(to: UInt8.self).baseAddress, raw.count, &info)
+                  }
+                  switch code {
+                  case 0: break
+                  case -1: throw ImportError.tooSmall(image.count)
+                  case -3: throw ImportError.blank
+                  default: throw ImportError.notTG18(image.count)
+                  }
+                  let name = cString(&info.name)
+                  let stem = cString(&info.stem)
+                  return RomCheck(image: image.prefix(romSize), hash: info.hash, known: info.known == 1, name: name, stem: stem)
+              }
+
+              static func cString<T>(_ tuple: inout T) -> String {
+                  withUnsafeBytes(of: &tuple) { raw in
+                      let bytes = raw.bindMemory(to: UInt8.self)
+                      let end = bytes.firstIndex(of: 0) ?? bytes.count
+                      return String(decoding: bytes[0..<end], as: UTF8.self)
+                  }
+              }
+
+              /// Store the ROM and make the toy.
+              static func create(_ c: RomCheck, name: String, color: Int) throws -> Toy {
+                  let toy = Toy(id: c.stem, name: name.isEmpty ? c.shortName : name, romName: c.name,
+                                color: color, known: c.known, created: Date())
+                  try FileManager.default.createDirectory(at: dir(toy.id), withIntermediateDirectories: true)
+                  try Data(c.image).write(to: romURL(toy.id), options: .atomic)
+                  save(toy)
+                  return toy
+              }
+          }
+
+          /// Seconds as "3 h 12 min".
+          func describeDuration(_ s: Double) -> String {
+              let f = DateComponentsFormatter()
+              f.allowedUnits = s >= 86400 ? [.day, .hour] : (s >= 3600 ? [.hour, .minute] : [.minute, .second])
+              f.unitsStyle = .short
+              f.maximumUnitCount = 2
+              return f.string(from: s) ?? "\(Int(s)) s"
+          }
+
+          /// The toy's clock value for local time now.
+          func rtcNow() -> Double {
+              let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: Date())
+              return tg_rtc_seconds(Int64(c.year ?? 2026), UInt32(c.month ?? 1), UInt32(c.day ?? 1),
+                                    UInt32(c.hour ?? 0), UInt32(c.minute ?? 0), UInt32(c.second ?? 0))
+          }
+          TAMA_EOF
+          cat > ios/TamaiOS/ToyView.swift <<'TAMA_EOF'
+          import SwiftUI
+
+          struct EggShape: Shape {
+              func path(in r: CGRect) -> Path {
+                  let w = r.width, h = r.height
+                  var p = Path()
+                  p.move(to: CGPoint(x: r.midX, y: r.minY))
+                  p.addCurve(to: CGPoint(x: r.maxX, y: r.minY + h * 0.60),
+                             control1: CGPoint(x: r.minX + w * 0.84, y: r.minY),
+                             control2: CGPoint(x: r.maxX, y: r.minY + h * 0.30))
+                  p.addCurve(to: CGPoint(x: r.midX, y: r.maxY),
+                             control1: CGPoint(x: r.maxX, y: r.minY + h * 0.86),
+                             control2: CGPoint(x: r.minX + w * 0.78, y: r.maxY))
+                  p.addCurve(to: CGPoint(x: r.minX, y: r.minY + h * 0.60),
+                             control1: CGPoint(x: r.minX + w * 0.22, y: r.maxY),
+                             control2: CGPoint(x: r.minX, y: r.minY + h * 0.86))
+                  p.addCurve(to: CGPoint(x: r.midX, y: r.minY),
+                             control1: CGPoint(x: r.minX, y: r.minY + h * 0.30),
+                             control2: CGPoint(x: r.minX + w * 0.16, y: r.minY))
+                  p.closeSubpath()
+                  return p
+              }
+          }
+
+          struct ToyView: View {
+              @EnvironmentObject var model: AppModel
+              @EnvironmentObject var emu: Emulator
+              @AppStorage("showHints") private var showHints = true
+              @State private var showSettings = false
+              @State private var wiggle = false
+              @State private var restoreError = false
+
+              var body: some View {
+                  let theme = Theme.of(emu.toy?.color ?? 0)
+                  GeometryReader { geo in
+                      let shellW = min(geo.size.width * 0.9, geo.size.height * 0.62, 460)
+                      ZStack {
+                          LinearGradient(colors: [theme.top.opacity(0.55), theme.bottom.opacity(0.75)],
+                                         startPoint: .top, endPoint: .bottom)
+                              .ignoresSafeArea()
+                          VStack(spacing: 0) {
+                              topBar(theme)
+                              Spacer(minLength: 8)
+                              shell(theme, width: shellW)
+                                  .rotationEffect(.degrees(wiggle ? 3 : 0))
+                              Spacer(minLength: 8)
+                              if showHints {
+                                  hint(theme).padding(.bottom, 8)
+                              }
+                          }
+                          .frame(maxWidth: .infinity)
+                          .padding(.horizontal, 16)
+
+                          if let t = emu.toast {
+                              VStack {
+                                  Text(t)
+                                      .font(.system(.callout, design: .rounded).weight(.semibold))
+                                      .multilineTextAlignment(.center)
+                                      .padding(.horizontal, 18).padding(.vertical, 12)
+                                      .background(Capsule().fill(.ultraThickMaterial))
+                                      .shadow(radius: 8)
+                                      .padding(.top, 60).padding(.horizontal, 20)
+                                      .onTapGesture { emu.toast = nil }
+                                  Spacer()
+                              }
+                              .transition(.move(edge: .top).combined(with: .opacity))
+                          }
+                          if let s = emu.stopped { stoppedCard(s, theme) }
+                      }
+                      .animation(.spring(), value: emu.toast)
+                  }
+                  .sheet(isPresented: $showSettings) { SettingsView().environmentObject(model).environmentObject(emu) }
+                  .onChange(of: emu.calling) { c in
+                      guard c else { return }
+                      withAnimation(.easeInOut(duration: 0.09).repeatCount(8, autoreverses: true)) { wiggle = true }
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { withAnimation { wiggle = false } }
+                  }
+                  .confirmationDialog("Restore this backup?", isPresented: Binding(get: { model.pendingBackup != nil }, set: { if !$0 { model.pendingBackup = nil } }), titleVisibility: .visible) {
+                      Button("Restore", role: .destructive) {
+                          if let u = model.pendingBackup, let d = try? ToyStore.readPicked(u) {
+                              restoreError = !emu.restoreBackup(d)
+                          }
+                          model.pendingBackup = nil
+                      }
+                      Button("Cancel", role: .cancel) { model.pendingBackup = nil }
+                  } message: {
+                      Text("This replaces \(emu.toy?.name ?? "your toy")'s current state with the backup. (Console command \"restorebak\" undoes it.)")
+                  }
+                  .alert("That backup doesn't fit this toy", isPresented: $restoreError) {
+                      Button("OK", role: .cancel) {}
+                  } message: {
+                      Text("It was made with a different ROM version. Switch to the matching toy first, then restore it.")
+                  }
+              }
+
+              private func topBar(_ theme: Theme) -> some View {
+                  HStack {
+                      VStack(alignment: .leading, spacing: 0) {
+                          Text(emu.toy?.name ?? "TamaiOS")
+                              .font(.system(.title2, design: .rounded).weight(.heavy))
+                          if let r = emu.toy?.romName {
+                              Text(r).font(.system(.caption, design: .rounded)).opacity(0.7)
+                          }
+                      }
+                      Spacer()
+                      Button { showSettings = true } label: {
+                          Image(systemName: "gearshape.fill")
+                              .font(.system(size: 20, weight: .bold))
+                              .padding(11)
+                              .background(Circle().fill(.ultraThinMaterial))
+                      }
+                      .accessibilityLabel("Settings")
+                  }
+                  .foregroundStyle(theme.ink)
+                  .padding(.top, 8)
+              }
+
+              private func shell(_ theme: Theme, width w: CGFloat) -> some View {
+                  let h = w * 1.18
+                  let screen = w * 0.56
+                  return ZStack {
+                      EggShape()
+                          .fill(LinearGradient(colors: [theme.top, theme.bottom], startPoint: .topLeading, endPoint: .bottomTrailing))
+                          .shadow(color: .black.opacity(0.25), radius: 18, y: 12)
+                      EggShape()
+                          .stroke(LinearGradient(colors: [.white.opacity(0.9), .white.opacity(0.1)], startPoint: .top, endPoint: .bottom), lineWidth: 4)
+                      // gloss
+                      Ellipse()
+                          .fill(LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
+                          .frame(width: w * 0.42, height: h * 0.16)
+                          .offset(x: -w * 0.16, y: -h * 0.36)
+                          .blur(radius: 2)
+                      VStack(spacing: h * 0.045) {
+                          screenView(size: screen, theme: theme)
+                          buttons(theme, width: w)
+                      }
+                      .offset(y: h * 0.03)
+                  }
+                  .frame(width: w, height: h)
+              }
+
+              private func screenView(size: CGFloat, theme: Theme) -> some View {
+                  ZStack {
+                      RoundedRectangle(cornerRadius: size * 0.12, style: .continuous)
+                          .fill(Color(white: 0.08))
+                          .frame(width: size * 1.14, height: size * 1.14)
+                          .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
+                      Group {
+                          if emu.loading {
+                              VStack(spacing: 10) {
+                                  ProgressView().tint(.white)
+                                  Text("Waking up…").font(.system(.caption, design: .rounded)).foregroundStyle(.white.opacity(0.8))
+                              }
+                          } else if emu.dark || emu.screen == nil {
+                              ZStack {
+                                  Color.black
+                                  if emu.toy != nil && !emu.loading {
+                                      Text("z z z").font(.system(size: size * 0.09, weight: .bold, design: .rounded))
+                                          .foregroundStyle(.white.opacity(0.25))
+                                  }
+                              }
+                          } else if let img = emu.screen {
+                              Image(decorative: img, scale: 1)
+                                  .interpolation(.none)
+                                  .resizable()
+                          }
+                      }
+                      .frame(width: size, height: size)
+                      .clipShape(RoundedRectangle(cornerRadius: size * 0.04, style: .continuous))
+                  }
+                  .accessibilityLabel("Toy screen")
+              }
+
+              private func buttons(_ theme: Theme, width w: CGFloat) -> some View {
+                  let d = w * 0.15
+                  return HStack(alignment: .top, spacing: w * 0.07) {
+                      ToyButton(label: "A", size: d, theme: theme) { emu.press(.a) } up: { emu.release(.a) }
+                          .offset(y: -d * 0.12)
+                      ToyButton(label: "B", size: d, theme: theme) { emu.press(.b) } up: { emu.release(.b) }
+                          .offset(y: d * 0.18)
+                      ToyButton(label: "C", size: d, theme: theme) { emu.press(.c) } up: { emu.release(.c) }
+                          .offset(y: -d * 0.12)
+                  }
+              }
+
+              private func hint(_ theme: Theme) -> some View {
+                  HStack(spacing: 14) {
+                      Text("**A** choose").fixedSize()
+                      Text("**B** OK").fixedSize()
+                      Text("**C** back").fixedSize()
+                      Button { withAnimation { showHints = false } } label: { Image(systemName: "xmark.circle.fill") }
+                  }
+                  .font(.system(.footnote, design: .rounded))
+                  .foregroundStyle(theme.ink.opacity(0.85))
+                  .padding(.horizontal, 14).padding(.vertical, 8)
+                  .background(Capsule().fill(.ultraThinMaterial))
+              }
+
+              private func stoppedCard(_ s: StopInfo, _ theme: Theme) -> some View {
+                  ZStack {
+                      Color.black.opacity(0.35).ignoresSafeArea()
+                      VStack(spacing: 14) {
+                          Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 40)).foregroundStyle(.orange)
+                          Text(s.title).font(.system(.title3, design: .rounded).weight(.bold))
+                          Text("Restarting is like taking the batteries out — your pet and its progress are kept.")
+                              .font(.system(.callout, design: .rounded)).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                          BigButton(title: "Restart toy", icon: "arrow.clockwise", theme: theme) { emu.restart() }
+                          Button("Reload last autosave") { emu.reload() }
+                          Button("Open Console") { showSettings = true }
+                              .font(.system(.footnote, design: .rounded))
+                      }
+                      .padding(24)
+                      .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(.regularMaterial))
+                      .padding(30)
+                  }
+              }
+          }
+
+          struct ToyButton: View {
+              let label: String
+              let size: CGFloat
+              let theme: Theme
+              let down: () -> Void
+              let up: () -> Void
+              @State private var pressed = false
+              @AppStorage("haptics") private var haptics = true
+
+              var body: some View {
+                  VStack(spacing: 4) {
+                      Circle()
+                          .fill(RadialGradient(colors: [theme.button.opacity(0.9), theme.button], center: .topLeading, startRadius: 1, endRadius: size))
+                          .overlay(Circle().stroke(Color.black.opacity(0.15), lineWidth: 1.5))
+                          .overlay(Circle().fill(Color.white.opacity(pressed ? 0 : 0.35)).frame(width: size * 0.35).offset(x: -size * 0.15, y: -size * 0.15).blur(radius: 2))
+                          .frame(width: size, height: size)
+                          .shadow(color: .black.opacity(pressed ? 0.1 : 0.3), radius: pressed ? 1 : 4, y: pressed ? 1 : 4)
+                          .scaleEffect(pressed ? 0.9 : 1)
+                          // bigger invisible touch area
+                          .padding(size * 0.25)
+                          .contentShape(Circle())
+                          .gesture(
+                              DragGesture(minimumDistance: 0)
+                                  .onChanged { _ in
+                                      if !pressed {
+                                          pressed = true
+                                          if haptics { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+                                          down()
+                                      }
+                                  }
+                                  .onEnded { _ in
+                                      pressed = false
+                                      up()
+                                  }
+                          )
+                          .padding(-size * 0.25)
+                      Text(label)
+                          .font(.system(size: size * 0.26, weight: .heavy, design: .rounded))
+                          .foregroundStyle(theme.ink.opacity(0.7))
+                  }
+                  .animation(.easeOut(duration: 0.08), value: pressed)
+                  .accessibilityElement()
+                  .accessibilityLabel("Button \(label)")
+                  .accessibilityAddTraits(.isButton)
+                  .accessibilityAction { down(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { up() } }
+              }
+          }
+          TAMA_EOF
+          echo "Wrote $(ls -R ffi ios tools | wc -l) entries"
+
+      - name: Get the emulator core (tg18-emu by oreo-fox, MIT licence)
+        run: |
+          git clone https://github.com/oreo-fox/tg18-emu upstream
+          git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
+
+      - name: Build the emulator core for iPhone
+        run: |
+          rustup target add aarch64-apple-ios
+          cd ffi
+          IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --release --target aarch64-apple-ios
+          mkdir -p ../ios/lib
+          cp target/aarch64-apple-ios/release/libtamaios.a ../ios/lib/
+          ls -la ../ios/lib
+
+      - name: Draw the app icon
+        run: |
+          python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
+          python3 tools/icon.py ios/TamaiOS/Assets.xcassets/AppIcon.appiconset/icon.png
+
+      - name: Make the Xcode project
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+
+      - name: Build the app
+        run: |
+          cd ios
+          xcodebuild -project TamaiOS.xcodeproj -scheme TamaiOS -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build -quiet \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} build
+
+      - name: Package the IPA
+        run: |
+          cd ios
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/TamaiOS.app Payload/
+          zip -qry TamaiOS.ipa Payload
+          ls -la TamaiOS.ipa
+
+      - name: Upload the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TamaiOS-ipa
+          path: ios/TamaiOS.ipa
+          if-no-files-found: error

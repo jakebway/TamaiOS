@@ -1279,6 +1279,12 @@ jobs:
           pub extern "C" fn tg_mm_points_packet(points: u32, out: *mut *mut u8, out_len: *mut usize) {
               give(mm::packet(0x17, 0x3A, 258, points, None, None), out, out_len)
           }
+
+          /// Come-home packet carrying an optional item (raw item file or delivery packet) and points.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_back_packet(p: *const u8, n: usize, points: u32, out: *mut *mut u8, out_len: *mut usize) {
+              give(mm::back_packet(unsafe { bytes(p, n) }, points), out, out_len)
+          }
           TAMA_EOF
           cat > ffi/src/mm.rs <<'TAMA_EOF'
           //! Marriage support for the built-in Tama App: character parts, pictures,
@@ -2147,6 +2153,25 @@ jobs:
               }
               Some(item_packet(d, gotchi_points))
           }
+
+          /// The "come home" packet (Back), optionally carrying one item and Gotchi
+          /// Points, so a Tama that shopped in town brings its souvenir home.
+          pub fn back_packet(item_or_packet: Option<&[u8]>, gotchi_points: u32) -> Vec<u8> {
+              let raw = item_or_packet.and_then(|d| {
+                  if d.len() > 0x110 && &d[..6] == CODE_TAMAGO && d[0x4c] == 0x17 {
+                      let l = u32::from_le_bytes([d[0x108], d[0x109], d[0x10a], d[0x10b]]) as usize;
+                      d.get(0x10c..0x10c + l).map(|x| x.to_vec())
+                  } else if d.len() >= 0x80 && &d[..6] == CODE_TAMAGO {
+                      Some(d.to_vec())
+                  } else {
+                      None
+                  }
+              });
+              match raw {
+                  Some(it) => packet(0x15, 0x36, 256 + 12 + it.len() + 4 + 2, gotchi_points, Some(&it), None),
+                  None => packet(0x15, 0x36, 258, gotchi_points, None, None),
+              }
+          }
           TAMA_EOF
           cat > tools/icon.py <<'TAMA_EOF'
           # Draws the TamaiOS app icon: a Tamagotchi ON-style egg (tall egg, big colour
@@ -2448,6 +2473,7 @@ jobs:
           int32_t tg_mm_user_item(const uint8_t *p, size_t n, uint32_t points, uint8_t **out, size_t *out_len);
           void tg_mm_user_item_name(const uint8_t *p, size_t n, uint8_t **out, size_t *out_len);
           void tg_mm_points_packet(uint32_t points, uint8_t **out, size_t *out_len);
+          void tg_mm_back_packet(const uint8_t *p, size_t n, uint32_t points, uint8_t **out, size_t *out_len);
 
           #endif
           TAMA_EOF
@@ -2867,7 +2893,7 @@ jobs:
           /// "Tama Pop": Tamas pop out of the bushes — tap them before they hide.
           struct ArcadeView: View {
               @ObservedObject var town = Town.shared
-              @AppStorage("gotchiWallet") private var wallet = 1000
+              @AppStorage("gotchiPocket") private var wallet = 0
               @AppStorage("arcadeBest") private var best = 0
               @AppStorage("haptics") private var haptics = true
 
@@ -2888,7 +2914,7 @@ jobs:
                           HStack {
                               stat("Time", playing ? "\(Int(timeLeft.rounded(.up)))" : "–")
                               stat("Caught", "\(score)")
-                              stat("Wallet", "\(wallet) G")
+                              stat("Pocket", "\(wallet) G")
                           }
                           ZStack {
                               RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -2917,7 +2943,7 @@ jobs:
                               }
                           }
                           .aspectRatio(1, contentMode: .fit)
-                          Text("Spend your Gotchi Points at TamaDepo — they're sent along with your next gift.")
+                          Text("Your Gotchi Points go to your Tama by themselves: when it comes home from town, or with the next delivery.")
                               .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                       }
                       .padding(16)
@@ -4732,10 +4758,16 @@ jobs:
                   .onAppear {
                       emu.holdForApp = true      // the toy waits patiently while you're in here
                       Town.shared.loadIfPresent()
-                      if let t = emu.toy, Town.shared.state(t).away { path = [.party] }
+                      if let t = emu.toy, Town.shared.state(t).away, !emu.appWaiting { path = [.party] }
                       connect()
                   }
                   .onChange(of: emu.appWaiting) { w in if w { connect() } }
+                  .onChange(of: link.closeWith) { m in
+                      guard let m else { return }
+                      link.closeWith = nil
+                      if !m.isEmpty { emu.say(m, seconds: 7) }
+                      dismiss()
+                  }
                   .onDisappear {
                       link.hangUp(emu: emu)
                       emu.holdForApp = false
@@ -5163,7 +5195,7 @@ jobs:
           struct TownSettingsView: View {
               @ObservedObject var town = Town.shared
               @State private var importing = false
-              @AppStorage("gotchiWallet") private var wallet = 1000
+              @AppStorage("gotchiPocket") private var wallet = 0
 
               var body: some View {
                   List {
@@ -5178,8 +5210,8 @@ jobs:
                           Button("Use my own MyMeets2_3_7.zip") { importing = true }
                       }
                       Section("Gotchi Points") {
-                          Text("Wallet: \(wallet) G")
-                          Button("Top up to 5,000 G") { wallet = max(wallet, 5000) }
+                          Text("Waiting to go to your Tama: \(wallet) G")
+                          Text("Win more in the Arcade. They go home with your Tama, or with the next delivery.").font(.caption).foregroundStyle(.secondary)
                       }
                       Section("Thanks") {
                           Text("Characters and shop items: the MyMeets pack (TamaTown).")
@@ -5202,7 +5234,8 @@ jobs:
           struct TamaDepaView: View {
               @EnvironmentObject var emu: Emulator
               @ObservedObject var town = Town.shared
-              @AppStorage("gotchiWallet") private var wallet = 1000
+              @AppStorage("gotchiPocket") private var pocket = 0
+              @ObservedObject private var link = AppLink.shared
 
               struct Entry: Identifiable, Hashable {
                   enum Source: Hashable { case web(WebMeets.Item), pack(PackItem) }
@@ -5219,7 +5252,6 @@ jobs:
               @State private var loadError: String?
               @State private var category = "food"
               @State private var search = ""
-              @State private var withPoints = true
               @State private var picked: Entry?
               @State private var sending = false
               @State private var progress = ""
@@ -5261,13 +5293,8 @@ jobs:
                   ScrollView {
                       VStack(alignment: .leading, spacing: 14) {
                           walletCard
-                          if !emu.appWaiting && !AppLink.shared.openForDownload {
-                              Label("On the toy choose Connection › App › Download, then pick something here.", systemImage: "hand.point.up.left.fill")
-                                  .font(.system(.subheadline, design: .rounded)).foregroundStyle(.orange)
-                                  .padding(12)
-                                  .frame(maxWidth: .infinity, alignment: .leading)
-                                  .background(RoundedRectangle(cornerRadius: 14).fill(Color.orange.opacity(0.1)))
-                          }
+                          bagCard
+                          if !live { hintCard }
                           ScrollView(.horizontal, showsIndicators: false) {
                               HStack(spacing: 8) {
                                   ForEach(WebMeets.categories, id: \.key) { c in
@@ -5299,8 +5326,8 @@ jobs:
                   .background(LinearGradient(colors: [Color.blue.opacity(0.08), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
                   .task { await load() }
                   .overlay { if sending { BusyOverlay(text: progress) } }
-                  .confirmationDialog(picked.map { "Send \($0.name)?" } ?? "", isPresented: Binding(get: { picked != nil }, set: { if !$0 { picked = nil } }), titleVisibility: .visible) {
-                      Button(pointsToSend > 0 ? "Send with \(pointsToSend) G" : "Send") { if let p = picked { send(p) } }
+                  .confirmationDialog(dialogTitle, isPresented: Binding(get: { picked != nil }, set: { if !$0 { picked = nil } }), titleVisibility: .visible) {
+                      Button(dialogButton) { if let p = picked { send(p) } }
                       Button("Cancel", role: .cancel) { picked = nil }
                   }
                   .sheet(isPresented: $importing) {
@@ -5323,20 +5350,66 @@ jobs:
                   return false
               }
 
-              private var pointsToSend: Int { withPoints ? min(wallet, 99999) : 0 }
+              /// The toy is connected in Download mode right now.
+              private var live: Bool { link.openForDownload }
+              private var away: Bool { emu.toy.map { town.state($0).away } ?? false }
 
               private var walletCard: some View {
                   HStack(spacing: 12) {
                       Image(systemName: "dollarsign.circle.fill").font(.largeTitle).foregroundStyle(.yellow)
                       VStack(alignment: .leading, spacing: 2) {
-                          Text("\(wallet) G").font(.system(.title2, design: .rounded).weight(.heavy)).monospacedDigit()
-                          Text("Gotchi Points — win more in the Arcade").font(.caption).foregroundStyle(.secondary)
+                          Text("\(pocket) G").font(.system(.title2, design: .rounded).weight(.heavy)).monospacedDigit()
+                          Text("Gotchi Points for your Tama — win more in the Arcade").font(.caption).foregroundStyle(.secondary)
                       }
                       Spacer()
-                      Toggle("Send", isOn: $withPoints).labelsHidden()
                   }
                   .padding(14)
                   .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(.regularMaterial))
+              }
+
+              private var hintText: String {
+                  let name = emu.toy?.name ?? "your Tama"
+                  return away ? "Shopping in town: what you buy goes home with \(name)."
+                              : "What you pick goes in the bag. It's delivered by itself next time the toy connects (Connection › App › Download)."
+              }
+
+              private var hintCard: some View {
+                  Label(hintText, systemImage: away ? "figure.walk" : "bag.fill")
+                      .font(.system(.subheadline, design: .rounded)).foregroundStyle(.orange)
+                      .padding(12)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .background(RoundedRectangle(cornerRadius: 14).fill(Color.orange.opacity(0.1)))
+              }
+
+              private var dialogTitle: String {
+                  guard let p = picked else { return "" }
+                  return (live ? "Send " : "Get ") + p.name + "?"
+              }
+
+              private var dialogButton: String {
+                  if !live { return "Put in the bag" }
+                  return pocket > 0 ? "Send with \(pocket) G" : "Send now"
+              }
+
+              @ViewBuilder
+              private var bagCard: some View {
+                  let items = emu.toy.map { town.bag($0) } ?? []
+                  if !items.isEmpty, let t = emu.toy {
+                      TownCard(tint: .orange) {
+                          Label("In the bag", systemImage: "bag.fill").font(.system(.headline, design: .rounded)).foregroundStyle(.orange)
+                          ForEach(items) { it in
+                              HStack {
+                                  Image(systemName: icon(it.kind)).foregroundStyle(.orange)
+                                  Text(it.name).font(.system(.subheadline, design: .rounded))
+                                  Spacer()
+                                  Button(role: .destructive) { town.removeFromBag(t, it) } label: { Image(systemName: "xmark.circle.fill") }
+                                      .buttonStyle(.plain).foregroundStyle(.secondary)
+                              }
+                          }
+                          Text(away ? "The first one goes home with your Tama (GO BACK › YES); the rest arrive one per Download." : "Delivered one at a time, automatically, when the toy connects with Download.")
+                              .font(.caption).foregroundStyle(.secondary)
+                      }
+                  }
               }
 
               private var ownFileCard: some View {
@@ -5416,29 +5489,32 @@ jobs:
                   do { web = try await WebMeets.items() } catch { loadError = error.localizedDescription }
               }
 
-              private func deliver(name: String, points: Int, packet: @escaping () async throws -> [UInt8]) {
+              /// Send now if the toy is connected (Download), otherwise put it in the bag.
+              private func deliver(name: String, kind: String, packet: @escaping (Int) async throws -> [UInt8]) {
                   picked = nil
+                  guard let toy = emu.toy else { return }
+                  let now = live
+                  let pts = now ? pocket : 0
                   sending = true
-                  progress = "Wrapping your gift…"
+                  progress = now ? "Wrapping your gift…" : "Putting it in the bag…"
                   Task {
                       do {
-                          let pkt = try await packet()
-                          let start = TamaLink.packet(op: 0x17, cmd: 0)
-                          let link = TamaLink(emu: emu)
-                          let session = AppLink.shared.openForDownload
-                          AppLink.shared.openForDownload = false
+                          let pkt = try await packet(pts)
+                          if !now {
+                              town.addToBag(toy, name: name, kind: kind, packet: pkt)
+                              sending = false
+                              result = (true, away ? "\(name) is in the bag. It goes home with \(toy.name) when you choose GO BACK › YES." :
+                                                  "\(name) is in the bag. It's delivered by itself next time the toy connects with Download.")
+                              return
+                          }
+                          let tl = TamaLink(emu: emu)
+                          link.openForDownload = false
                           progress = "Sending your gift…"
-                          try await Task.detached(priority: .userInitiated) {
-                              if session {
-                                  try link.finishItem(pkt)          // the toy is already connected
-                              } else {
-                                  _ = try link.sendGift(start: start, item: pkt) { msg in DispatchQueue.main.async { progress = msg } }
-                              }
-                          }.value
-                          emu.note("gift sent: \(name) points=\(points)")
-                          if points > 0 { wallet = max(0, wallet - points) }
+                          try await Task.detached(priority: .userInitiated) { try tl.finishItem(pkt) }.value
+                          emu.note("gift sent: \(name) points=\(pts)")
+                          pocket = max(0, pocket - pts)
                           sending = false
-                          result = (true, "\(emu.toy?.name ?? "Your Tama") got \(name)\(points > 0 ? " and \(points) Gotchi Points" : ""). Watch the toy!")
+                          result = (true, "\(toy.name) got \(name)\(pts > 0 ? " and \(pts) Gotchi Points" : ""). Watch the toy!")
                       } catch {
                           emu.note("gift failed: \(error.localizedDescription)")
                           sending = false
@@ -5448,12 +5524,11 @@ jobs:
               }
 
               private func send(_ it: Entry) {
-                  let pts = pointsToSend
                   switch it.source {
                   case .web(let w):
-                      deliver(name: it.name, points: pts) { try await WebMeets.itemPacket(w, points: pts) }
+                      deliver(name: it.name, kind: it.kind) { pts in try await WebMeets.itemPacket(w, points: pts) }
                   case .pack(let p):
-                      deliver(name: it.name, points: pts) {
+                      deliver(name: it.name, kind: it.kind) { pts in
                           guard let pk = Town.shared.itemPacket(p, points: pts) else { throw URLError(.cannotDecodeContentData) }
                           return pk
                       }
@@ -5461,8 +5536,7 @@ jobs:
               }
 
               private func sendCustom(_ d: Data, name: String) {
-                  let pts = pointsToSend
-                  deliver(name: name, points: pts) {
+                  deliver(name: name, kind: "stations") { pts in
                       guard let pk = Town.userItemPacket(d, points: pts) else { throw URLError(.cannotDecodeContentData) }
                       return pk
                   }
@@ -5652,6 +5726,12 @@ jobs:
                   _ = try exchange(op: 0x15, then: TamaLink.packet(op: 0x15, cmd: 0x36), progress: progress)
               }
 
+              /// Come home carrying a souvenir and points (GO BACK? › YES on the toy).
+              func back(packet: [UInt8], progress: (String) -> Void) throws {
+                  progress("Walking your Tama home…")
+                  _ = try exchange(op: 0x15, then: packet, progress: progress)
+              }
+
               /// The wedding (GO BACK? › YES on the toy): the toy comes home married.
               func marry(_ packet: [UInt8], progress: (String) -> Void) throws {
                   progress("The wedding is starting… 💍")
@@ -5709,57 +5789,115 @@ jobs:
               }
           }
 
-          /// The connection the Tama App is holding open (Download mode, waiting for you to pick).
+          /// Runs the app side of every connection by itself, like the phone app did:
+          /// - Visit: your Tama comes to town (date, shop, play).
+          /// - GO BACK › YES: your Tama comes home — with a wedding if you proposed,
+          ///   otherwise with its souvenir and the Gotchi Points you won.
+          /// - Download: delivers what's waiting in the bag, or opens TamaDepo.
           final class AppLink: ObservableObject {
               static let shared = AppLink()
               @Published var busy = false
               @Published var status = ""
               @Published var openForDownload = false
               @Published var lastMessage: String?
+              /// Set when the job is done and the app should close (the message shows on the toy screen).
+              @Published var closeWith: String?
               private var running = false
 
-              /// The toy is waiting for the app: find out why and handle it.
+              private func main(_ f: @escaping () -> Void) { DispatchQueue.main.sync(execute: f) }
+
               func start(emu: Emulator, onDownload: @escaping () -> Void) {
                   guard !running, emu.appWaiting, let toy = emu.toy else { return }
                   let town = Town.shared
-                  if town.state(toy).away { return }          // coming back: Tama ♥ Party handles it
+                  let st = town.state(toy)
                   running = true
                   busy = true
                   status = "Connecting…"
                   let link = TamaLink(emu: emu)
+                  let progress: (String) -> Void = { m in DispatchQueue.main.async { self.status = m } }
                   DispatchQueue.global(qos: .userInitiated).async {
                       var msg: String?
+                      var close = false
                       var download = false
                       do {
-                          let mode = try link.probe()
-                          emu.note("app connected, toy mode \(String(format: "%02x", mode))")
-                          if mode == TamaLink.modeVisit {
-                              DispatchQueue.main.async { self.status = "\(toy.name) is coming to town…" }
-                              let d = try link.finishVisit()
-                              try? Data(d).write(to: town.visitURL(toy), options: .atomic)
-                              DispatchQueue.main.sync {
-                                  var x = town.state(toy)
-                                  x.away = true
-                                  x.pending = .none
-                                  town.save(x, toy)
-                                  town.shuffle()
+                          if st.away {
+                              close = true
+                              let name = town.visitInfo(toy)?.name.capitalized ?? toy.name
+                              if st.pending == .marry, let s = st.suitor, let pkt = town.marriagePacket(toy, s, babySex: st.babySex, genes: st.genes) {
+                                  try link.marry(pkt, progress: progress)
+                                  let f = DateFormatter(); f.dateStyle = .medium
+                                  self.main {
+                                      var y = town.state(toy)
+                                      y.married.append("\(f.string(from: Date())): \(name) married \(s.name) 💍")
+                                      y.away = false; y.pending = .none; y.suitor = nil
+                                      town.save(y, toy)
+                                  }
+                                  emu.note("married \(s.name)")
+                                  msg = "Just married! 💍🎉 \(name) and \(s.name) are married. \(name) is coming home with an egg — watch the toy!"
+                              } else {
+                                  let souvenir = town.bag(toy).first
+                                  let data = souvenir.flatMap { town.bagData(toy, $0) }
+                                  let pts = Town.pocket
+                                  try link.back(packet: Town.backPacket(data, points: pts), progress: progress)
+                                  self.main {
+                                      if let souvenir { town.removeFromBag(toy, souvenir) }
+                                      Town.pocket = Town.pocket - pts
+                                      var y = town.state(toy)
+                                      y.away = false; y.pending = .none; y.suitor = nil
+                                      town.save(y, toy)
+                                  }
+                                  var extras: [String] = []
+                                  if let souvenir { extras.append(souvenir.name) }
+                                  if pts > 0 { extras.append("\(pts) Gotchi Points") }
+                                  msg = "Welcome home! 🏠" + (extras.isEmpty ? "" : " \(name) brought back " + extras.joined(separator: " and ") + ".")
                               }
                               emu.saveNow()
-                              msg = "\(toy.name) is in town! Go to Tama ♥ Party to meet someone. 💕"
-                          } else if mode == TamaLink.modeDownload {
-                              download = true
                           } else {
-                              link.close()
+                              let mode = try link.probe()
+                              emu.note("app connected, toy mode \(String(format: "%02x", mode))")
+                              if mode == TamaLink.modeVisit {
+                                  progress("\(toy.name) is coming to town…")
+                                  let d = try link.finishVisit()
+                                  try? Data(d).write(to: town.visitURL(toy), options: .atomic)
+                                  self.main {
+                                      var x = town.state(toy)
+                                      x.away = true
+                                      x.pending = .none
+                                      town.save(x, toy)
+                                      town.shuffle()
+                                  }
+                                  emu.saveNow()
+                                  msg = "\(toy.name) is in town! 🏙️ Date at Tama ♥ Party, shop at TamaDepo or play in the Arcade."
+                              } else if mode == TamaLink.modeDownload {
+                                  if let it = town.bag(toy).first, let data = town.bagData(toy, it),
+                                     let pkt = Town.userItemPacket(data, points: Town.pocket) {
+                                      let pts = Town.pocket
+                                      progress("Delivering \(it.name)…")
+                                      try link.finishItem(pkt)
+                                      self.main {
+                                          town.removeFromBag(toy, it)
+                                          Town.pocket = Town.pocket - pts
+                                      }
+                                      emu.saveNow()
+                                      close = true
+                                      msg = "Delivered \(it.name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁 Watch the toy."
+                                  } else {
+                                      download = true
+                                  }
+                              } else {
+                                  link.close()
+                              }
                           }
                       } catch {
+                          close = false
                           emu.note("app connect failed: \(error.localizedDescription)")
-                          msg = "Couldn't connect to your Tama. Choose Connection › App on the toy again."
+                          msg = "Couldn't finish talking to your Tama. On the toy choose Connection › App again and it'll pick up where it left off."
                       }
                       DispatchQueue.main.async {
                           self.running = false
                           self.busy = false
                           self.openForDownload = download
-                          self.lastMessage = msg
+                          if close { self.closeWith = msg ?? "" } else { self.lastMessage = msg }
                           if download { onDownload() }
                       }
                   }
@@ -6056,6 +6194,66 @@ jobs:
                   var babySex = 2          // 0 boy, 1 girl, 2 surprise
                   var genes = 0            // 0 like the app, 2 random
                   var married: [String] = []
+                  /// Things bought for this toy that haven't reached it yet (souvenirs).
+                  var bag: [BagItem]? = nil
+              }
+
+              struct BagItem: Codable, Identifiable, Equatable {
+                  var id = UUID()
+                  var name: String
+                  var kind: String
+              }
+
+              // MARK: the bag (souvenirs) and the pocket (Gotchi Points for the toy)
+
+              private func bagDir(_ toy: Toy) -> URL {
+                  let d = ToyStore.dir(toy.id).appendingPathComponent("bag", isDirectory: true)
+                  try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+                  return d
+              }
+
+              func bag(_ toy: Toy) -> [BagItem] { state(toy).bag ?? [] }
+
+              /// Keep a bought item (its delivery packet) until the toy can receive it.
+              func addToBag(_ toy: Toy, name: String, kind: String, packet: [UInt8]) {
+                  let it = BagItem(name: name, kind: kind)
+                  try? Data(packet).write(to: bagDir(toy).appendingPathComponent(it.id.uuidString + ".bin"), options: .atomic)
+                  var x = state(toy)
+                  x.bag = (x.bag ?? []) + [it]
+                  save(x, toy)
+              }
+
+              func bagData(_ toy: Toy, _ it: BagItem) -> Data? {
+                  try? Data(contentsOf: bagDir(toy).appendingPathComponent(it.id.uuidString + ".bin"))
+              }
+
+              func removeFromBag(_ toy: Toy, _ it: BagItem) {
+                  try? FileManager.default.removeItem(at: bagDir(toy).appendingPathComponent(it.id.uuidString + ".bin"))
+                  var x = state(toy)
+                  x.bag = (x.bag ?? []).filter { $0.id != it.id }
+                  save(x, toy)
+              }
+
+              /// Gotchi Points won in the Arcade, waiting to go to the toy.
+              static var pocket: Int {
+                  get { UserDefaults.standard.integer(forKey: "gotchiPocket") }
+                  set { UserDefaults.standard.set(max(0, min(99999, newValue)), forKey: "gotchiPocket") }
+              }
+
+              /// The come-home packet, carrying an optional souvenir and points.
+              static func backPacket(_ item: Data?, points: Int) -> [UInt8] {
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  let pts = UInt32(max(0, points))
+                  if let item {
+                      item.withUnsafeBytes { tg_mm_back_packet($0.bindMemory(to: UInt8.self).baseAddress, $0.count, pts, &p, &n) }
+                  } else {
+                      tg_mm_back_packet(nil, 0, pts, &p, &n)
+                  }
+                  guard let p else { return [] }
+                  let a = Array(UnsafeBufferPointer(start: p, count: n))
+                  tg_free(p, n)
+                  return a
               }
 
               private func stateURL(_ toy: Toy) -> URL { ToyStore.dir(toy.id).appendingPathComponent("town.json") }
@@ -6170,9 +6368,7 @@ jobs:
                       }
                   }
                   .overlay { if busy { BusyOverlay(text: progress) } }
-                  .onAppear { town.loadIfPresent(); maybeAuto() }
-                  .onChange(of: emu.appWaiting) { w in if w { autoTried = false; maybeAuto() } }
-                  .onChange(of: town.pack) { _ in maybeAuto() }
+                  .onAppear { town.loadIfPresent() }
                   .sheet(item: $chosen) { s in
                       SuitorSheet(suitor: s, tamaName: tamaName, adult: toy.flatMap { town.visitInfo($0)?.adult } ?? true) { babySex, genes in
                           propose(s, babySex: babySex, genes: genes)
@@ -6221,20 +6417,14 @@ jobs:
                       TownCard(tint: .purple) {
                           Label("\(tamaName) is out in town", systemImage: "figure.walk")
                               .font(.system(.headline, design: .rounded)).foregroundStyle(.purple)
-                          Text("Head to Tama ♥ Party to meet someone special, or bring \(tamaName) home.")
+                          Text("Date at Tama ♥ Party, shop at TamaDepo, play in the Arcade. Souvenirs and Gotchi Points go home with \(tamaName).")
                               .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
-                          Button { setPending(.back, nil) } label: {
-                              Label("Bring \(tamaName) home", systemImage: "house.fill").frame(maxWidth: .infinity)
-                          }
-                          .buttonStyle(.borderedProminent).tint(.purple)
+                          comeHomeHint
                       }
                   } else {
                       awayHeader
                       suitorGrid
-                      Button { setPending(.back, nil) } label: {
-                          Label("Bring \(tamaName) home without marrying", systemImage: "house.fill").frame(maxWidth: .infinity)
-                      }
-                      .buttonStyle(.bordered).tint(.secondary)
+                      comeHomeHint
                   }
                   if mode == .home && !st.married.isEmpty {
                       TownCard(tint: .yellow) {
@@ -6330,16 +6520,16 @@ jobs:
                       } else {
                           Text("Heading home 🏠").font(.system(.title3, design: .rounded).weight(.bold))
                       }
-                      step(1, "Close this screen and press any button on the toy.")
+                      step(1, "Tap Done, then press any button on the toy.")
                       step(2, "It asks GO BACK? — choose YES.")
-                      step(3, "TamaiOS finishes the rest by itself.")
-                      Button { doPending() } label: {
-                          Label(emu.appWaiting ? "Go now" : "Waiting for GO BACK › YES…", systemImage: emu.appWaiting ? "heart.fill" : "hourglass")
-                              .frame(maxWidth: .infinity)
-                      }
-                      .buttonStyle(.borderedProminent).tint(.pink).disabled(!emu.appWaiting)
+                      step(3, "TamaiOS holds the wedding by itself. 💒")
                       Button("Change my mind") { setPending(.none, nil) }.font(.footnote)
                   }
+              }
+
+              private var comeHomeHint: some View {
+                  Label("To come home: tap Done, press any button on the toy and choose GO BACK › YES. Everything else is automatic.", systemImage: "house.fill")
+                      .font(.system(.footnote, design: .rounded)).foregroundStyle(.secondary)
               }
 
               private func step(_ n: Int, _ s: String) -> some View {
@@ -6360,18 +6550,11 @@ jobs:
                   x.babySex = babySex
                   x.genes = genes
                   town.save(x, t)
-                  if emu.appWaiting && p != .none { doPending() }
               }
 
               private func propose(_ s: Suitor, babySex: Int, genes: Int) {
                   chosen = nil
                   setPending(.marry, s, babySex: babySex, genes: genes)
-              }
-
-              private func maybeAuto() {
-                  guard !autoTried, !busy, emu.appWaiting, let t = toy, case .ready = town.pack else { return }
-                  let x = town.state(t)
-                  if x.away && x.pending != .none { autoTried = true; doPending() }
               }
 
               private func run(_ work: @escaping (TamaLink, @escaping (String) -> Void) throws -> Void, done: @escaping (Error?) -> Void) {

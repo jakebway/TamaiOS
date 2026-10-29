@@ -2010,10 +2010,10 @@ jobs:
               """Symmetric egg, a bit narrower at the top, centred on its bounding box."""
               x, y = cx - w / 2, cy - h / 2
               pts = []
-              pts += bez((cx, y), (x + w*0.80, y), (x + w, y + h*0.28), (x + w, y + h*0.60))
-              pts += bez((x + w, y + h*0.60), (x + w, y + h*0.86), (x + w*0.80, y + h), (cx, y + h))
-              pts += bez((cx, y + h), (x + w*0.20, y + h), (x, y + h*0.86), (x, y + h*0.60))
-              pts += bez((x, y + h*0.60), (x, y + h*0.28), (x + w*0.20, y), (cx, y))
+              pts += bez((cx, y), (x + w*0.86, y), (x + w, y + h*0.25), (x + w, y + h*0.58))
+              pts += bez((x + w, y + h*0.58), (x + w, y + h*0.86), (x + w*0.82, y + h), (cx, y + h))
+              pts += bez((cx, y + h), (x + w*0.18, y + h), (x, y + h*0.86), (x, y + h*0.58))
+              pts += bez((x, y + h*0.58), (x, y + h*0.25), (x + w*0.14, y), (cx, y))
               return pts
 
           def mask(draw_fn):
@@ -2042,33 +2042,38 @@ jobs:
           d = ImageDraw.Draw(img)
           d.line(shell + [shell[0]], fill=INK, width=int(lw), joint="curve")
 
-          # gloss on the upper left of the shell
+          # shine along the upper-left edge (same as the app: inset egg, 86%..92.5% of its outline)
+          def trim(pts, a, b):
+              L = [0.0]
+              for i in range(1, len(pts)): L.append(L[-1] + math.dist(pts[i-1], pts[i]))
+              T = L[-1]; return [p for p, l in zip(pts, L) if a*T <= l <= b*T]
           gl = Image.new("L", (S, S), 0); gd = ImageDraw.Draw(gl)
-          gx, gy = C - W*0.27, top + H*0.17
-          gd.ellipse([gx - W*0.12, gy - W*0.045, gx + W*0.12, gy + W*0.045], fill=200)
-          gl = gl.rotate(38, center=(gx, gy), resample=Image.BICUBIC)
-          gd = ImageDraw.Draw(gl)
-          gd.ellipse([C - W*0.10 - W*0.025, top + H*0.085 - W*0.025, C - W*0.10 + W*0.025, top + H*0.085 + W*0.025], fill=220)
-          img.paste((255, 255, 255), (0, 0), gl.filter(ImageFilter.GaussianBlur(W * 0.004)))
+          arc = trim(egg(C, C, W*0.93, H*0.93), 0.86, 0.925)
+          gd.line(arc, fill=190, width=int(W*0.03), joint="curve")
+          for q in (arc[0], arc[-1]):
+              gd.ellipse([q[0] - W*0.015, q[1] - W*0.015, q[0] + W*0.015, q[1] + W*0.015], fill=190)
+          img.paste((255, 255, 255), (0, 0), gl.filter(ImageFilter.GaussianBlur(W * 0.002)))
           d = ImageDraw.Draw(img)
 
           # screen frame: the ON's big, thick, coloured surround
           sy = top + H * 0.41                       # screen centre
-          F = W * 0.74                              # frame outer size
+          F = W * 0.72                              # frame outer size
           fr = [C - F/2, sy - F/2, C + F/2, sy + F/2]
           d.rounded_rectangle([fr[0], fr[1] + lw*0.9, fr[2], fr[3] + lw*0.9], radius=F*0.30, fill=lerp(FRAME_B, INK, 0.45))
           img.paste(vgrad(FRAME_T, FRAME_B, fr[1], fr[3]), (0, 0), mask(lambda g: g.rounded_rectangle(fr, radius=F*0.30, fill=255)))
           d = ImageDraw.Draw(img)
           d.rounded_rectangle(fr, radius=F*0.30, outline=INK, width=int(lw))
-          # little hearts on the frame corners
-          def heart(cx, cy, s, fill):
-              pts = [(cx + s*math.sin(t)**3, cy - s*(13*math.cos(t) - 5*math.cos(2*t) - 2*math.cos(3*t) - math.cos(4*t))/16)
-                     for t in [i/90*2*math.pi for i in range(91)]]
-              d.polygon(pts, fill=fill); d.line(pts + [pts[0]], fill=INK, width=max(2, int(lw*0.5)))
-          heart(C, fr[1] + F*0.075, F*0.04, (255, 255, 255))
+          # tiny star on the frame, centred between its top edge and the screen
+          def star(cx, cy, R, fill):
+              pts = []
+              for i in range(10):
+                  ang = -math.pi/2 + i*math.pi/5; rr = R if i % 2 == 0 else R*0.48
+                  pts.append((cx + math.cos(ang)*rr, cy + R*0.08 + math.sin(ang)*rr))
+              d.polygon(pts, fill=fill); d.line(pts + [pts[0]], fill=INK, width=max(2, int(lw*0.5)), joint="curve")
 
           # LCD
           L = F * 0.70
+          star(C, fr[1] + (F - L) / 4, W * 0.028, (255, 255, 255))
           lcd = [C - L/2, sy - L/2, C + L/2, sy + L/2]
           d.rounded_rectangle([lcd[0] - lw*0.6, lcd[1] - lw*0.6, lcd[2] + lw*0.6, lcd[3] + lw*0.6], radius=L*0.10, fill=INK)
           scene = Image.new("RGB", (16, 16))
@@ -5487,20 +5492,37 @@ jobs:
           cat > ios/TamaiOS/ToyView.swift <<'TAMA_EOF'
           import SwiftUI
 
-          /// Egg outline of the Tamagotchi ON: narrower on top, round and full at the bottom.
+          /// Egg outline of the Tamagotchi ON: a full, rounded top and a wide bottom.
           struct EggShape: Shape {
               func path(in r: CGRect) -> Path {
                   let w = r.width, h = r.height, x = r.minX, y = r.minY, cx = r.midX
                   var p = Path()
                   p.move(to: CGPoint(x: cx, y: y))
-                  p.addCurve(to: CGPoint(x: x + w, y: y + h * 0.60),
-                             control1: CGPoint(x: x + w * 0.80, y: y), control2: CGPoint(x: x + w, y: y + h * 0.28))
+                  p.addCurve(to: CGPoint(x: x + w, y: y + h * 0.58),
+                             control1: CGPoint(x: x + w * 0.86, y: y), control2: CGPoint(x: x + w, y: y + h * 0.25))
                   p.addCurve(to: CGPoint(x: cx, y: y + h),
-                             control1: CGPoint(x: x + w, y: y + h * 0.86), control2: CGPoint(x: x + w * 0.80, y: y + h))
-                  p.addCurve(to: CGPoint(x: x, y: y + h * 0.60),
-                             control1: CGPoint(x: x + w * 0.20, y: y + h), control2: CGPoint(x: x, y: y + h * 0.86))
+                             control1: CGPoint(x: x + w, y: y + h * 0.86), control2: CGPoint(x: x + w * 0.82, y: y + h))
+                  p.addCurve(to: CGPoint(x: x, y: y + h * 0.58),
+                             control1: CGPoint(x: x + w * 0.18, y: y + h), control2: CGPoint(x: x, y: y + h * 0.86))
                   p.addCurve(to: CGPoint(x: cx, y: y),
-                             control1: CGPoint(x: x, y: y + h * 0.28), control2: CGPoint(x: x + w * 0.20, y: y))
+                             control1: CGPoint(x: x, y: y + h * 0.25), control2: CGPoint(x: x + w * 0.14, y: y))
+                  p.closeSubpath()
+                  return p
+              }
+          }
+
+          /// Small rounded five-pointed star.
+          struct StarShape: Shape {
+              func path(in r: CGRect) -> Path {
+                  let c = CGPoint(x: r.midX, y: r.midY + r.height * 0.04)
+                  let R = min(r.width, r.height) / 2, ri = R * 0.48
+                  var p = Path()
+                  for i in 0..<10 {
+                      let a = -CGFloat.pi / 2 + CGFloat(i) * .pi / 5
+                      let rad = i % 2 == 0 ? R : ri
+                      let pt = CGPoint(x: c.x + cos(a) * rad, y: c.y + sin(a) * rad)
+                      if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                  }
                   p.closeSubpath()
                   return p
               }
@@ -5523,7 +5545,7 @@ jobs:
               var cx: CGFloat { w / 2 }
               var eggTop: CGFloat { loopH }
               /// Coloured frame around the screen.
-              var frame: CGFloat { w * 0.74 }
+              var frame: CGFloat { w * 0.72 }
               /// LCD size, snapped so each of its 128 pixels covers a whole number of
               /// device pixels (crisp, even pixels).
               var screen: CGFloat {
@@ -5580,14 +5602,11 @@ jobs:
                           .frame(width: w - lw, height: h - lw)
                           .position(x: cx, y: eggMid)
 
-                      // gloss
-                      Ellipse().fill(Color.white.opacity(0.72))
-                          .frame(width: w * 0.24, height: w * 0.09)
-                          .rotationEffect(.degrees(-38))
-                          .position(x: cx - w * 0.27, y: m.eggTop + h * 0.17)
-                      Circle().fill(Color.white.opacity(0.85))
-                          .frame(width: w * 0.05, height: w * 0.05)
-                          .position(x: cx - w * 0.10, y: m.eggTop + h * 0.085)
+                      // shine along the upper-left edge, clear of the screen frame
+                      EggShape().trim(from: 0.86, to: 0.925)
+                          .stroke(Color.white.opacity(0.75), style: StrokeStyle(lineWidth: w * 0.03, lineCap: .round))
+                          .frame(width: (w - lw) * 0.93, height: (h - lw) * 0.93)
+                          .position(x: cx, y: eggMid)
 
                       // screen frame (centred on the screen), its shadow, and a heart
                       let fr = m.frame
@@ -5600,10 +5619,9 @@ jobs:
                           .overlay(RoundedRectangle(cornerRadius: fr * 0.30, style: .continuous).stroke(inkLine, lineWidth: lw))
                           .frame(width: fr, height: fr)
                           .position(x: cx, y: m.screenY)
-                      Image(systemName: "heart.fill")
-                          .font(.system(size: w * 0.045, weight: .bold))
-                          .foregroundStyle(Color.white)
-                          .shadow(color: inkLine.opacity(0.6), radius: 0, x: 0, y: lw * 0.4)
+                      StarShape().fill(Color.white)
+                          .overlay(StarShape().stroke(inkLine, style: StrokeStyle(lineWidth: lw * 0.5, lineJoin: .round)))
+                          .frame(width: w * 0.05, height: w * 0.05)
                           .position(x: cx, y: m.screenY - fr / 2 + (fr - m.screen) / 4)
                       // dark border right around the LCD
                       RoundedRectangle(cornerRadius: m.screen * 0.08, style: .continuous)
@@ -5836,7 +5854,7 @@ jobs:
                       )
                       Text(label)
                           .font(.system(size: size * 0.24, weight: .heavy, design: .rounded))
-                          .foregroundStyle(inkLine.opacity(0.75))
+                          .foregroundStyle(theme.ink.opacity(0.8))
                           .allowsHitTesting(false)
                   }
                   .accessibilityElement()

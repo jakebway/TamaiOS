@@ -4887,72 +4887,104 @@ jobs:
 
               var body: some View {
                   GeometryReader { g in
-                      let w = g.size.width, h = g.size.height
                       ZStack {
-                          // sky
-                          LinearGradient(colors: [Color(red: 1.0, green: 0.78, blue: 0.90), Color(red: 0.86, green: 0.84, blue: 1.0), Color(red: 0.78, green: 0.92, blue: 1.0)],
-                                         startPoint: .top, endPoint: .bottom)
-                          ForEach(0..<9, id: \.self) { i in
-                              let size: CGFloat = i % 3 == 0 ? 0.035 : 0.022
-                              Image(systemName: "sparkle")
-                                  .font(.system(size: w * size))
-                                  .foregroundStyle(.white.opacity(0.9))
-                                  .position(x: w * TownScene.sparkX[i], y: h * TownScene.sparkY[i])
-                          }
-                          cloud(w * 0.20).position(x: w * 0.20, y: h * 0.16)
-                          cloud(w * 0.16).position(x: w * 0.80, y: h * 0.12)
-                          // hills and the square
-                          Ellipse().fill(Color(red: 0.62, green: 0.86, blue: 0.56)).frame(width: w * 0.9, height: h * 0.4).position(x: w * 0.18, y: h * 0.74)
-                          Ellipse().fill(Color(red: 0.55, green: 0.82, blue: 0.52)).frame(width: w * 0.9, height: h * 0.4).position(x: w * 0.85, y: h * 0.76)
-                          Rectangle().fill(Color(red: 0.99, green: 0.93, blue: 0.80)).frame(height: h * 0.30).position(x: w / 2, y: h * 0.86)
-                          Rectangle().fill(Color(red: 0.96, green: 0.86, blue: 0.70)).frame(height: h * 0.012).position(x: w / 2, y: h * 0.715)
-
-                          Button { go(.home) } label: { castle(w: w, h: h) }
-                              .buttonStyle(.plain)
-                              .position(x: w * 0.5, y: h * 0.47)
-                          Button { go(.party) } label: { partyHall(w: w, h: h) }
-                              .buttonStyle(.plain)
-                              .position(x: w * 0.17, y: h * 0.53)
-                          Button { go(.depa) } label: { depa(w: w, h: h) }
-                              .buttonStyle(.plain)
-                              .position(x: w * 0.84, y: h * 0.52)
-
-                          // Tamas out for a walk
-                          TimelineView(.animation(minimumInterval: 1.0 / 20)) { tl in
-                              let t = tl.date.timeIntervalSinceReferenceDate
-                              ZStack {
-                                  ForEach(Array(walkers.enumerated()), id: \.element.id) { i, s in
-                                      let a: Double = t * (0.25 + Double(i) * 0.07) + Double(i) * 1.7
-                                      let x = CGFloat(0.5 + 0.40 * sin(a))
-                                      let flip: CGFloat = cos(a) >= 0 ? -1 : 1
-                                      let y = CGFloat(0.80 + Double(i % 3) * 0.05 - abs(sin(t * 4 + Double(i))) * 0.012)
-                                      CharacterPicture(image: town.image(s))
-                                          .frame(width: w * 0.15, height: w * 0.15)
-                                          .scaleEffect(x: flip, y: 1)
-                                          .position(x: w * x, y: h * y)
-                                  }
-                              }
-                          }
-                          .allowsHitTesting(false)
-
-                          Button { go(.arcade) } label: { arcadeSign(w: w) }
-                              .buttonStyle(.plain)
-                              .position(x: w * 0.5, y: h * 0.80)
-
-                          // place labels along the bottom, like the original app
-                          HStack(spacing: w * 0.02) {
-                              label("Tama ♥ Party", .pink) { go(.party) }
-                              label("Arcade", .purple) { go(.arcade) }
-                              label("TamaDepa", .blue) { go(.depa) }
-                          }
-                          .position(x: w / 2, y: h * 0.94)
-                          // corner buttons
-                          cornerButton("house.fill", "Home", .orange) { go(.home) }.position(x: w * 0.09, y: h * 0.09)
-                          cornerButton("gearshape.fill", "Settings", .pink) { go(.settings) }.position(x: w * 0.91, y: h * 0.09)
+                          sky(g.size.width, g.size.height)
+                          ground(g.size.width, g.size.height)
+                          buildings(g.size.width, g.size.height)
+                          walkersLayer(g.size.width, g.size.height)
+                          signs(g.size.width, g.size.height)
                       }
                   }
                   .onAppear(perform: pickWalkers)
                   .onChange(of: town.ids.count) { _ in pickWalkers() }
+              }
+
+              private static let skyColors: [Color] = [Color(red: 1.0, green: 0.78, blue: 0.90), Color(red: 0.86, green: 0.84, blue: 1.0), Color(red: 0.78, green: 0.92, blue: 1.0)]
+
+              private func sparkle(_ i: Int, _ w: CGFloat, _ h: CGFloat) -> some View {
+                  let size: CGFloat = i % 3 == 0 ? 0.035 : 0.022
+                  let x: CGFloat = w * TownScene.sparkX[i]
+                  let y: CGFloat = h * TownScene.sparkY[i]
+                  return Image(systemName: "sparkle")
+                      .font(.system(size: w * size))
+                      .foregroundStyle(Color.white.opacity(0.9))
+                      .position(x: x, y: y)
+              }
+
+              private func sky(_ w: CGFloat, _ h: CGFloat) -> some View {
+                  ZStack {
+                      LinearGradient(colors: TownScene.skyColors, startPoint: .top, endPoint: .bottom)
+                      ForEach(0..<9, id: \.self) { i in sparkle(i, w, h) }
+                      cloud(w * 0.20).position(x: w * 0.20, y: h * 0.16)
+                      cloud(w * 0.16).position(x: w * 0.80, y: h * 0.12)
+                  }
+              }
+
+              private func ground(_ w: CGFloat, _ h: CGFloat) -> some View {
+                  let hill1 = Color(red: 0.62, green: 0.86, blue: 0.56), hill2 = Color(red: 0.55, green: 0.82, blue: 0.52)
+                  let square = Color(red: 0.99, green: 0.93, blue: 0.80), edge = Color(red: 0.96, green: 0.86, blue: 0.70)
+                  return ZStack {
+                      Ellipse().fill(hill1).frame(width: w * 0.9, height: h * 0.4).position(x: w * 0.18, y: h * 0.74)
+                      Ellipse().fill(hill2).frame(width: w * 0.9, height: h * 0.4).position(x: w * 0.85, y: h * 0.76)
+                      Rectangle().fill(square).frame(height: h * 0.30).position(x: w / 2, y: h * 0.86)
+                      Rectangle().fill(edge).frame(height: h * 0.012).position(x: w / 2, y: h * 0.715)
+                  }
+              }
+
+              private func buildings(_ w: CGFloat, _ h: CGFloat) -> some View {
+                  ZStack {
+                      Button { go(.home) } label: { castle(w: w, h: h) }
+                          .buttonStyle(.plain)
+                          .position(x: w * 0.5, y: h * 0.47)
+                      Button { go(.party) } label: { partyHall(w: w, h: h) }
+                          .buttonStyle(.plain)
+                          .position(x: w * 0.17, y: h * 0.53)
+                      Button { go(.depa) } label: { depa(w: w, h: h) }
+                          .buttonStyle(.plain)
+                          .position(x: w * 0.84, y: h * 0.52)
+                  }
+              }
+
+              private func walker(_ i: Int, _ s: Suitor, _ t: Double, _ w: CGFloat, _ h: CGFloat) -> some View {
+                  let a: Double = t * (0.25 + Double(i) * 0.07) + Double(i) * 1.7
+                  let x: CGFloat = w * CGFloat(0.5 + 0.40 * sin(a))
+                  let flip: CGFloat = cos(a) >= 0 ? -1 : 1
+                  let lane: Double = 0.80 + Double(i % 3) * 0.05
+                  let hop: Double = abs(sin(t * 4 + Double(i))) * 0.012
+                  let y: CGFloat = h * CGFloat(lane - hop)
+                  let size: CGFloat = w * 0.15
+                  return CharacterPicture(image: town.image(s))
+                      .frame(width: size, height: size)
+                      .scaleEffect(x: flip, y: 1)
+                      .position(x: x, y: y)
+              }
+
+              private func walkersLayer(_ w: CGFloat, _ h: CGFloat) -> some View {
+                  TimelineView(.animation(minimumInterval: 1.0 / 20)) { tl in
+                      ZStack {
+                          ForEach(0..<walkers.count, id: \.self) { i in
+                              walker(i, walkers[i], tl.date.timeIntervalSinceReferenceDate, w, h)
+                          }
+                      }
+                  }
+                  .allowsHitTesting(false)
+              }
+
+              private func signs(_ w: CGFloat, _ h: CGFloat) -> some View {
+                  ZStack {
+                      Button { go(.arcade) } label: { arcadeSign(w: w) }
+                          .buttonStyle(.plain)
+                          .position(x: w * 0.5, y: h * 0.80)
+                      // place labels along the bottom, like the original app
+                      HStack(spacing: w * 0.02) {
+                          label("Tama ♥ Party", .pink) { go(.party) }
+                          label("Arcade", .purple) { go(.arcade) }
+                          label("TamaDepa", .blue) { go(.depa) }
+                      }
+                      .position(x: w / 2, y: h * 0.94)
+                      cornerButton("house.fill", "Home", .orange) { go(.home) }.position(x: w * 0.09, y: h * 0.09)
+                      cornerButton("gearshape.fill", "Settings", .pink) { go(.settings) }.position(x: w * 0.91, y: h * 0.09)
+                  }
               }
 
               private func pickWalkers() {
@@ -4969,48 +5001,77 @@ jobs:
                   .opacity(0.95)
               }
 
+              private static let roofBlue = Color(red: 0.45, green: 0.62, blue: 0.98)
+              private static let wallColor = Color(red: 0.90, green: 0.91, blue: 1.0)
+              private static let edgeInk = inkLine.opacity(0.6)
+
+              private func roof(_ size: CGFloat) -> some View {
+                  Triangle().fill(TownScene.roofBlue)
+                      .overlay(Triangle().stroke(TownScene.edgeInk, lineWidth: 1.5))
+                      .frame(width: size, height: size)
+              }
+
+              private func wallBlock(_ width: CGFloat, _ height: CGFloat) -> some View {
+                  Rectangle().fill(TownScene.wallColor)
+                      .overlay(Rectangle().stroke(TownScene.edgeInk, lineWidth: 1.5))
+                      .frame(width: width, height: height)
+              }
+
+              private func tower(_ w: CGFloat, _ h: CGFloat, _ side: CGFloat) -> some View {
+                  let dx: CGFloat = side * w * 0.12
+                  return VStack(spacing: 0) {
+                      roof(w * 0.11)
+                      wallBlock(w * 0.08, h * 0.20)
+                  }
+                  .offset(x: dx, y: h * 0.03)
+              }
+
+              private func gate(_ w: CGFloat, _ h: CGFloat) -> some View {
+                  let door = Color(red: 1, green: 0.85, blue: 0.5)
+                  return wallBlock(w * 0.26, h * 0.12)
+                      .overlay(
+                          Image(systemName: "heart.fill").font(.system(size: w * 0.045)).foregroundStyle(Color.pink)
+                              .padding(w * 0.012).background(Capsule().fill(door))
+                              .offset(y: h * 0.015)
+                      )
+              }
+
               private func castle(w: CGFloat, h: CGFloat) -> some View {
-                  let blue = Color(red: 0.45, green: 0.62, blue: 0.98), wall = Color(red: 0.90, green: 0.91, blue: 1.0)
-                  let ink = inkLine.opacity(0.6)
+                  let gem = Color(red: 0.4, green: 0.8, blue: 1)
                   return ZStack {
-                      // side towers
-                      ForEach([CGFloat(-1), CGFloat(1)], id: \.self) { sgn in
-                          VStack(spacing: 0) {
-                              Triangle().fill(blue).overlay(Triangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.11, height: w * 0.11)
-                              Rectangle().fill(wall).overlay(Rectangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.08, height: h * 0.20)
-                          }
-                          .offset(x: sgn * w * 0.12, y: h * 0.03)
-                      }
-                      // keep
+                      tower(w, h, -1)
+                      tower(w, h, 1)
                       VStack(spacing: 0) {
-                          Triangle().fill(blue).overlay(Triangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.16, height: w * 0.16)
-                          Rectangle().fill(wall).overlay(Rectangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.13, height: h * 0.13)
-                          Rectangle().fill(wall).overlay(Rectangle().stroke(ink, lineWidth: 1.5)).frame(width: w * 0.26, height: h * 0.12)
-                              .overlay(
-                                  Image(systemName: "heart.fill").font(.system(size: w * 0.045)).foregroundStyle(.pink)
-                                      .padding(w * 0.012).background(Capsule().fill(Color(red: 1, green: 0.85, blue: 0.5)))
-                                      .offset(y: h * 0.015)
-                              )
+                          roof(w * 0.16)
+                          wallBlock(w * 0.13, h * 0.13)
+                          gate(w, h)
                       }
-                      Image(systemName: "diamond.fill").font(.system(size: w * 0.05)).foregroundStyle(Color(red: 0.4, green: 0.8, blue: 1)).offset(y: -h * 0.17)
+                      Image(systemName: "diamond.fill").font(.system(size: w * 0.05)).foregroundStyle(gem).offset(y: h * -0.17)
                   }
                   .frame(width: w * 0.36, height: h * 0.46)
                   .contentShape(Rectangle())
               }
 
+              private static let balloonColors: [Color] = [.red, .yellow, .blue]
+
+              private func balloon(_ i: Int, _ w: CGFloat, _ h: CGFloat) -> some View {
+                  let dx: CGFloat = w * (CGFloat(i) * 0.03 - 0.12)
+                  let dy: CGFloat = h * -(0.20 + CGFloat(i % 2) * 0.03)
+                  return Circle().fill(TownScene.balloonColors[i]).frame(width: w * 0.035, height: w * 0.035).offset(x: dx, y: dy)
+              }
+
               private func partyHall(w: CGFloat, h: CGFloat) -> some View {
-                  ZStack {
-                      RoundedRectangle(cornerRadius: w * 0.04).fill(Color(red: 1, green: 0.72, blue: 0.85))
-                          .overlay(RoundedRectangle(cornerRadius: w * 0.04).stroke(inkLine.opacity(0.6), lineWidth: 1.5))
+                  let pink = Color(red: 1, green: 0.72, blue: 0.85)
+                  let r: CGFloat = w * 0.04
+                  return ZStack {
+                      RoundedRectangle(cornerRadius: r).fill(pink)
+                          .overlay(RoundedRectangle(cornerRadius: r).stroke(TownScene.edgeInk, lineWidth: 1.5))
                           .frame(width: w * 0.25, height: h * 0.26)
                           .offset(y: h * 0.04)
-                      Image(systemName: "heart.fill").font(.system(size: w * 0.15)).foregroundStyle(.red.opacity(0.85))
+                      Image(systemName: "heart.fill").font(.system(size: w * 0.15)).foregroundStyle(Color.red.opacity(0.85))
                           .shadow(color: .white, radius: 0, x: 2, y: 2)
-                          .offset(y: -h * 0.11)
-                      ForEach(0..<3, id: \.self) { i in
-                          Circle().fill([Color.red, .yellow, .blue][i]).frame(width: w * 0.035)
-                              .offset(x: w * (CGFloat(i) * 0.03 - 0.12), y: -h * (0.20 + CGFloat(i % 2) * 0.03))
-                      }
+                          .offset(y: h * -0.11)
+                      ForEach(0..<3, id: \.self) { i in balloon(i, w, h) }
                       RoundedRectangle(cornerRadius: w * 0.02).fill(Color.white).frame(width: w * 0.07, height: h * 0.09).offset(y: h * 0.12)
                   }
                   .frame(width: w * 0.30, height: h * 0.45)
@@ -5341,7 +5402,7 @@ jobs:
                           let start = TamaLink.packet(op: 0x17, cmd: 0)
                           let link = TamaLink(emu: emu)
                           try await Task.detached(priority: .userInitiated) {
-                              try link.sendGift(start: start, item: pkt) { msg in DispatchQueue.main.async { progress = msg } }
+                              _ = try link.sendGift(start: start, item: pkt) { msg in DispatchQueue.main.async { progress = msg } }
                           }.value
                           emu.note("gift sent: \(name) points=\(points)")
                           if points > 0 { wallet = max(0, wallet - points) }

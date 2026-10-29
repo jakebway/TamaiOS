@@ -2917,7 +2917,7 @@ jobs:
                               }
                           }
                           .aspectRatio(1, contentMode: .fit)
-                          Text("Spend your Gotchi Points at TamaDepa — they're sent along with your next gift.")
+                          Text("Spend your Gotchi Points at TamaDepo — they're sent along with your next gift.")
                               .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                       }
                       .padding(16)
@@ -3586,6 +3586,11 @@ jobs:
               var holdForApp = false
               /// A Bluetooth exchange is running (the toy must keep running then).
               var linkBusy = false
+              /// Set once the toy was seen waiting while the app is open; cleared when the
+              /// app hangs up. Keeps the hold on even while connected.
+              var holdLatch = false
+              /// The app just hung up: ignore the last "waiting" reading until it's polled again.
+              var radioStale = false
               private var visible = true
               private var backgroundAt: Date?
               private var lastCall = Date.distantPast
@@ -3763,7 +3768,9 @@ jobs:
                   var nextRadio = last
                   var radioReady = false
                   while !stopFlag {
-                      if paused || (holdForApp && radioReady && !linkBusy) {
+                      if holdForApp && radioReady && !radioStale { holdLatch = true }
+                      if !holdForApp { holdLatch = false }
+                      if paused || (holdForApp && holdLatch && !linkBusy) {
                           _ = wake.wait(timeout: .now() + (paused ? 0.1 : 0.03))
                           last = CACurrentMediaTime()
                           continue
@@ -3814,6 +3821,7 @@ jobs:
                       var radioChanged = false
                       if now >= nextRadio {
                           nextRadio = now + 0.25
+                          radioStale = false
                           let r = tg_radio_ready(h) != 0
                           if r != radioReady { radioReady = r; radioChanged = true }
                       }
@@ -4704,6 +4712,7 @@ jobs:
               @EnvironmentObject var emu: Emulator
               @Environment(\.dismiss) private var dismiss
               @State private var path: [TownPlace] = []
+              @ObservedObject private var link = AppLink.shared
 
               var body: some View {
                   NavigationStack(path: $path) {
@@ -4716,12 +4725,27 @@ jobs:
                           }
                   }
                   .tint(.pink)
+                  .overlay { if link.busy { BusyOverlay(text: link.status) } }
+                  .alert("Tama Town", isPresented: Binding(get: { link.lastMessage != nil }, set: { if !$0 { link.lastMessage = nil } })) {
+                      Button("OK") {}
+                  } message: { Text(link.lastMessage ?? "") }
                   .onAppear {
                       emu.holdForApp = true      // the toy waits patiently while you're in here
                       Town.shared.loadIfPresent()
                       if let t = emu.toy, Town.shared.state(t).away { path = [.party] }
+                      connect()
                   }
-                  .onDisappear { emu.holdForApp = false }
+                  .onChange(of: emu.appWaiting) { w in if w { connect() } }
+                  .onDisappear {
+                      link.hangUp(emu: emu)
+                      emu.holdForApp = false
+                  }
+              }
+
+              /// Like the phone app: as soon as the toy connects, see which menu it chose.
+              /// Visit brings your Tama to town; Download opens TamaDepo.
+              private func connect() {
+                  link.start(emu: emu) { path = [.depa] }
               }
           }
 
@@ -4733,7 +4757,7 @@ jobs:
                   case .home: return "Home"
                   case .party: return "Tama ♥ Party"
                   case .arcade: return "Arcade"
-                  case .depa: return "TamaDepa"
+                  case .depa: return "TamaDepo"
                   case .settings: return "Settings"
                   }
               }
@@ -4835,8 +4859,8 @@ jobs:
                       VStack(alignment: .leading, spacing: 2) {
                           Text(emu.appWaiting ? "\(name) is connected" : (away ? "\(name) is in town" : "\(name) is at home"))
                               .font(.system(.headline, design: .rounded))
-                          Text(emu.appWaiting ? "Pick a place. Your toy will wait for you." :
-                                  (away ? "Go to Tama ♥ Party to find a partner." : "On the toy: Connection › App › Visit (party) or Download (shop)."))
+                          Text(emu.appWaiting ? "Your toy will wait for you here." :
+                                  (away ? "Go to Tama ♥ Party to find a partner." : "On the toy: Connection › App › Visit to come to town, or Download to shop."))
                               .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
                       }
                       Spacer(minLength: 0)
@@ -4979,7 +5003,7 @@ jobs:
                       HStack(spacing: w * 0.02) {
                           label("Tama ♥ Party", .pink) { go(.party) }
                           label("Arcade", .purple) { go(.arcade) }
-                          label("TamaDepa", .blue) { go(.depa) }
+                          label("TamaDepo", .blue) { go(.depa) }
                       }
                       .position(x: w / 2, y: h * 0.94)
                       cornerButton("house.fill", "Home", .orange) { go(.home) }.position(x: w * 0.09, y: h * 0.09)
@@ -5091,7 +5115,7 @@ jobs:
                       .clipShape(RoundedRectangle(cornerRadius: 4))
                       .offset(y: -h * 0.10)
                       Image(systemName: "bag.fill").font(.system(size: w * 0.07)).foregroundStyle(.blue.opacity(0.8)).offset(y: h * 0.02)
-                      Text("TAMADEPA").font(.system(size: w * 0.028, weight: .heavy, design: .rounded)).foregroundStyle(.pink).offset(y: -h * 0.15)
+                      Text("TAMADEPO").font(.system(size: w * 0.028, weight: .heavy, design: .rounded)).foregroundStyle(.pink).offset(y: -h * 0.15)
                   }
                   .frame(width: w * 0.28, height: h * 0.42)
                   .contentShape(Rectangle())
@@ -5237,7 +5261,7 @@ jobs:
                   ScrollView {
                       VStack(alignment: .leading, spacing: 14) {
                           walletCard
-                          if !emu.appWaiting {
+                          if !emu.appWaiting && !AppLink.shared.openForDownload {
                               Label("On the toy choose Connection › App › Download, then pick something here.", systemImage: "hand.point.up.left.fill")
                                   .font(.system(.subheadline, design: .rounded)).foregroundStyle(.orange)
                                   .padding(12)
@@ -5269,8 +5293,8 @@ jobs:
                       }
                       .padding(16)
                   }
-                  .searchable(text: $search, prompt: "Search TamaDepa")
-                  .navigationTitle("TamaDepa")
+                  .searchable(text: $search, prompt: "Search TamaDepo")
+                  .navigationTitle("TamaDepo")
                   .navigationBarTitleDisplayMode(.inline)
                   .background(LinearGradient(colors: [Color.blue.opacity(0.08), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
                   .task { await load() }
@@ -5337,7 +5361,7 @@ jobs:
                   if web.isEmpty && town.items.isEmpty {
                       if let e = loadError {
                           VStack(spacing: 10) {
-                              Text("Couldn't load TamaDepa").font(.headline)
+                              Text("Couldn't load TamaDepo").font(.headline)
                               Text(e).font(.caption).foregroundStyle(.secondary)
                               Button("Try again") { Task { await load() } }
                           }
@@ -5401,8 +5425,15 @@ jobs:
                           let pkt = try await packet()
                           let start = TamaLink.packet(op: 0x17, cmd: 0)
                           let link = TamaLink(emu: emu)
+                          let session = AppLink.shared.openForDownload
+                          AppLink.shared.openForDownload = false
+                          progress = "Sending your gift…"
                           try await Task.detached(priority: .userInitiated) {
-                              _ = try link.sendGift(start: start, item: pkt) { msg in DispatchQueue.main.async { progress = msg } }
+                              if session {
+                                  try link.finishItem(pkt)          // the toy is already connected
+                              } else {
+                                  _ = try link.sendGift(start: start, item: pkt) { msg in DispatchQueue.main.async { progress = msg } }
+                              }
                           }.value
                           emu.note("gift sent: \(name) points=\(points)")
                           if points > 0 { wallet = max(0, wallet - points) }
@@ -5466,7 +5497,7 @@ jobs:
               func connect(_ on: Bool) {
                   if on { emu.linkBusy = true }
                   emu.withCore { tg_radio_connect($0, on ? 1 : 0) }
-                  if !on { emu.linkBusy = false }
+                  if !on { emu.radioStale = true; emu.holdLatch = false; emu.linkBusy = false }
               }
 
               private func write(_ d: [UInt8]) throws {
@@ -5625,6 +5656,121 @@ jobs:
               func marry(_ packet: [UInt8], progress: (String) -> Void) throws {
                   progress("The wedding is starting… 💍")
                   _ = try exchange(op: 0x16, then: packet, progress: progress)
+              }
+          }
+
+          /// One app session, like the phone app: as soon as the toy connects TamaiOS
+          /// says hello and learns which menu the toy is in (Visit, Download, or coming
+          /// back), then does the right thing by itself.
+          extension TamaLink {
+              static let modeVisit: UInt8 = 0x14, modeBack: UInt8 = 0x15, modeDownload: UInt8 = 0x17
+
+              /// Connect and say hello. Returns the toy's mode; stays connected.
+              func probe() throws -> UInt8 {
+                  guard emu.isLoaded else { throw LinkError.notRunning }
+                  drain(0.05)
+                  connect(true)
+                  do {
+                      try send(TamaLink.packet(op: 0x17, cmd: 0))
+                      let a = try answer()
+                      drain(0.3)
+                      guard a.count > 0x4C else { throw LinkError.noAnswer }
+                      emu.linkBusy = false      // stay connected; the toy waits (held) until we continue
+                      return a[0x4C]
+                  } catch {
+                      close()
+                      throw error
+                  }
+              }
+
+              /// After probe() in Visit mode: the toy comes to town. Returns its visit data.
+              func finishVisit() throws -> [UInt8] {
+                  defer { close() }
+                  emu.linkBusy = true
+                  try send(TamaLink.packet(op: 0x14, cmd: 0x34))
+                  Thread.sleep(forTimeInterval: 0.05)
+                  let d = try answer(firstTimeout: 8, idleTimeout: 4)
+                  guard d.count >= 512 else { throw LinkError.noAnswer }
+                  return d
+              }
+
+              /// After probe() in Download mode: deliver one item packet.
+              func finishItem(_ pkt: [UInt8]) throws {
+                  defer { close() }
+                  emu.linkBusy = true
+                  try send(pkt)
+                  _ = try answer(firstTimeout: 6, idleTimeout: 3)
+              }
+
+              func close() {
+                  emu.linkBusy = true
+                  drain(0.3)
+                  connect(false)
+              }
+          }
+
+          /// The connection the Tama App is holding open (Download mode, waiting for you to pick).
+          final class AppLink: ObservableObject {
+              static let shared = AppLink()
+              @Published var busy = false
+              @Published var status = ""
+              @Published var openForDownload = false
+              @Published var lastMessage: String?
+              private var running = false
+
+              /// The toy is waiting for the app: find out why and handle it.
+              func start(emu: Emulator, onDownload: @escaping () -> Void) {
+                  guard !running, emu.appWaiting, let toy = emu.toy else { return }
+                  let town = Town.shared
+                  if town.state(toy).away { return }          // coming back: Tama ♥ Party handles it
+                  running = true
+                  busy = true
+                  status = "Connecting…"
+                  let link = TamaLink(emu: emu)
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      var msg: String?
+                      var download = false
+                      do {
+                          let mode = try link.probe()
+                          emu.note("app connected, toy mode \(String(format: "%02x", mode))")
+                          if mode == TamaLink.modeVisit {
+                              DispatchQueue.main.async { self.status = "\(toy.name) is coming to town…" }
+                              let d = try link.finishVisit()
+                              try? Data(d).write(to: town.visitURL(toy), options: .atomic)
+                              DispatchQueue.main.sync {
+                                  var x = town.state(toy)
+                                  x.away = true
+                                  x.pending = .none
+                                  town.save(x, toy)
+                                  town.shuffle()
+                              }
+                              emu.saveNow()
+                              msg = "\(toy.name) is in town! Go to Tama ♥ Party to meet someone. 💕"
+                          } else if mode == TamaLink.modeDownload {
+                              download = true
+                          } else {
+                              link.close()
+                          }
+                      } catch {
+                          emu.note("app connect failed: \(error.localizedDescription)")
+                          msg = "Couldn't connect to your Tama. Choose Connection › App on the toy again."
+                      }
+                      DispatchQueue.main.async {
+                          self.running = false
+                          self.busy = false
+                          self.openForDownload = download
+                          self.lastMessage = msg
+                          if download { onDownload() }
+                      }
+                  }
+              }
+
+              /// Leaving the app without buying: hang up so the toy isn't left waiting.
+              func hangUp(emu: Emulator) {
+                  guard openForDownload else { return }
+                  openForDownload = false
+                  let link = TamaLink(emu: emu)
+                  DispatchQueue.global(qos: .userInitiated).async { link.close() }
               }
           }
 
@@ -6105,18 +6251,10 @@ jobs:
 
               private var visitCard: some View {
                   TownCard(tint: .pink) {
-                      Label(mode == .party ? "Bring your Tama to the party" : "Visit TamaiOS Town", systemImage: "figure.walk.motion")
+                      Label("\(toy?.name ?? "Your Tama") isn't in town yet", systemImage: "figure.walk.motion")
                           .font(.system(.headline, design: .rounded)).foregroundStyle(.pink)
-                      step(1, "On the toy choose Connection › App › Visit.")
-                      step(2, "When it says it's waiting, tap the button below (it lights up by itself).")
-                      step(3, "Your Tama leaves home and comes here to find a partner. 💕")
-                      Button { doVisit() } label: {
-                          Label(emu.appWaiting ? "Welcome \(toy?.name ?? "your Tama") to town" : "Waiting for your Tama…",
-                                systemImage: emu.appWaiting ? "sparkles" : "hourglass")
-                              .frame(maxWidth: .infinity)
-                      }
-                      .buttonStyle(.borderedProminent).tint(.pink)
-                      .disabled(!emu.appWaiting)
+                      Text("On the toy choose Connection › App › Visit. TamaiOS brings your Tama to town by itself, then you can come here to meet someone. 💕")
+                          .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
                       if let t = toy, FileManager.default.fileExists(atPath: town.visitURL(t).path) {
                           Button("My Tama already left home (shows I'M OUT)") {
                               var x = town.state(t); x.away = true; x.pending = .none; town.save(x, t)

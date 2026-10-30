@@ -2734,7 +2734,7 @@ jobs:
                               Text("Tamagotchi Meets: Fairy, Magical, Pastel, Sanrio, Sweets, Fantasy (JP)")
                           }
                           Section("Not available") {
-                              Text("Connection › App works with TamaiOS's built-in Tama App: gifts, Gotchi Points, and TamaiOS Town for dating, marriage and gene mixing. Infrared (Connection › Tamagotchi: playdates, gifts, marriage with another toy) can't be used — if you choose it, the toy is put back to just before.")
+                              Text("Connection › App works with TamaiOS's built-in Tamatown: Visit to date, marry, shop and play; Download to get new items. Infrared (Connection › Tamagotchi: playdates, gifts, marriage with another toy) can't be used — if you choose it, the toy is put back to just before.")
                           }
                       }
                       .navigationTitle("Getting your ROM")
@@ -2795,6 +2795,8 @@ jobs:
               @Published var showAdd = false
               @Published var pendingImport: URL?
               @Published var pendingBackup: URL?
+              /// Ask the toy screen to open Tamatown.
+              @Published var openTown = false
 
               init() {
                   // firmware built into the app (firmware/*.bin in the repo): set up its
@@ -3617,6 +3619,16 @@ jobs:
               var holdLatch = false
               /// The app just hung up: ignore the last "waiting" reading until it's polled again.
               var radioStale = false
+              /// Run this many seconds of toy time as fast as possible (skips animations
+              /// you aren't watching), then optionally press B.
+              private var ffSeconds: Double = 0
+              private var ffPressB = false
+
+              func fastForward(_ seconds: Double, thenPressB: Bool = false) {
+                  ffSeconds = max(ffSeconds, seconds)
+                  if thenPressB { ffPressB = true }
+                  wake.signal()
+              }
               private var visible = true
               private var backgroundAt: Date?
               private var lastCall = Date.distantPast
@@ -3798,6 +3810,31 @@ jobs:
                       if !holdForApp { holdLatch = false }
                       if paused || (holdForApp && holdLatch && !linkBusy) {
                           _ = wake.wait(timeout: .now() + (paused ? 0.1 : 0.03))
+                          last = CACurrentMediaTime()
+                          continue
+                      }
+                      if ffSeconds > 0 || ffPressB {
+                          let ff = ffSeconds, pressB = ffPressB
+                          ffSeconds = 0
+                          ffPressB = false
+                          lock.lock()
+                          if let h = handle {
+                              let start = CACurrentMediaTime()
+                              var t = 0.0
+                              while t < ff && CACurrentMediaTime() - start < 4 {
+                                  _ = tg_tick(h, 0.02)
+                                  _ = tg_take_audio(h, audioBuf, 44100)
+                                  t += 0.02
+                              }
+                              if pressB {
+                                  tg_press(h, TGKey.b.rawValue, CACurrentMediaTime())
+                                  for _ in 0..<8 { _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100) }
+                                  tg_release(h, TGKey.b.rawValue)
+                              }
+                              note("fast-forwarded \(Int(t)) s\(pressB ? " and pressed B" : "")")
+                          }
+                          lock.unlock()
+                          needFrame = true
                           last = CACurrentMediaTime()
                           continue
                       }
@@ -4323,11 +4360,14 @@ jobs:
                           }
 
                           Section {
-                              NavigationLink { TamaAppView().environmentObject(emu) } label: {
-                                  Label("Tama App — send gifts", systemImage: "gift.fill")
+                              Button {
+                                  dismiss()
+                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.openTown = true }
+                              } label: {
+                                  Label("Tamatown", systemImage: "building.columns.fill")
                               }
                           } footer: {
-                              Text("Works like the old Tamagotchi app: on the toy choose Connection › App › Download and it opens by itself.")
+                              Text("Works like the old Tamagotchi app: on the toy choose Connection › App. Visit takes your Tama to Tamatown; Download gets new items. It opens by itself.")
                           }
 
                           Section("Help") {
@@ -4335,9 +4375,7 @@ jobs:
                               NavigationLink { ConsoleView() } label: { Label("Console", systemImage: "terminal.fill") }
                           }
 
-                          Section("About") {
-                              Text("TamaiOS runs your own Tamagotchi ON / Meets firmware. It includes no Bandai code or graphics. Emulator core: tg18-emu by oreo-fox (MIT licence). Tamagotchi is a trademark of Bandai; TamaiOS is not affiliated with or endorsed by Bandai.")
-                                  .font(.footnote).foregroundStyle(.secondary)
+                          Section {
                               Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
                                   .font(.footnote).foregroundStyle(.secondary)
                           }
@@ -4731,19 +4769,28 @@ jobs:
           cat > ios/TamaiOS/TamaAppView.swift <<'TAMA_EOF'
           import SwiftUI
 
-          /// TamaiOS's built-in Tama App, laid out like the original Tamagotchi app:
-          /// a town square with Home, Tama ♥ Party, Arcade and TamaDepa. The toy
-          /// connects to it through its own Connection › App menu.
+          /// Tamatown, TamaiOS's built-in version of the original Tamagotchi app.
+          /// Visit: your Tama spends the day in town (Tama ♥ Party, TamaDepot, Arcade).
+          /// Download: straight to TamaDepot to get new items.
           struct TamaAppView: View {
               @EnvironmentObject var emu: Emulator
               @Environment(\.dismiss) private var dismiss
               @State private var path: [TownPlace] = []
               @ObservedObject private var link = AppLink.shared
+              /// The toy chose Download: only the store works then.
+              @State private var downloadOnly = false
+
+              @ViewBuilder private var root: some View {
+                  if downloadOnly {
+                      TamaDepaView()
+                  } else {
+                      TownSquare(path: $path).navigationTitle("Tamatown")
+                  }
+              }
 
               var body: some View {
                   NavigationStack(path: $path) {
-                      TownSquare(path: $path)
-                          .navigationTitle("Tama Town")
+                      root
                           .navigationBarTitleDisplayMode(.inline)
                           .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
                           .navigationDestination(for: TownPlace.self) { place in
@@ -4752,13 +4799,12 @@ jobs:
                   }
                   .tint(.pink)
                   .overlay { if link.busy { BusyOverlay(text: link.status) } }
-                  .alert("Tama Town", isPresented: Binding(get: { link.lastMessage != nil }, set: { if !$0 { link.lastMessage = nil } })) {
+                  .alert("Tamatown", isPresented: Binding(get: { link.lastMessage != nil }, set: { if !$0 { link.lastMessage = nil } })) {
                       Button("OK") {}
                   } message: { Text(link.lastMessage ?? "") }
                   .onAppear {
                       emu.holdForApp = true      // the toy waits patiently while you're in here
                       Town.shared.loadIfPresent()
-                      if let t = emu.toy, Town.shared.state(t).away, !emu.appWaiting { path = [.party] }
                       connect()
                   }
                   .onChange(of: emu.appWaiting) { w in if w { connect() } }
@@ -4771,13 +4817,20 @@ jobs:
                   .onDisappear {
                       link.hangUp(emu: emu)
                       emu.holdForApp = false
+                      // Leaving town: skip to the toy's "GO BACK?" question
+                      if let t = emu.toy, Town.shared.state(t).away, !link.busy, !emu.appWaiting {
+                          emu.fastForward(1, thenPressB: true)
+                      }
                   }
               }
 
               /// Like the phone app: as soon as the toy connects, see which menu it chose.
-              /// Visit brings your Tama to town; Download opens TamaDepo.
+              /// Visit brings your Tama to town; Download opens TamaDepot.
               private func connect() {
-                  link.start(emu: emu) { path = [.depa] }
+                  link.start(emu: emu) {
+                      path = []
+                      downloadOnly = true
+                  }
               }
           }
 
@@ -4789,7 +4842,7 @@ jobs:
                   case .home: return "Home"
                   case .party: return "Tama ♥ Party"
                   case .arcade: return "Arcade"
-                  case .depa: return "TamaDepo"
+                  case .depa: return "TamaDepot"
                   case .settings: return "Settings"
                   }
               }
@@ -4855,17 +4908,20 @@ jobs:
               @Binding var path: [TownPlace]
               @EnvironmentObject var emu: Emulator
               @ObservedObject var town = Town.shared
+              private var away: Bool { emu.toy.map { town.state($0).away } ?? false }
 
               var body: some View {
                   ScrollView {
                       VStack(spacing: 14) {
-                          TownScene { path.append($0) }
+                          TownScene(open: away) { p in
+                              if away || p == .depa || p == .home || p == .settings { path.append(p) }
+                          }
                               .aspectRatio(1.25, contentMode: .fit)
                               .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                               .shadow(color: .black.opacity(0.15), radius: 10, y: 5)
                           statusBanner
                           LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                              ForEach([TownPlace.party, .depa, .arcade, .home], id: \.self) { p in
+                              ForEach(away ? [TownPlace.party, .depa, .arcade, .home] : [TownPlace.depa, .home], id: \.self) { p in
                                   Button { path.append(p) } label: { PlaceTile(place: p) }.buttonStyle(.plain)
                               }
                           }
@@ -4935,6 +4991,8 @@ jobs:
           /// on the right, the Arcade in front, and Tamas walking around. Every building
           /// can be tapped.
           struct TownScene: View {
+              /// Your Tama is in town (Visit): every place is open.
+              let open: Bool
               let go: (TownPlace) -> Void
               @ObservedObject var town = Town.shared
               @State private var walkers: [Suitor] = []
@@ -5033,9 +5091,9 @@ jobs:
                           .position(x: w * 0.5, y: h * 0.80)
                       // place labels along the bottom, like the original app
                       HStack(spacing: w * 0.02) {
-                          label("Tama ♥ Party", .pink) { go(.party) }
-                          label("Arcade", .purple) { go(.arcade) }
-                          label("TamaDepo", .blue) { go(.depa) }
+                          if open { label("Tama ♥ Party", .pink) { go(.party) } }
+                          if open { label("Arcade", .purple) { go(.arcade) } }
+                          label("TamaDepot", .blue) { go(.depa) }
                       }
                       .position(x: w / 2, y: h * 0.94)
                       cornerButton("house.fill", "Home", .orange) { go(.home) }.position(x: w * 0.09, y: h * 0.09)
@@ -5147,7 +5205,7 @@ jobs:
                       .clipShape(RoundedRectangle(cornerRadius: 4))
                       .offset(y: -h * 0.10)
                       Image(systemName: "bag.fill").font(.system(size: w * 0.07)).foregroundStyle(.blue.opacity(0.8)).offset(y: h * 0.02)
-                      Text("TAMADEPO").font(.system(size: w * 0.028, weight: .heavy, design: .rounded)).foregroundStyle(.pink).offset(y: -h * 0.15)
+                      Text("TAMADEPOT").font(.system(size: w * 0.028, weight: .heavy, design: .rounded)).foregroundStyle(.pink).offset(y: -h * 0.15)
                   }
                   .frame(width: w * 0.28, height: h * 0.42)
                   .contentShape(Rectangle())
@@ -5219,7 +5277,7 @@ jobs:
                           Text("Emulator core: tg18-emu by oreo-fox.")
                       }
                   }
-                  .navigationTitle("Settings")
+                  .navigationTitle("Tamatown Settings")
                   .sheet(isPresented: $importing) {
                       DocumentPicker { u in if let d = try? Data(contentsOf: u) { town.importPack(d) } }.ignoresSafeArea()
                   }
@@ -5312,7 +5370,7 @@ jobs:
                           if category == "stations" { ownFileCard }
                           grid
                           if !packReady {
-                              Text("Download the character pack in Tama Town › Settings for hundreds more items, places and games.")
+                              Text("Download the character pack in Tamatown › Settings for hundreds more items, places and games.")
                                   .font(.caption).foregroundStyle(.secondary)
                           }
                           Text("Catalog by WebMeets (tamagotchicenter.com) and the MyMeets pack (TamaTown).")
@@ -5320,8 +5378,8 @@ jobs:
                       }
                       .padding(16)
                   }
-                  .searchable(text: $search, prompt: "Search TamaDepo")
-                  .navigationTitle("TamaDepo")
+                  .searchable(text: $search, prompt: "Search TamaDepot")
+                  .navigationTitle("TamaDepot")
                   .navigationBarTitleDisplayMode(.inline)
                   .background(LinearGradient(colors: [Color.blue.opacity(0.08), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
                   .task { await load() }
@@ -5434,7 +5492,7 @@ jobs:
                   if web.isEmpty && town.items.isEmpty {
                       if let e = loadError {
                           VStack(spacing: 10) {
-                              Text("Couldn't load TamaDepo").font(.headline)
+                              Text("Couldn't load TamaDepot").font(.headline)
                               Text(e).font(.caption).foregroundStyle(.secondary)
                               Button("Try again") { Task { await load() } }
                           }
@@ -5514,7 +5572,7 @@ jobs:
                           emu.note("gift sent: \(name) points=\(pts)")
                           pocket = max(0, pocket - pts)
                           sending = false
-                          result = (true, "\(toy.name) got \(name)\(pts > 0 ? " and \(pts) Gotchi Points" : ""). Watch the toy!")
+                          link.closeWith = "\(toy.name) got \(name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁"
                       } catch {
                           emu.note("gift failed: \(error.localizedDescription)")
                           sending = false
@@ -5793,7 +5851,7 @@ jobs:
           /// - Visit: your Tama comes to town (date, shop, play).
           /// - GO BACK › YES: your Tama comes home — with a wedding if you proposed,
           ///   otherwise with its souvenir and the Gotchi Points you won.
-          /// - Download: delivers what's waiting in the bag, or opens TamaDepo.
+          /// - Download: delivers what's waiting in the bag, or opens TamaDepot.
           final class AppLink: ObservableObject {
               static let shared = AppLink()
               @Published var busy = false
@@ -5858,6 +5916,7 @@ jobs:
                               if mode == TamaLink.modeVisit {
                                   progress("\(toy.name) is coming to town…")
                                   let d = try link.finishVisit()
+                                  emu.fastForward(20)       // play the goodbye scene now, while you look around town
                                   try? Data(d).write(to: town.visitURL(toy), options: .atomic)
                                   self.main {
                                       var x = town.state(toy)
@@ -5867,7 +5926,7 @@ jobs:
                                       town.shuffle()
                                   }
                                   emu.saveNow()
-                                  msg = "\(toy.name) is in town! 🏙️ Date at Tama ♥ Party, shop at TamaDepo or play in the Arcade."
+                                  msg = "\(toy.name) is in town! 🏙️ Date at Tama ♥ Party, shop at TamaDepot or play in the Arcade."
                               } else if mode == TamaLink.modeDownload {
                                   if let it = town.bag(toy).first, let data = town.bagData(toy, it),
                                      let pkt = Town.userItemPacket(data, points: Town.pocket) {
@@ -6417,7 +6476,7 @@ jobs:
                       TownCard(tint: .purple) {
                           Label("\(tamaName) is out in town", systemImage: "figure.walk")
                               .font(.system(.headline, design: .rounded)).foregroundStyle(.purple)
-                          Text("Date at Tama ♥ Party, shop at TamaDepo, play in the Arcade. Souvenirs and Gotchi Points go home with \(tamaName).")
+                          Text("Date at Tama ♥ Party, shop at TamaDepot, play in the Arcade. Souvenirs and Gotchi Points go home with \(tamaName).")
                               .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
                           comeHomeHint
                       }
@@ -6995,6 +7054,9 @@ jobs:
                   }
                   .sheet(isPresented: $showSettings) { SettingsView().environmentObject(model).environmentObject(emu) }
                   .background(Color.clear.sheet(isPresented: $showApp) { TamaAppView().environmentObject(emu) })
+                  .onChange(of: model.openTown) { open in
+                      if open { model.openTown = false; showApp = true }
+                  }
                   .onChange(of: emu.appWaiting) { waiting in
                       // the toy chose Connection › App: open the built-in app, like the phone did
                       if waiting && !showSettings { showApp = true }

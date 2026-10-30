@@ -2320,6 +2320,386 @@ jobs:
           img = img.resize((SIZE, SIZE), Image.LANCZOS)
           img.save(OUT)
           TAMA_EOF
+          cat > tools/town.py <<'TAMA_EOF'
+          # Draws TamaiOS's own Tamatown background (an original illustration):
+          # Tama ♥ Party chapel on the left, TamaDepot store in the middle, the Arcade
+          # on the right, a sunny plaza in front for Tamas to walk on.
+          # Usage: town.py OUT.png [width]
+          import sys, math, random
+          from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+          OUT = sys.argv[1]
+          WOUT = int(sys.argv[2]) if len(sys.argv) > 2 else 1920
+          HOUT = WOUT * 5 // 7          # 1.4 : 1, fits the town card in the app
+          SS = 2
+          W, H = WOUT * SS, HOUT * SS
+          U = W / 1920.0            # design units: 1920 wide
+          INK = (74, 44, 92)
+          LW = int(5 * U)
+          random.seed(7)
+
+          def u(v): return v * U
+
+          def font(size, bold=True):
+              cands = ["/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf",
+                       "/Library/Fonts/Arial Rounded Bold.ttf",
+                       "/usr/share/fonts/truetype/google-fonts/Poppins-ExtraBold.ttf",
+                       "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf",
+                       "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+              for c in cands:
+                  try: return ImageFont.truetype(c, int(size))
+                  except Exception: pass
+              return ImageFont.load_default()
+
+          def lerp(a, b, t): return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+          def shade(c, k): return lerp(c, (0, 0, 0), k)
+          def tint(c, k): return lerp(c, (255, 255, 255), k)
+
+          img = Image.new("RGB", (W, H))
+          d = ImageDraw.Draw(img)
+
+          def vgrad(box, c0, c1, mask=None):
+              x0, y0, x1, y1 = [int(v) for v in box]
+              g = Image.new("RGB", (max(1, x1 - x0), max(1, y1 - y0)))
+              gd = ImageDraw.Draw(g)
+              for y in range(y1 - y0):
+                  gd.line([(0, y), (x1 - x0, y)], fill=lerp(c0, c1, y / max(1, y1 - y0 - 1)))
+              if mask is None:
+                  img.paste(g, (x0, y0))
+              else:
+                  img.paste(g, (x0, y0), mask.crop((x0, y0, x1, y1)))
+
+          def mask_of(fn):
+              m = Image.new("L", (W, H), 0); fn(ImageDraw.Draw(m)); return m
+
+          def shadow(fn, off=(0, 10), blur=14, alpha=70):
+              m = mask_of(fn).point(lambda v: v * alpha // 255)
+              m = m.filter(ImageFilter.GaussianBlur(u(blur)))
+              sh = Image.new("RGB", (W, H), (60, 30, 80))
+              img.paste(sh, (int(u(off[0])), int(u(off[1]))), m)
+
+          def rrect(box, r, fill, outline=INK, width=None, top=None):
+              """Rounded rect with optional vertical gradient (fill -> top)."""
+              width = LW if width is None else width
+              if top:
+                  vgrad(box, top, fill, mask_of(lambda g: g.rounded_rectangle(box, radius=r, fill=255)))
+              else:
+                  d.rounded_rectangle(box, radius=r, fill=fill)
+              if outline: d.rounded_rectangle(box, radius=r, outline=outline, width=width)
+
+          def poly(pts, fill, outline=INK, width=None):
+              d.polygon(pts, fill=fill)
+              if outline: d.line(pts + [pts[0]], fill=outline, width=LW if width is None else width, joint="curve")
+
+          def ell(box, fill, outline=INK, width=None):
+              d.ellipse(box, fill=fill)
+              if outline: d.ellipse(box, outline=outline, width=LW if width is None else width)
+
+          def heart(cx, cy, s, fill, outline=INK):
+              pts = [(cx + s * 16 * math.sin(t) ** 3 / 16, cy - s * (13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)) / 16)
+                     for t in [i / 80 * 2 * math.pi for i in range(81)]]
+              poly(pts, fill, outline, max(2, LW - 1))
+
+          def star(cx, cy, r, fill, outline=INK, k=0.45):
+              pts = []
+              for i in range(10):
+                  a = -math.pi / 2 + i * math.pi / 5
+                  rr = r if i % 2 == 0 else r * k
+                  pts.append((cx + math.cos(a) * rr, cy + math.sin(a) * rr))
+              poly(pts, fill, outline, max(2, LW - 1))
+
+          def sparkle(cx, cy, r, fill=(255, 255, 255)):
+              pts = []
+              for i in range(8):
+                  a = -math.pi / 2 + i * math.pi / 4
+                  rr = r if i % 2 == 0 else r * 0.22
+                  pts.append((cx + math.cos(a) * rr, cy + math.sin(a) * rr))
+              d.polygon(pts, fill=fill)
+
+          def text(cx, cy, s, size, fill, outline=INK, stroke=None):
+              f = font(size)
+              stroke = int(u(6)) if stroke is None else stroke
+              d.text((cx, cy), s, font=f, fill=fill, anchor="mm", stroke_width=stroke, stroke_fill=outline)
+
+          # ---------------------------------------------------------------- sky
+          HORIZON = u(820)
+          vgrad((0, 0, W, HORIZON), (120, 196, 255), (214, 238, 255))
+          vgrad((0, HORIZON - u(160), W, HORIZON), (214, 238, 255), (255, 240, 248))
+
+          def cloud(cx, cy, s):
+              blobs = [(-0.9, 0.15, 0.55), (-0.35, -0.25, 0.75), (0.35, -0.3, 0.7), (0.9, 0.1, 0.55), (0, 0.2, 0.7)]
+              sh = mask_of(lambda g: [g.ellipse((cx + bx * s - r * s, cy + by * s - r * s + u(8), cx + bx * s + r * s, cy + by * s + r * s + u(8)), fill=255) for bx, by, r in blobs])
+              img.paste((198, 222, 248), (0, 0), sh)
+              for bx, by, r in blobs:
+                  d.ellipse((cx + bx * s - r * s, cy + by * s - r * s, cx + bx * s + r * s, cy + by * s + r * s), fill=(255, 255, 255))
+              d.ellipse((cx - s * 0.6, cy - s * 0.5, cx - s * 0.1, cy - s * 0.25), fill=(255, 255, 255))
+
+          for cx, cy, s in [(250, 160, 85), (760, 100, 60), (1180, 190, 70), (1640, 130, 90), (1450, 330, 45), (520, 320, 40), (90, 420, 40), (1850, 430, 38)]:
+              cloud(u(cx), u(cy), u(s))
+          for cx, cy, r in [(400, 70, 18), (980, 240, 14), (1320, 60, 20), (1820, 260, 13), (120, 330, 12), (640, 200, 10)]:
+              sparkle(u(cx), u(cy), u(r))
+
+          # far hills and a little town in the distance
+          def hills(y, color, amp, seed):
+              random.seed(seed)
+              pts = [(0, H)]
+              for i in range(0, 21):
+                  x = W * i / 20
+                  pts.append((x, y - amp * (0.6 + 0.4 * math.sin(i * 1.3 + seed)) - random.random() * amp * 0.3))
+              pts.append((W, H))
+              d.polygon(pts, fill=color)
+          hills(HORIZON - u(30), (176, 222, 214), u(70), 2)
+          for i in range(16):
+              x = u(60 + i * 120 + (i % 3) * 20); bw = u(40 + (i % 4) * 8); bh = u(40 + (i * 37) % 50)
+              col = [(250, 214, 226), (220, 214, 250), (255, 236, 200), (210, 236, 250)][i % 4]
+              by = HORIZON - u(20)
+              d.rectangle((x, by - bh, x + bw, by), fill=col)
+              d.polygon([(x - u(6), by - bh), (x + bw / 2, by - bh - u(26)), (x + bw + u(6), by - bh)], fill=tint((200, 120, 150), 0.3) if i % 2 else tint((120, 140, 210), 0.3))
+          hills(HORIZON + u(10), (150, 214, 150), u(45), 5)
+
+          # tree line
+          def tree(cx, by, s, c=(104, 190, 110)):
+              d.rectangle((cx - s * 0.12, by - s * 0.5, cx + s * 0.12, by), fill=(150, 104, 80))
+              for dx, dy, r in [(-0.45, -0.75, 0.5), (0.45, -0.75, 0.5), (0, -1.15, 0.6), (0, -0.7, 0.55)]:
+                  d.ellipse((cx + dx * s - r * s, by + dy * s - r * s, cx + dx * s + r * s, by + dy * s + r * s), fill=c)
+              d.ellipse((cx - s * 0.3, by - s * 1.55, cx + s * 0.05, by - s * 1.3), fill=tint(c, 0.35))
+          for i in range(22):
+              tree(u(20 + i * 90 + (i % 2) * 30), HORIZON + u(30), u(46 + (i * 13) % 18), [(98, 186, 108), (86, 170, 100), (112, 198, 120)][i % 3])
+
+          # ---------------------------------------------------------------- plaza
+          GROUND = HORIZON + u(30)
+          vgrad((0, GROUND, W, H), (255, 232, 188), (250, 214, 160))
+          # perspective paving
+          vx, vy = W / 2, GROUND - u(260)
+          for i in range(-14, 15):
+              x = W / 2 + i * u(150)
+              d.line([(vx + (x - vx) * (GROUND - vy) / (H - vy) * 1.0, GROUND), (x, H)], fill=(240, 205, 150), width=int(u(3)))
+          y = GROUND
+          k = 0
+          while y < H:
+              d.line([(0, y), (W, y)], fill=(240, 205, 150), width=int(u(3)))
+              k += 1
+              y += u(14 + k * 9)
+          # path glow in the middle
+          glow = mask_of(lambda g: g.ellipse((W / 2 - u(520), GROUND + u(120), W / 2 + u(520), H + u(200)), fill=90)).filter(ImageFilter.GaussianBlur(u(60)))
+          img.paste((255, 246, 222), (0, 0), glow)
+
+          # grass corners with flowers
+          for side in (-1, 1):
+              cx = W / 2 + side * u(1080)
+              d.ellipse((cx - u(420), H - u(170), cx + u(420), H + u(260)), fill=(132, 206, 120))
+              d.ellipse((cx - u(380), H - u(150), cx + u(380), H + u(230)), fill=(148, 218, 132))
+              for j in range(9):
+                  fx = cx + side * -u(60 + j * 38) + u(random.randint(-10, 10)); fy = H - u(60 + (j % 3) * 30)
+                  col = [(255, 150, 190), (255, 230, 120), (255, 255, 255), (190, 160, 255)][j % 4]
+                  for a in range(5):
+                      ang = a * 2 * math.pi / 5
+                      d.ellipse((fx + math.cos(ang) * u(8) - u(7), fy + math.sin(ang) * u(8) - u(7), fx + math.cos(ang) * u(8) + u(7), fy + math.sin(ang) * u(8) + u(7)), fill=col)
+                  d.ellipse((fx - u(5), fy - u(5), fx + u(5), fy + u(5)), fill=(255, 200, 80))
+
+          # white picket fence along the back of the plaza
+          fy = GROUND + u(20)
+          d.rectangle((0, fy - u(26), W, fy - u(18)), fill=(255, 255, 255))
+          d.rectangle((0, fy - u(8), W, fy), fill=(255, 255, 255))
+          for i in range(0, 64):
+              x = u(i * 31)
+              d.polygon([(x, fy + u(4)), (x, fy - u(36)), (x + u(9), fy - u(46)), (x + u(18), fy - u(36)), (x + u(18), fy + u(4))], fill=(255, 255, 255), outline=(214, 200, 220))
+
+          # ---------------------------------------------------------------- Tama ♥ Party (left)
+          def party(cx, base):
+              pink, pink_top = (255, 168, 204), (255, 214, 232)
+              w, h = u(440), u(330)
+              shadow(lambda g: g.rounded_rectangle((cx - w / 2, base - h, cx + w / 2, base), radius=u(40), fill=255), off=(14, 14))
+              rrect((cx - w / 2, base - h, cx + w / 2, base), u(40), pink, top=pink_top)
+              # scalloped white roof trim
+              for i in range(9):
+                  x = cx - w / 2 + u(12) + i * (w - u(24)) / 8
+                  ell((x - u(30), base - h - u(24), x + u(30), base - h + u(30)), (255, 255, 255), width=int(u(4)))
+              d.rectangle((cx - w / 2 + u(6), base - h + u(4), cx + w / 2 - u(6), base - h + u(30)), fill=(255, 255, 255))
+              # tower with a bell
+              tw = u(150)
+              rrect((cx - tw / 2, base - h - u(200), cx + tw / 2, base - h + u(10)), u(24), (255, 190, 220), top=(255, 230, 240))
+              poly([(cx - tw / 2 - u(26), base - h - u(195)), (cx, base - h - u(330)), (cx + tw / 2 + u(26), base - h - u(195))], (240, 110, 160))
+              d.polygon([(cx - u(30), base - h - u(250)), (cx, base - h - u(318)), (cx + u(4), base - h - u(250))], fill=(255, 160, 196))
+              ell((cx - u(46), base - h - u(170), cx + u(46), base - h - u(78)), (255, 246, 210))
+              poly([(cx - u(28), base - h - u(100)), (cx - u(20), base - h - u(150)), (cx, base - h - u(160)), (cx + u(20), base - h - u(150)), (cx + u(28), base - h - u(100))], (255, 210, 90))
+              heart(cx, base - h - u(345), u(26), (255, 90, 140))
+              # big arched door with a heart window
+              dw, dh = u(150), u(190)
+              d.rounded_rectangle((cx - dw / 2, base - dh, cx + dw / 2, base + u(20)), radius=dw / 2, fill=(255, 240, 246), outline=INK, width=LW)
+              d.rounded_rectangle((cx - dw / 2 + u(16), base - dh + u(16), cx + dw / 2 - u(16), base), radius=dw / 2, fill=(236, 120, 170))
+              d.line([(cx, base - dh + u(70)), (cx, base)], fill=INK, width=int(u(4)))
+              heart(cx, base - dh + u(52), u(30), (255, 255, 255))
+              # side windows
+              for sgn in (-1, 1):
+                  x = cx + sgn * u(150)
+                  ell((x - u(42), base - u(170), x + u(42), base - u(86)), (200, 236, 255))
+                  heart(x, base - u(130), u(22), (255, 120, 170))
+              # bunting
+              for row, yy in enumerate([base - h + u(60)]):
+                  pts = [(cx - w / 2 + i * w / 10, yy + math.sin(i / 10 * math.pi) * u(30)) for i in range(11)]
+                  d.line(pts, fill=INK, width=int(u(3)))
+                  for i in range(10):
+                      (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+                      mx = (x0 + x1) / 2
+                      d.polygon([(x0 + u(4), y0), (x1 - u(4), y1), (mx, (y0 + y1) / 2 + u(34))], fill=[(255, 120, 170), (255, 220, 110), (130, 200, 255), (190, 150, 255)][i % 4])
+              # balloons
+              for i, (bx, by, col) in enumerate([(-260, -470, (255, 90, 120)), (-205, -540, (255, 210, 90)), (-150, -480, (120, 190, 255)), (-205, -420, (255, 150, 210))]):
+                  x, y = cx + u(bx), base + u(by)
+                  d.line([(x, y + u(40)), (cx - u(200), base - u(250))], fill=(120, 100, 140), width=int(u(3)))
+                  ell((x - u(34), y - u(42), x + u(34), y + u(42)), col)
+                  d.ellipse((x - u(18), y - u(28), x - u(4), y - u(10)), fill=tint(col, 0.6))
+              # name plaque over the door: "Tama ♥ Party" (the heart is drawn, fonts lack it)
+              pw = u(330); py = base - h + u(118)
+              shadow(lambda g: g.rounded_rectangle((cx - pw / 2, py - u(40), cx + pw / 2, py + u(40)), radius=u(40), fill=255), off=(6, 6), blur=6)
+              rrect((cx - pw / 2, py - u(40), cx + pw / 2, py + u(40)), u(40), (255, 255, 255), top=(255, 255, 255))
+              f = font(u(44))
+              a, b = "Tama", "Party"
+              wa, wb, gap = d.textlength(a, font=f), d.textlength(b, font=f), u(52)
+              x0 = cx - (wa + wb + gap) / 2
+              d.text((x0 + wa / 2, py + u(2)), a, font=f, fill=(236, 90, 150), anchor="mm")
+              heart(x0 + wa + gap / 2, py, u(20), (255, 90, 140), outline=None)
+              d.text((x0 + wa + gap + wb / 2, py + u(2)), b, font=f, fill=(236, 90, 150), anchor="mm")
+
+          # ---------------------------------------------------------------- TamaDepot (middle)
+          def depot(cx, base):
+              w, h = u(480), u(470)
+              shadow(lambda g: g.rounded_rectangle((cx - w / 2, base - h, cx + w / 2, base), radius=u(30), fill=255), off=(14, 14))
+              rrect((cx - w / 2, base - h, cx + w / 2, base), u(30), (255, 240, 214), top=(255, 250, 238))
+              # floors of windows
+              for row in range(2):
+                  for col in range(4):
+                      x = cx - w / 2 + u(44) + col * u(104); y = base - h + u(110) + row * u(100)
+                      rrect((x, y, x + u(80), y + u(70)), u(14), (176, 222, 255), top=(220, 242, 255), width=int(u(4)))
+                      d.line([(x + u(40), y + u(4)), (x + u(40), y + u(66))], fill=(255, 255, 255), width=int(u(4)))
+              # striped awning
+              ay = base - u(200)
+              stripes = 10
+              for i in range(stripes):
+                  x0 = cx - w / 2 - u(20) + i * (w + u(40)) / stripes
+                  x1 = x0 + (w + u(40)) / stripes
+                  col = (255, 120, 160) if i % 2 == 0 else (255, 255, 255)
+                  d.polygon([(x0, ay), (x1, ay), (x1, ay + u(56)), (x0, ay + u(56))], fill=col)
+                  d.chord((x0, ay + u(30), x1, ay + u(80)), 0, 180, fill=col, outline=INK, width=int(u(3)))
+              d.rectangle((cx - w / 2 - u(20), ay, cx + w / 2 + u(20), ay + u(56)), outline=INK, width=LW)
+              # shop windows and door
+              for sgn in (-1, 1):
+                  x = cx + sgn * u(150)
+                  rrect((x - u(80), base - u(120), x + u(80), base - u(10)), u(12), (196, 232, 255), top=(232, 246, 255), width=int(u(4)))
+              # little goods in the windows
+              rrect((cx - u(205), base - u(80), cx - u(160), base - u(30)), u(6), (255, 120, 160), width=int(u(3)))
+              d.line([(cx - u(182), base - u(80)), (cx - u(182), base - u(30))], fill=(255, 230, 120), width=int(u(6)))
+              ell((cx - u(140), base - u(80), cx - u(100), base - u(40)), (255, 200, 120), width=int(u(3)))
+              star(cx + u(150), base - u(62), u(28), (255, 220, 90))
+              d.rounded_rectangle((cx - u(55), base - u(140), cx + u(55), base + u(10)), radius=u(18), fill=(150, 210, 190), outline=INK, width=LW)
+              d.line([(cx, base - u(136)), (cx, base)], fill=INK, width=int(u(4)))
+              # rooftop sign with a shopping bag
+              sw = u(470)
+              shadow(lambda g: g.rounded_rectangle((cx - sw / 2, base - h - u(110), cx + sw / 2, base - h + u(10)), radius=u(40), fill=255), off=(8, 8), blur=8)
+              rrect((cx - sw / 2, base - h - u(110), cx + sw / 2, base - h + u(10)), u(40), (96, 176, 255), top=(150, 210, 255))
+              text(cx + u(40), base - h - u(50), "TamaDepot", u(56), (255, 255, 255))
+              bx, by = cx - sw / 2 + u(52), base - h - u(46)
+              rrect((bx - u(30), by - u(26), bx + u(30), by + u(32)), u(8), (255, 150, 190), width=int(u(4)))
+              d.arc((bx - u(16), by - u(50), bx + u(16), by - u(8)), 180, 360, fill=INK, width=int(u(5)))
+              # flags
+              for sgn in (-1, 1):
+                  x = cx + sgn * (sw / 2 - u(30))
+                  d.line([(x, base - h - u(110)), (x, base - h - u(200))], fill=INK, width=int(u(5)))
+                  d.polygon([(x, base - h - u(200)), (x + sgn * u(60), base - h - u(180)), (x, base - h - u(160))], fill=(255, 220, 90), outline=INK)
+
+          # ---------------------------------------------------------------- Arcade (right)
+          def arcade(cx, base):
+              w, h = u(460), u(340)
+              shadow(lambda g: g.rounded_rectangle((cx - w / 2, base - h, cx + w / 2, base), radius=u(30), fill=255), off=(14, 14))
+              rrect((cx - w / 2, base - h, cx + w / 2, base), u(30), (176, 150, 255), top=(214, 200, 255))
+              # checkered base stripe
+              for i in range(12):
+                  x0 = cx - w / 2 + i * w / 12
+                  d.rectangle((x0, base - u(40), x0 + w / 12, base - u(4)), fill=(255, 255, 255) if i % 2 else (120, 90, 210))
+              d.line([(cx - w / 2, base - u(40)), (cx + w / 2, base - u(40))], fill=INK, width=int(u(4)))
+              # big marquee arch with bulbs
+              mw, mh = u(520), u(190)
+              top = base - h - u(120)
+              shadow(lambda g: g.rounded_rectangle((cx - mw / 2, top, cx + mw / 2, top + mh), radius=mh / 2, fill=255), off=(8, 8), blur=8)
+              rrect((cx - mw / 2, top, cx + mw / 2, top + mh), mh / 2, (255, 120, 170), top=(255, 170, 205))
+              rrect((cx - mw / 2 + u(26), top + u(26), cx + mw / 2 - u(26), top + mh - u(26)), (mh - u(52)) / 2, (88, 60, 160), width=int(u(4)))
+              for i in range(22):
+                  t = i / 22
+                  # bulbs around the marquee
+                  per = 2 * (mw - mh) + math.pi * mh
+                  s = t * per
+                  if s < mw - mh:
+                      x, y = cx - (mw - mh) / 2 + s, top + u(12)
+                  elif s < mw - mh + math.pi * mh / 2:
+                      a = (s - (mw - mh)) / (mh / 2) - math.pi / 2
+                      x, y = cx + (mw - mh) / 2 + math.cos(a) * (mh / 2 - u(12)), top + mh / 2 + math.sin(a) * (mh / 2 - u(12))
+                  elif s < 2 * (mw - mh) + math.pi * mh / 2:
+                      x, y = cx + (mw - mh) / 2 - (s - (mw - mh) - math.pi * mh / 2), top + mh - u(12)
+                  else:
+                      a = (s - 2 * (mw - mh) - math.pi * mh / 2) / (mh / 2) + math.pi / 2
+                      x, y = cx - (mw - mh) / 2 + math.cos(a) * (mh / 2 - u(12)), top + mh / 2 + math.sin(a) * (mh / 2 - u(12))
+                  col = (255, 245, 170) if i % 2 == 0 else (255, 255, 255)
+                  d.ellipse((x - u(8), y - u(8), x + u(8), y + u(8)), fill=col, outline=INK, width=int(u(2)))
+              # rainbow letters
+              f = font(u(84))
+              letters = "ARCADE"
+              cols = [(255, 110, 120), (255, 170, 80), (255, 225, 90), (110, 220, 140), (110, 180, 255), (190, 140, 255)]
+              total = sum(d.textlength(c, font=f) for c in letters) + u(6) * (len(letters) - 1)
+              x = cx - total / 2
+              for c, col in zip(letters, cols):
+                  cw = d.textlength(c, font=f)
+                  d.text((x + cw / 2, top + mh / 2 + u(4)), c, font=f, fill=col, anchor="mm", stroke_width=int(u(7)), stroke_fill=(255, 255, 255))
+                  x += cw + u(6)
+              star(cx - mw / 2 + u(10), top + u(10), u(40), (255, 220, 90))
+              star(cx + mw / 2 - u(4), top + mh - u(10), u(30), (255, 160, 210))
+              # doorway with a claw machine inside
+              dw = u(170)
+              d.rounded_rectangle((cx - dw / 2, base - u(210), cx + dw / 2, base - u(40)), radius=u(30), fill=(70, 46, 120), outline=INK, width=LW)
+              rrect((cx - u(55), base - u(190), cx + u(55), base - u(44)), u(10), (255, 200, 230), width=int(u(4)))
+              rrect((cx - u(42), base - u(178), cx + u(42), base - u(110)), u(6), (210, 240, 255), width=int(u(3)))
+              d.line([(cx, base - u(178)), (cx, base - u(145))], fill=INK, width=int(u(3)))
+              d.arc((cx - u(14), base - u(150), cx + u(14), base - u(126)), 0, 180, fill=INK, width=int(u(4)))
+              for i, col in enumerate([(255, 140, 170), (255, 220, 110), (140, 200, 255)]):
+                  ell((cx - u(34) + i * u(24), base - u(132), cx - u(14) + i * u(24), base - u(112)), col, width=int(u(2)))
+              # side screens like game cabinets
+              for sgn in (-1, 1):
+                  x = cx + sgn * u(155)
+                  rrect((x - u(60), base - u(250), x + u(60), base - u(60)), u(16), (255, 214, 120), top=(255, 236, 170), width=int(u(4)))
+                  rrect((x - u(44), base - u(234), x + u(44), base - u(160)), u(10), (60, 50, 110), width=int(u(3)))
+                  # little pixel critter on each screen
+                  for (px, py) in [(0, 0), (1, 0), (2, 0), (-1, 1), (0, 1), (1, 1), (2, 1), (3, 1), (0, 2), (2, 2)]:
+                      d.rectangle((x - u(20) + px * u(10), base - u(212) + py * u(10), x - u(11) + px * u(10), base - u(203) + py * u(10)), fill=(130, 255, 200) if sgn < 0 else (255, 160, 220))
+                  ell((x - u(14), base - u(140), x + u(14), base - u(112)), (255, 90, 120), width=int(u(3)))
+                  d.rectangle((x - u(3), base - u(150), x + u(3), base - u(126)), fill=INK)
+
+          # lamp posts between the buildings
+          def lamp(x, base):
+              d.rectangle((x - u(7), base - u(250), x + u(7), base), fill=(90, 80, 130))
+              ell((x - u(26), base - u(296), x + u(26), base - u(244)), (255, 246, 190))
+              d.rectangle((x - u(20), base - u(8), x + u(20), base + u(6)), fill=(90, 80, 130))
+
+          party(u(330), GROUND + u(70))
+          depot(u(960), GROUND + u(60))
+          arcade(u(1590), GROUND + u(70))
+          lamp(u(640), GROUND + u(110))
+          lamp(u(1280), GROUND + u(110))
+
+          # flower planters along the front of the buildings
+          def planter(cx, y, w):
+              rrect((cx - w / 2, y - u(40), cx + w / 2, y), u(14), (214, 150, 110), top=(236, 180, 140), width=int(u(4)))
+              for i in range(int(w / u(34))):
+                  x = cx - w / 2 + u(20) + i * u(34)
+                  d.ellipse((x - u(18), y - u(66), x + u(18), y - u(30)), fill=(110, 196, 110))
+                  col = [(255, 140, 180), (255, 220, 100), (255, 255, 255), (180, 150, 255)][i % 4]
+                  d.ellipse((x - u(9), y - u(62), x + u(9), y - u(44)), fill=col)
+          planter(u(120), GROUND + u(150), u(170))
+          planter(u(570), GROUND + u(150), u(120))
+          planter(u(1350), GROUND + u(150), u(120))
+          planter(u(1800), GROUND + u(150), u(170))
+
+          img = img.resize((WOUT, HOUT), Image.LANCZOS)
+          img.save(OUT, optimize=True)
+          TAMA_EOF
           cat > ios/project.yml <<'TAMA_EOF'
           name: TamaiOS
           options:
@@ -2891,147 +3271,254 @@ jobs:
           cat > ios/TamaiOS/ArcadeView.swift <<'TAMA_EOF'
           import SwiftUI
 
-          /// The Arcade: a quick game that wins Gotchi Points for TamaDepa.
-          /// "Tama Pop": Tamas pop out of the bushes — tap them before they hide.
+          /// The Arcade: "Tama Pop" — Tamas peek out of the bushes; tap them before they
+          /// hide. Every catch is 50 Gotchi Points for your Tama.
           struct ArcadeView: View {
               @ObservedObject var town = Town.shared
               @AppStorage("gotchiPocket") private var wallet = 0
               @AppStorage("arcadeBest") private var best = 0
               @AppStorage("haptics") private var haptics = true
 
-              @State private var playing = false
+              enum Phase { case ready, countdown, playing, done }
+              @State private var phase: Phase = .ready
+              @State private var count = 3
               @State private var timeLeft: Double = 0
               @State private var score = 0
               @State private var holes: [Suitor?] = Array(repeating: nil, count: 9)
               @State private var shownAt: [Double] = Array(repeating: 0, count: 9)
-              @State private var won: Int?
+              @State private var bursts: [Int: Double] = [:]      // hole -> time of the "+50"
               @State private var clock: Double = 0
+              @State private var ticks = 0
 
               private let length: Double = 30
               private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
               var body: some View {
                   ScrollView {
-                      VStack(spacing: 16) {
-                          HStack {
-                              stat("Time", playing ? "\(Int(timeLeft.rounded(.up)))" : "–")
-                              stat("Caught", "\(score)")
-                              stat("Pocket", "\(wallet) G")
-                          }
-                          ZStack {
-                              RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                  .fill(LinearGradient(colors: [Color(red: 0.75, green: 0.92, blue: 1), Color(red: 0.62, green: 0.86, blue: 0.56)], startPoint: .top, endPoint: .bottom))
-                              LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
-                                  ForEach(0..<9, id: \.self) { i in hole(i) }
-                              }
-                              .padding(14)
-                              if !playing {
-                                  VStack(spacing: 12) {
-                                      Text(won.map { "You caught \($0 / 50)! +\($0) G 🎉" } ?? "Tama Pop")
-                                          .font(.system(.title2, design: .rounded).weight(.heavy))
-                                      Text("Tap the Tamas as they pop up. Each one is worth 50 Gotchi Points.")
-                                          .font(.system(.subheadline, design: .rounded)).multilineTextAlignment(.center).foregroundStyle(.secondary)
-                                      Button { start() } label: {
-                                          Label(won == nil ? "Play" : "Play again", systemImage: "play.fill")
-                                              .font(.system(.title3, design: .rounded).weight(.bold))
-                                              .padding(.horizontal, 26).padding(.vertical, 10)
-                                      }
-                                      .buttonStyle(.borderedProminent).tint(.purple)
-                                      if best > 0 { Text("Best: \(best)").font(.caption).foregroundStyle(.secondary) }
-                                  }
-                                  .padding(22)
-                                  .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(.regularMaterial))
-                                  .padding(24)
-                              }
-                          }
-                          .aspectRatio(1, contentMode: .fit)
-                          Text("Your Gotchi Points go to your Tama by themselves: when it comes home from town, or with the next delivery.")
-                              .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                      VStack(spacing: 14) {
+                          header
+                          board
+                              .aspectRatio(0.9, contentMode: .fit)
+                              .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                              .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(Color.white, lineWidth: 4))
+                              .shadow(color: .purple.opacity(0.25), radius: 12, y: 6)
+                          Text("Gotchi Points go to your Tama by themselves when it comes home from Tamatown.")
+                              .font(.system(.caption, design: .rounded)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                       }
                       .padding(16)
                   }
+                  .background(LinearGradient(colors: [Color.purple.opacity(0.12), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
                   .navigationTitle("Arcade")
                   .navigationBarTitleDisplayMode(.inline)
                   .onReceive(timer) { _ in tick() }
-                  .onDisappear { playing = false }
+                  .onDisappear { if phase != .done { phase = .ready } }
               }
 
-              private func stat(_ t: String, _ v: String) -> some View {
-                  VStack(spacing: 2) {
-                      Text(t).font(.caption).foregroundStyle(.secondary)
-                      Text(v).font(.system(.headline, design: .rounded)).monospacedDigit()
-                  }
-                  .frame(maxWidth: .infinity)
-                  .padding(.vertical, 8)
-                  .background(RoundedRectangle(cornerRadius: 14).fill(Color(.secondarySystemBackground)))
-              }
+              // MARK: header
 
-              private func hole(_ i: Int) -> some View {
-                  ZStack(alignment: .bottom) {
-                      Ellipse().fill(Color(red: 0.36, green: 0.62, blue: 0.34)).frame(height: 26)
-                      if let s = holes[i] {
-                          Group {
-                              if let img = town.image(s) {
-                                  CharacterPicture(image: img)
-                              } else {
-                                  Text("🐣").font(.system(size: 44))
+              private var header: some View {
+                  HStack(spacing: 10) {
+                      chip(icon: "star.fill", tint: .yellow, text: "\(score)")
+                      VStack(alignment: .leading, spacing: 4) {
+                          Text(phase == .playing ? "\(Int(timeLeft.rounded(.up))) s" : "Tama Pop")
+                              .font(.system(.caption, design: .rounded).weight(.heavy)).foregroundStyle(.secondary)
+                          GeometryReader { g in
+                              ZStack(alignment: .leading) {
+                                  Capsule().fill(Color.purple.opacity(0.15))
+                                  Capsule().fill(LinearGradient(colors: [.pink, .purple], startPoint: .leading, endPoint: .trailing))
+                                      .frame(width: g.size.width * progress)
                               }
                           }
-                          .frame(width: 70, height: 70)
-                          .padding(.bottom, 8)
-                          .transition(.move(edge: .bottom).combined(with: .opacity))
+                          .frame(height: 10)
+                      }
+                      chip(icon: "dollarsign.circle.fill", tint: .orange, text: "\(wallet) G")
+                  }
+              }
+
+              private var progress: CGFloat {
+                  switch phase {
+                  case .playing: return CGFloat(max(0, timeLeft / length))
+                  case .done: return 0
+                  default: return 1
+                  }
+              }
+
+              private func burst(_ age: Double, _ size: CGFloat) -> some View {
+                  let rise: CGFloat = size * (0.55 + CGFloat(age) * 0.6)
+                  let fade: Double = max(0, 1 - age * 1.6)
+                  return Text("+50")
+                      .font(.system(size: size * 0.18, weight: .black, design: .rounded))
+                      .foregroundStyle(Color.yellow)
+                      .shadow(color: .orange, radius: 0, x: 1, y: 2)
+                      .offset(y: -rise)
+                      .opacity(fade)
+              }
+
+              private func tama(_ i: Int, _ size: CGFloat) -> some View {
+                  let up = holes[i] != nil
+                  let lift: CGFloat = up ? -size * 0.20 : size * 0.15
+                  let img = holes[i].flatMap { town.image($0) }
+                  return CharacterPicture(image: img)
+                      .frame(width: size * 0.62, height: size * 0.62)
+                      .opacity(up ? 1 : 0)
+                      .offset(y: lift)
+                      .mask(Rectangle().frame(width: size, height: size * 0.82).offset(y: -size * 0.18))
+              }
+
+              private func chip(icon: String, tint: Color, text: String) -> some View {
+                  HStack(spacing: 4) {
+                      Image(systemName: icon).foregroundStyle(tint)
+                      Text(text).font(.system(.headline, design: .rounded)).monospacedDigit()
+                  }
+                  .padding(.horizontal, 12).padding(.vertical, 8)
+                  .background(Capsule().fill(Color(.secondarySystemBackground)))
+              }
+
+              // MARK: the board
+
+              private static let sky = [Color(red: 0.72, green: 0.88, blue: 1.0), Color(red: 0.96, green: 0.86, blue: 1.0)]
+              private static let lawn = [Color(red: 0.62, green: 0.88, blue: 0.55), Color(red: 0.45, green: 0.76, blue: 0.42)]
+
+              private var board: some View {
+                  GeometryReader { g in
+                      ZStack {
+                          LinearGradient(colors: ArcadeView.sky, startPoint: .top, endPoint: .bottom)
+                          LinearGradient(colors: ArcadeView.lawn, startPoint: .top, endPoint: .bottom)
+                              .frame(height: g.size.height * 0.82)
+                              .frame(maxHeight: .infinity, alignment: .bottom)
+                          VStack(spacing: 0) {
+                              ForEach(0..<3, id: \.self) { row in
+                                  HStack(spacing: 0) {
+                                      ForEach(0..<3, id: \.self) { col in
+                                          hole(row * 3 + col, size: g.size.width / 3)
+                                      }
+                                  }
+                              }
+                          }
+                          .padding(.top, g.size.height * 0.10)
+                          overlay
                       }
                   }
-                  .frame(maxWidth: .infinity, minHeight: 96)
+              }
+
+              private func hole(_ i: Int, size: CGFloat) -> some View {
+                  ZStack(alignment: .bottom) {
+                      // back of the bush
+                      Ellipse().fill(Color(red: 0.27, green: 0.55, blue: 0.30))
+                          .frame(width: size * 0.78, height: size * 0.34)
+                          .offset(y: -size * 0.12)
+                      // the Tama, popping up from behind the bush
+                      tama(i, size)
+                      // front of the bush
+                      ZStack {
+                          Ellipse().fill(Color(red: 0.36, green: 0.68, blue: 0.36))
+                              .frame(width: size * 0.86, height: size * 0.30)
+                          Ellipse().fill(Color.white.opacity(0.25))
+                              .frame(width: size * 0.40, height: size * 0.08)
+                              .offset(x: -size * 0.14, y: -size * 0.06)
+                      }
+                      if let t = bursts[i] {
+                          burst(clock - t, size)
+                      }
+                  }
+                  .frame(width: size, height: size * 0.82)
                   .contentShape(Rectangle())
                   .onTapGesture { tap(i) }
               }
 
-              private func start() {
-                  score = 0
-                  won = nil
-                  timeLeft = length
-                  holes = Array(repeating: nil, count: 9)
-                  playing = true
+              @ViewBuilder
+              private var overlay: some View {
+                  switch phase {
+                  case .ready, .done:
+                      VStack(spacing: 12) {
+                          Text(phase == .done ? "You caught \(score)!" : "Tama Pop")
+                              .font(.system(.largeTitle, design: .rounded).weight(.black))
+                              .foregroundStyle(LinearGradient(colors: [.pink, .purple], startPoint: .leading, endPoint: .trailing))
+                          Text(phase == .done ? "+\(score * 50) Gotchi Points 🎉" : "Tap the Tamas as they pop out of the bushes!")
+                              .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                              .multilineTextAlignment(.center)
+                          Button { begin() } label: {
+                              Label(phase == .done ? "Play again" : "Play", systemImage: "play.fill")
+                                  .font(.system(.title3, design: .rounded).weight(.heavy))
+                                  .padding(.horizontal, 30).padding(.vertical, 12)
+                                  .background(Capsule().fill(LinearGradient(colors: [.pink, .purple], startPoint: .leading, endPoint: .trailing)))
+                                  .foregroundStyle(.white)
+                          }
+                          .buttonStyle(.plain)
+                          if best > 0 { Text("Best: \(best)").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
+                      }
+                      .padding(24)
+                      .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(.ultraThinMaterial))
+                      .padding(28)
+                  case .countdown:
+                      Text("\(count)")
+                          .font(.system(size: 96, weight: .black, design: .rounded))
+                          .foregroundStyle(.white)
+                          .shadow(color: .purple, radius: 0, x: 3, y: 4)
+                          .id(count)
+                          .transition(.scale.combined(with: .opacity))
+                  case .playing:
+                      EmptyView()
+                  }
               }
 
-              private func randomTama() -> Suitor {
-                  town.randomSuitor(mix: false) ?? Suitor(name: "TAMA", body: 0, face: 0, head: 0, back: 0, bodyColor: 0, headColor: 0, backColor: 0, blurb: "")
+              // MARK: game
+
+              private func begin() {
+                  score = 0
+                  holes = Array(repeating: nil, count: 9)
+                  bursts = [:]
+                  count = 3
+                  ticks = 0
+                  withAnimation(.spring()) { phase = .countdown }
+              }
+
+              private func randomTama() -> Suitor? {
+                  // the same Tamas you can meet at Tama ♥ Party, plus the odd stranger
+                  if let s = town.suitors.randomElement(), Double.random(in: 0...1) < 0.7 { return s }
+                  return town.randomSuitor(mix: false) ?? town.suitors.randomElement()
               }
 
               private func tick() {
                   clock += 0.1
-                  guard playing else { return }
-                  timeLeft -= 0.1
-                  if timeLeft <= 0 {
-                      playing = false
-                      withAnimation { holes = Array(repeating: nil, count: 9) }
-                      let pts = score * 50
-                      won = pts
-                      wallet = min(99999, wallet + pts)
-                      best = max(best, score)
-                      return
-                  }
-                  // Tamas hide again after a moment; speed up as time runs out
-                  let stay = 0.6 + 0.6 * (timeLeft / length)
-                  for i in 0..<9 where holes[i] != nil && clock - shownAt[i] > stay {
-                      withAnimation(.easeIn(duration: 0.12)) { holes[i] = nil }
-                  }
-                  let busy = holes.compactMap { $0 }.count
-                  if busy < 3 && Double.random(in: 0...1) < 0.35 {
-                      let free = (0..<9).filter { holes[$0] == nil }
-                      if let i = free.randomElement() {
-                          shownAt[i] = clock
-                          withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) { holes[i] = randomTama() }
+                  ticks += 1
+                  bursts = bursts.filter { clock - $0.value < 0.7 }
+                  switch phase {
+                  case .countdown:
+                      if ticks % 10 == 0 {
+                          if count > 1 { withAnimation(.spring()) { count -= 1 } } else { timeLeft = length; withAnimation { phase = .playing } }
                       }
+                  case .playing:
+                      timeLeft -= 0.1
+                      if timeLeft <= 0 { finish(); return }
+                      let stay = 0.6 + 0.7 * (timeLeft / length)
+                      for i in 0..<9 where holes[i] != nil && clock - shownAt[i] > stay {
+                          withAnimation(.easeIn(duration: 0.15)) { holes[i] = nil }
+                      }
+                      if holes.compactMap({ $0 }).count < 3 && Double.random(in: 0...1) < 0.4 {
+                          let free = (0..<9).filter { holes[$0] == nil && bursts[$0] == nil }
+                          if let i = free.randomElement(), let t = randomTama() {
+                              shownAt[i] = clock
+                              withAnimation(.spring(response: 0.25, dampingFraction: 0.55)) { holes[i] = t }
+                          }
+                      }
+                  default: break
                   }
               }
 
+              private func finish() {
+                  withAnimation { holes = Array(repeating: nil, count: 9) }
+                  wallet = min(99999, wallet + score * 50)
+                  best = max(best, score)
+                  withAnimation(.spring()) { phase = .done }
+              }
+
               private func tap(_ i: Int) {
-                  guard playing, holes[i] != nil else { return }
+                  guard phase == .playing, holes[i] != nil else { return }
                   score += 1
+                  bursts[i] = clock
                   if haptics { Haptics.tap() }
-                  withAnimation(.easeOut(duration: 0.1)) { holes[i] = nil }
+                  withAnimation(.easeOut(duration: 0.12)) { holes[i] = nil }
               }
           }
           TAMA_EOF
@@ -4768,6 +5255,7 @@ jobs:
           TAMA_EOF
           cat > ios/TamaiOS/TamaAppView.swift <<'TAMA_EOF'
           import SwiftUI
+          import PhotosUI
 
           /// Tamatown, TamaiOS's built-in version of the original Tamagotchi app.
           /// Visit: your Tama spends the day in town (Tama ♥ Party, TamaDepot, Arcade).
@@ -4779,12 +5267,21 @@ jobs:
               @ObservedObject private var link = AppLink.shared
               /// The toy chose Download: only the store works then.
               @State private var downloadOnly = false
+              @ObservedObject private var town = Town.shared
+
+              /// Tamatown itself only appears while your Tama is visiting.
+              private var inTown: Bool { emu.toy.map { town.state($0).away } ?? false }
 
               @ViewBuilder private var root: some View {
-                  if downloadOnly {
-                      TamaDepaView()
-                  } else {
+                  if inTown && !downloadOnly {
                       TownSquare(path: $path).navigationTitle("Tamatown")
+                  } else {
+                      TamaDepaView()
+                          .toolbar {
+                              ToolbarItem(placement: .cancellationAction) {
+                                  NavigationLink(value: TownPlace.settings) { Image(systemName: "gearshape.fill") }
+                              }
+                          }
                   }
               }
 
@@ -4909,6 +5406,10 @@ jobs:
               @EnvironmentObject var emu: Emulator
               @ObservedObject var town = Town.shared
               private var away: Bool { emu.toy.map { town.state($0).away } ?? false }
+              private var sceneAspect: CGFloat {
+                  guard let bg = town.customBG ?? TownScene.builtIn, bg.size.height > 0 else { return 1.25 }
+                  return min(2.2, max(1.0, bg.size.width / bg.size.height))
+              }
 
               var body: some View {
                   ScrollView {
@@ -4916,7 +5417,7 @@ jobs:
                           TownScene(open: away) { p in
                               if away || p == .depa || p == .home || p == .settings { path.append(p) }
                           }
-                              .aspectRatio(1.25, contentMode: .fit)
+                              .aspectRatio(sceneAspect, contentMode: .fit)
                               .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                               .shadow(color: .black.opacity(0.15), radius: 10, y: 5)
                           statusBanner
@@ -4995,22 +5496,25 @@ jobs:
               let open: Bool
               let go: (TownPlace) -> Void
               @ObservedObject var town = Town.shared
-              @State private var walkers: [Suitor] = []
+              /// The Tamas walking around are the ones you can date at Tama ♥ Party.
+              private var walkers: [Suitor] { Array(town.suitors.prefix(5)) }
               static let sparkX: [CGFloat] = [0.08, 0.22, 0.36, 0.55, 0.68, 0.83, 0.93, 0.47, 0.15]
               static let sparkY: [CGFloat] = [0.10, 0.06, 0.15, 0.05, 0.12, 0.07, 0.18, 0.22, 0.24]
 
               var body: some View {
                   GeometryReader { g in
-                      ZStack {
-                          sky(g.size.width, g.size.height)
-                          ground(g.size.width, g.size.height)
-                          buildings(g.size.width, g.size.height)
-                          walkersLayer(g.size.width, g.size.height)
-                          signs(g.size.width, g.size.height)
+                      if let bg = town.customBG ?? TownScene.builtIn {
+                          customScene(bg, g.size.width, g.size.height)
+                      } else {
+                          ZStack {
+                              sky(g.size.width, g.size.height)
+                              ground(g.size.width, g.size.height)
+                              buildings(g.size.width, g.size.height)
+                              walkersLayer(g.size.width, g.size.height)
+                              signs(g.size.width, g.size.height)
+                          }
                       }
                   }
-                  .onAppear(perform: pickWalkers)
-                  .onChange(of: town.ids.count) { _ in pickWalkers() }
               }
 
               private static let skyColors: [Color] = [Color(red: 1.0, green: 0.78, blue: 0.90), Color(red: 0.86, green: 0.84, blue: 1.0), Color(red: 0.78, green: 0.92, blue: 1.0)]
@@ -5101,9 +5605,33 @@ jobs:
                   }
               }
 
-              private func pickWalkers() {
-                  guard walkers.isEmpty, !town.ids.isEmpty else { return }
-                  walkers = (0..<4).compactMap { _ in town.randomSuitor(mix: false) }
+              /// TamaiOS's own town picture (drawn at build time by tools/town.py).
+              static let builtIn: UIImage? = UIImage(named: "TownBackground")
+
+              /// The town picture: tap the left for Tama ♥ Party, the middle for
+              /// TamaDepot, the right for the Arcade.
+              private func hotspot(_ place: TownPlace, _ w: CGFloat, _ h: CGFloat, _ x: CGFloat) -> some View {
+                  Button { go(place) } label: { Color.clear.contentShape(Rectangle()) }
+                      .buttonStyle(.plain)
+                      .frame(width: w / 3, height: h * 0.8)
+                      .position(x: w * x, y: h * 0.5)
+              }
+
+              private func customScene(_ bg: UIImage, _ w: CGFloat, _ h: CGFloat) -> some View {
+                  ZStack {
+                      Image(uiImage: bg).resizable().scaledToFill().frame(width: w, height: h).clipped()
+                      hotspot(.party, w, h, 1.0 / 6)
+                      hotspot(.depa, w, h, 0.5)
+                      hotspot(.arcade, w, h, 5.0 / 6)
+                      cornerButton("gearshape.fill", "Settings", .pink) { go(.settings) }.position(x: w - 34, y: 34)
+                      walkersLayer(w, h)
+                      HStack(spacing: w * 0.02) {
+                          label("Tama ♥ Party", .pink) { go(.party) }
+                          label("TamaDepot", .blue) { go(.depa) }
+                          label("Arcade", .purple) { go(.arcade) }
+                      }
+                      .position(x: w / 2, y: h * 0.92)
+                  }
               }
 
               private func cloud(_ s: CGFloat) -> some View {
@@ -5253,6 +5781,7 @@ jobs:
           struct TownSettingsView: View {
               @ObservedObject var town = Town.shared
               @State private var importing = false
+              @State private var photo: PhotosPickerItem?
               @AppStorage("gotchiPocket") private var wallet = 0
 
               var body: some View {
@@ -5267,6 +5796,18 @@ jobs:
                           Button("Download again from TamaTown") { town.download() }
                           Button("Use my own MyMeets2_3_7.zip") { importing = true }
                       }
+                      Section {
+                          PhotosPicker(selection: $photo, matching: .images) {
+                              Label("Choose a town picture…", systemImage: "photo.on.rectangle")
+                          }
+                          if town.customBG != nil {
+                              Button("Use the built-in town", role: .destructive) { town.setBackground(nil) }
+                          }
+                      } header: {
+                          Text("Town picture")
+                      } footer: {
+                          Text("Use any picture you like as the town — for example a screenshot of the original app from your own phone. Tap the left of it for Tama ♥ Party, the middle for TamaDepot and the right for the Arcade.")
+                      }
                       Section("Gotchi Points") {
                           Text("Waiting to go to your Tama: \(wallet) G")
                           Text("Win more in the Arcade. They go home with your Tama, or with the next delivery.").font(.caption).foregroundStyle(.secondary)
@@ -5278,6 +5819,13 @@ jobs:
                       }
                   }
                   .navigationTitle("Tamatown Settings")
+                  .onChange(of: photo) { item in
+                      guard let item else { return }
+                      Task {
+                          if let d = try? await item.loadTransferable(type: Data.self) { town.setBackground(d) }
+                          photo = nil
+                      }
+                  }
                   .sheet(isPresented: $importing) {
                       DocumentPicker { u in if let d = try? Data(contentsOf: u) { town.importPack(d) } }.ignoresSafeArea()
                   }
@@ -6077,6 +6625,22 @@ jobs:
               @Published var suitors: [Suitor] = []
               /// Shop items (food, items, accessories, wallpapers, places, games) from the pack.
               @Published var items: [PackItem] = []
+              /// Your own town picture (Tamatown Settings), if you chose one.
+              @Published var customBG: UIImage? = UIImage(contentsOfFile: Town.backgroundFile.path)
+
+              static var backgroundFile: URL {
+                  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("TownPicture.img")
+              }
+
+              func setBackground(_ data: Data?) {
+                  if let data, let img = UIImage(data: data) {
+                      try? data.write(to: Town.backgroundFile, options: .atomic)
+                      customBG = img
+                  } else {
+                      try? FileManager.default.removeItem(at: Town.backgroundFile)
+                      customBG = nil
+                  }
+              }
 
               static let packURL = URL(string: "https://tamatown.com/wp-content/uploads/2020/11/MyMeets2_3_7.zip")!
               static var packFile: URL {
@@ -7121,6 +7685,7 @@ jobs:
               private func screenView(_ m: ShellMetrics) -> some View {
                   let size = m.screen
                   return ZStack {
+                      inkLine
                       LCDView(sink: emu.frames)
                       if emu.loading {
                           Color.black
@@ -7136,6 +7701,9 @@ jobs:
                   }
                   .frame(width: size, height: size)
                   .clipShape(RoundedRectangle(cornerRadius: size * 0.05, style: .continuous))
+                  // the dark border is drawn with the screen itself, so nothing can peek through
+                  .padding(m.line * 0.8)
+                  .background(RoundedRectangle(cornerRadius: size * 0.08, style: .continuous).fill(inkLine))
                   .accessibilityLabel("Toy screen")
               }
 
@@ -7494,6 +8062,7 @@ jobs:
         run: |
           python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
           python3 tools/icon.py ios/TamaiOS/Assets.xcassets/AppIcon.appiconset/icon.png
+          python3 tools/town.py ios/TamaiOS/TownBackground.png 1680
 
       - name: Make the Xcode project
         run: |

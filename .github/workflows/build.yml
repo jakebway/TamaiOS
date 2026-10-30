@@ -6005,16 +6005,16 @@ jobs:
                   return count
               }
 
+              /// Foreground sound is independent of the background simulation setting.
+              /// Playback ignores the Ring/Silent switch; mixing preserves other apps' audio.
               func configureSession() {
-                  let s = AVAudioSession.sharedInstance()
-                  // .playback keeps the app alive in the background (the pet keeps
-                  // living); mixWithOthers so music/podcasts keep playing.
-                  if backgroundMode {
-                      try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-                  } else {
-                      try? s.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+                  let session = AVAudioSession.sharedInstance()
+                  do {
+                      try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                      try session.setActive(true)
+                  } catch {
+                      NSLog("TamaiOS audio session configuration failed: %@", error.localizedDescription)
                   }
-                  try? s.setActive(true)
               }
 
               func start() {

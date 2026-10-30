@@ -3103,10 +3103,12 @@ jobs:
               private func tama(_ i: Int, _ size: CGFloat) -> some View {
                   let up = holes[i] != nil
                   // up: peeking over the bush; down: tucked behind it (the cell clips the rest)
-                  let lift: CGFloat = up ? -size * 0.24 : size * 0.30
+                  // the cell is size tall and the bush covers its bottom 42%: a hidden Tama sits
+                  // just below the bush top, a popped one stands on it with its whole head showing
+                  let lift: CGFloat = up ? -size * 0.40 : size * 0.16
                   let img = lastShown[i].flatMap { town.image($0) }
                   return CharacterPicture(image: img)
-                      .frame(width: size * 0.62, height: size * 0.62)
+                      .frame(width: size * 0.56, height: size * 0.56)
                       .offset(y: lift)
               }
 
@@ -3157,7 +3159,7 @@ jobs:
                           burst(clock - t, size)
                       }
                   }
-                  .frame(width: size, height: size * 0.82)
+                  .frame(width: size, height: size)
                   .clipped()
                   .contentShape(Rectangle())
                   .onTapGesture { tap(i) }
@@ -3926,7 +3928,7 @@ jobs:
                                       town.shuffle()
                                   }
                                   emu.saveNow()
-                                  msg = "\(town.name(toy)) is in town! 🏙️ Date at Tama ♥ Party, shop at TamaDepot or play in the Arcade."
+                                  msg = nil     // the town itself says who's visiting; no pop-up needed
                               } else if mode == TamaLink.modeDownload {
                                   if let it = town.bag(toy).first, let data = town.bagData(toy, it),
                                      let pkt = Town.userItemPacket(data, points: Town.pocket) {
@@ -4066,7 +4068,7 @@ jobs:
 
               /// The device is connecting and we don't know yet whether it's a Visit or a
               /// Download: show a clean arrival screen instead of a half-loaded store.
-              private var arriving: Bool { !inTown && !downloadOnly && (link.busy || emu.appWaiting) }
+              private var arriving: Bool { !downloadOnly && (link.busy || (emu.appWaiting && !inTown)) }
 
               @ViewBuilder private var root: some View {
                   if arriving {
@@ -4093,7 +4095,7 @@ jobs:
                           }
                   }
                   .tint(.pink)
-                  .overlay { if link.busy && !arriving { BusyOverlay(text: link.status) } }
+                  .overlay { if link.busy && downloadOnly { BusyOverlay(text: link.status) } }
                   .alert("Tamatown", isPresented: Binding(get: { link.lastMessage != nil }, set: { if !$0 { link.lastMessage = nil } })) {
                       Button("OK") {}
                   } message: { Text(link.lastMessage ?? "") }

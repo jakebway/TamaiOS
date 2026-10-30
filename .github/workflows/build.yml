@@ -1285,6 +1285,13 @@ jobs:
           pub extern "C" fn tg_mm_back_packet(p: *const u8, n: usize, points: u32, out: *mut *mut u8, out_len: *mut usize) {
               give(mm::back_packet(unsafe { bytes(p, n) }, points), out, out_len)
           }
+
+          /// The Tamagotchi's own name from visit data.
+          #[no_mangle]
+          pub extern "C" fn tg_mm_tama_name(p: *const u8, n: usize, out: *mut *mut u8, out_len: *mut usize) {
+              let s = unsafe { bytes(p, n) }.map(mm::visit_tama_name).unwrap_or_default();
+              give_string(s, out, out_len)
+          }
           TAMA_EOF
           cat > ffi/src/mm.rs <<'TAMA_EOF'
           //! Marriage support for the built-in Tama App: character parts, pictures,
@@ -1990,6 +1997,29 @@ jobs:
 
           pub fn visit_sex(v: &[u8]) -> u8 {
               v.get(95).copied().unwrap_or(0)
+          }
+
+          /// The Tamagotchi's own name in visit data (the first text field after the
+          /// owner's profile name at 0x60; e.g. 0x18C on Wonder Garden).
+          pub fn visit_tama_name(v: &[u8]) -> String {
+              let ok = |b: u8| b == 4 || b == 8;
+              let mut i = 0x70;
+              while i + 4 <= v.len() {
+                  if ok(v[i]) && ok(v[i + 2]) {
+                      let mut j = i;
+                      while j + 1 < v.len() && ok(v[j]) && j - i < 32 {
+                          j += 2;
+                      }
+                      let s = decode_name(&v[i..j]);
+                      if s.chars().count() >= 2 {
+                          return s;
+                      }
+                      i = j;
+                  } else {
+                      i += 1;
+                  }
+              }
+              String::new()
           }
 
           pub fn visit_name(v: &[u8]) -> String {
@@ -2854,6 +2884,7 @@ jobs:
           void tg_mm_user_item_name(const uint8_t *p, size_t n, uint8_t **out, size_t *out_len);
           void tg_mm_points_packet(uint32_t points, uint8_t **out, size_t *out_len);
           void tg_mm_back_packet(const uint8_t *p, size_t n, uint32_t points, uint8_t **out, size_t *out_len);
+          void tg_mm_tama_name(const uint8_t *p, size_t n, uint8_t **out, size_t *out_len);
 
           #endif
           TAMA_EOF
@@ -3159,7 +3190,7 @@ jobs:
                           burst(clock - t, size)
                       }
                   }
-                  .frame(width: size, height: size)
+                  .frame(width: size, height: size, alignment: .bottom)   // bush sits on the cell's floor
                   .clipped()
                   .contentShape(Rectangle())
                   .onTapGesture { tap(i) }
@@ -3909,21 +3940,19 @@ jobs:
                               emu.saveNow()
                           } else {
                               let mode = try link.probe()
-                              let heard = Town.decodeName(link.hello)
-                              if !heard.isEmpty {
-                                  self.main { var x = town.state(toy); x.tamaName = heard; town.save(x, toy) }
-                              }
-                              let tama = town.name(toy)
+                              let tama = town.name(toy)      // known from the last visit, if any
                               emu.note("app connected, device mode \(String(format: "%02x", mode))")
                               if mode == TamaLink.modeVisit {
                                   progress("\(tama) is coming to town…")
                                   let d = try link.finishVisit()
                                   emu.fastForward(20)       // play the goodbye scene now, while you look around town
                                   town.saveVisit(d, toy)
+                                  let pet = Town.decodeName(d)
                                   self.main {
                                       var x = town.state(toy)
                                       x.away = true
                                       x.pending = .none
+                                      if !pet.isEmpty { x.petName = pet }
                                       town.save(x, toy)
                                       town.shuffle()
                                   }
@@ -4892,8 +4921,8 @@ jobs:
                   var married: [String] = []
                   /// Things bought for this toy that haven't reached it yet (souvenirs).
                   var bag: [BagItem]? = nil
-                  /// The Tamagotchi's own name, as the device reported it.
-                  var tamaName: String? = nil
+                  /// The Tamagotchi's own name (from its last visit).
+                  var petName: String? = nil
               }
 
               struct BagItem: Codable, Identifiable, Equatable {
@@ -4976,16 +5005,16 @@ jobs:
               func name(_ toy: Toy?) -> String {
                   guard let toy else { return "Your Tama" }
                   if let n = visitInfo(toy)?.name, !n.isEmpty { return n.capitalized }
-                  if let n = state(toy).tamaName, !n.isEmpty { return n }
+                  if let n = state(toy).petName, !n.isEmpty { return n }
                   return "Your Tama"
               }
 
-              /// Read the name out of a device's hello answer or visit data.
+              /// The Tamagotchi's own name from visit data (not the owner's profile name).
               static func decodeName(_ bytes: [UInt8]) -> String {
                   guard bytes.count > 0x70 else { return "" }
                   var p: UnsafeMutablePointer<UInt8>? = nil
                   var n = 0
-                  bytes.withUnsafeBufferPointer { tg_mm_visit_name($0.baseAddress, $0.count, &p, &n) }
+                  bytes.withUnsafeBufferPointer { tg_mm_tama_name($0.baseAddress, $0.count, &p, &n) }
                   guard let p else { return "" }
                   let s = String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
                   tg_free(p, n)
@@ -5021,7 +5050,7 @@ jobs:
                   let info = v.withUnsafeBufferPointer { tg_mm_visit_info($0.baseAddress, $0.count) }
                   var p: UnsafeMutablePointer<UInt8>? = nil
                   var n = 0
-                  v.withUnsafeBufferPointer { tg_mm_visit_name($0.baseAddress, $0.count, &p, &n) }
+                  v.withUnsafeBufferPointer { tg_mm_tama_name($0.baseAddress, $0.count, &p, &n) }
                   var name = ""
                   if let p { name = String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self); tg_free(p, n) }
                   return (name, info & 1 != 0, Int((info >> 1) & 1))

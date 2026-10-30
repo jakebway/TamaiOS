@@ -4158,7 +4158,7 @@ jobs:
                       // itself (B shows the question, A moves to YES, B confirms); the device
                       // then calls the app and the homecoming runs quietly in the background.
                       if !headingHome, let t = emu.toy, Town.shared.state(t).away, !link.busy, !emu.appWaiting {
-                          emu.fastForward(1, keys: [.b, .a, .b])
+                          emu.answerGoBack()
                       }
                   }
               }
@@ -4171,7 +4171,7 @@ jobs:
                   guard let t = emu.toy, Town.shared.state(t).away, !link.busy, !emu.appWaiting else { dismiss(); return }
                   headingHome = true
                   emu.holdForApp = false
-                  emu.fastForward(1, keys: [.b, .a, .b])
+                  emu.answerGoBack()
                   DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { dismiss() }
               }
 
@@ -6108,12 +6108,23 @@ jobs:
               /// you aren't watching), then optionally press B.
               private var ffSeconds: Double = 0
               private var ffKeys: [TGKey] = []
+              private var ffUntilWaiting = false
 
               /// Run `seconds` of device time at full speed, then press `keys` one by one
               /// (a second of device time apart, like a person would).
               func fastForward(_ seconds: Double, keys: [TGKey] = []) {
                   ffSeconds = max(ffSeconds, seconds)
                   ffKeys += keys
+                  wake.signal()
+              }
+
+              /// Answer the device's "GO BACK?" with YES: press B, A, B (a second apart) and
+              /// stop as soon as the device is waiting for the app; if a press was missed
+              /// (e.g. the device was busy), try the whole sequence again, up to 3 times.
+              func answerGoBack() {
+                  ffSeconds = max(ffSeconds, 1)
+                  ffKeys = [.b, .a, .b]
+                  ffUntilWaiting = true
                   wake.signal()
               }
               private var visible = true
@@ -6301,9 +6312,10 @@ jobs:
                           continue
                       }
                       if ffSeconds > 0 || !ffKeys.isEmpty {
-                          let ff = ffSeconds, keys = ffKeys
+                          let ff = ffSeconds, keys = ffKeys, untilWaiting = ffUntilWaiting
                           ffSeconds = 0
                           ffKeys = []
+                          ffUntilWaiting = false
                           lock.lock()
                           if let h = handle {
                               let start = CACurrentMediaTime()
@@ -6313,13 +6325,27 @@ jobs:
                                   _ = tg_take_audio(h, audioBuf, 44100)
                                   t += 0.02
                               }
-                              for k in keys {
-                                  tg_press(h, k.rawValue, CACurrentMediaTime())
-                                  for _ in 0..<8 { _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100) }
-                                  tg_release(h, k.rawValue)
-                                  for _ in 0..<50 { _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100) }
+                              var pressed = 0
+                              var reached = false
+                              attempts: for _ in 0..<(untilWaiting ? 3 : 1) {
+                                  for k in keys {
+                                      tg_press(h, k.rawValue, CACurrentMediaTime())
+                                      for _ in 0..<8 { _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100) }
+                                      tg_release(h, k.rawValue)
+                                      pressed += 1
+                                      for _ in 0..<60 {
+                                          _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100)
+                                          if untilWaiting && tg_radio_ready(h) != 0 { reached = true; break attempts }
+                                      }
+                                  }
+                                  if !untilWaiting { break }
+                                  // give the device a moment, then check again before retrying
+                                  for _ in 0..<75 {
+                                      _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100)
+                                      if tg_radio_ready(h) != 0 { reached = true; break attempts }
+                                  }
                               }
-                              note("fast-forwarded \(Int(t)) s, pressed \(keys.count) keys")
+                              note("fast-forwarded \(Int(t)) s, pressed \(pressed) keys\(untilWaiting ? (reached ? " — device is waiting" : " — device didn't answer") : "")")
                           }
                           lock.unlock()
                           needFrame = true

@@ -3372,6 +3372,11 @@ jobs:
 
               private var isJP: Bool { emu.toy?.romName.contains("(JP") ?? false }
               private var lang: String { isJP ? "jp" : "en" }
+          
+          /// While visiting, only things that can come home in the bag are sold.
+          private var categories: [(key: String, title: String, icon: String)] {
+              away ? WebMeets.categories.filter { ["food", "item", "accessory", "wallpaper"].contains($0.key) } : WebMeets.categories
+          }
 
               /// The whole catalog, merged once (not on every redraw).
               @State private var entries: [Entry] = []
@@ -3400,7 +3405,7 @@ jobs:
 
               private var shown: [Entry] {
                   let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-                  return entries.filter { $0.kind == category && (q.isEmpty || $0.name.lowercased().contains(q)) }
+                  return entries.filter { $0.kind == category && (!away || !["stations", "games"].contains($0.kind)) && (q.isEmpty || $0.name.lowercased().contains(q)) }
               }
 
               var body: some View {
@@ -3411,7 +3416,7 @@ jobs:
                           if !live { hintCard }
                           ScrollView(.horizontal, showsIndicators: false) {
                               HStack(spacing: 8) {
-                                  ForEach(WebMeets.categories, id: \.key) { c in
+                                  ForEach(categories, id: \.key) { c in
                                       Button { category = c.key } label: {
                                           Label(c.title, systemImage: c.icon)
                                               .font(.system(.subheadline, design: .rounded).weight(.semibold))
@@ -3423,7 +3428,7 @@ jobs:
                                   }
                               }
                           }
-                          if category == "stations" { ownFileCard }
+                          if category == "stations" && !away { ownFileCard }
                           grid
                           if !packReady {
                               Text("Download the character pack in Tamatown › Settings for hundreds more items, places and games.")
@@ -3438,7 +3443,7 @@ jobs:
                   .navigationTitle("TamaDepot")
                   .navigationBarTitleDisplayMode(.inline)
                   .background(LinearGradient(colors: [Color.blue.opacity(0.08), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
-                  .task { await load() }
+                  .task { if away && (category == "stations" || category == "games") { category = "food" }; await load() }
                   .onChange(of: town.items.count) { _ in entries = buildEntries() }
                   .overlay { if sending { BusyOverlay(text: progress) } }
                   .confirmationDialog(dialogTitle, isPresented: Binding(get: { picked != nil }, set: { if !$0 { picked = nil } }), titleVisibility: .visible) {
@@ -3484,7 +3489,7 @@ jobs:
 
               private var hintText: String {
                   let name = town.name(emu.toy)
-                  return away ? "Shopping in town: what you buy goes home with \(name)."
+                  return away ? "Shopping in town: food, items, accessories and wallpapers can come home with \(name). Places and games only come through Download."
                               : "What you pick goes in the bag. It's delivered by itself next time the device connects (Connection › App › Download)."
               }
 
@@ -3498,12 +3503,13 @@ jobs:
 
               private var dialogTitle: String {
                   guard let p = picked else { return "" }
-                  return (live ? "Send " : "Get ") + p.name + "?"
+                  return (live ? "Send " : "Get ") + p.name + (p.price.map { " (\($0) G)" } ?? "") + "?"
               }
 
               private var dialogButton: String {
-                  if !live { return "Put in the bag" }
-                  return pocket > 0 ? "Send with \(pocket) G" : "Send now"
+                  if !live { let c = picked?.price ?? 0; return c > 0 ? "Put in the bag (-\(c) G)" : "Put in the bag" }
+                  let left = max(0, pocket - (picked?.price ?? 0))
+          return left > 0 ? "Send with \(left) G" : "Send now"
               }
 
               @ViewBuilder
@@ -3517,7 +3523,7 @@ jobs:
                                   Image(systemName: icon(it.kind)).foregroundStyle(.orange)
                                   Text(it.name).font(.system(.subheadline, design: .rounded))
                                   Spacer()
-                                  Button(role: .destructive) { town.removeFromBag(t, it) } label: { Image(systemName: "xmark.circle.fill") }
+                                  Button(role: .destructive) { pocket = min(99999, pocket + (it.price ?? 0)); town.removeFromBag(t, it) } label: { Image(systemName: "xmark.circle.fill") }
                                       .buttonStyle(.plain).foregroundStyle(.secondary)
                               }
                           }
@@ -3608,18 +3614,27 @@ jobs:
               }
 
               /// Send now if the toy is connected (Download), otherwise put it in the bag.
-              private func deliver(name: String, kind: String, packet: @escaping (Int) async throws -> [UInt8]) {
+              private func deliver(name: String, kind: String, price: Int = 0, packet: @escaping (Int) async throws -> [UInt8]) {
                   picked = nil
                   guard let toy = emu.toy else { return }
-                  let now = live
-                  let pts = now ? pocket : 0
+                  if away && (kind == "stations" || kind == "games") {
+              result = (false, "Places and games can't come home from town. Get them with Connection › App › Download.")
+              return
+          }
+          guard pocket >= price else {
+              result = (false, "Not enough Gotchi Points: \(name) costs \(price) G and you have \(pocket) G. Win more in the Arcade.")
+              return
+          }
+          let now = live
+                  let pts = now ? max(0, pocket - price) : 0
                   sending = true
                   progress = now ? "Wrapping your gift…" : "Putting it in the bag…"
                   Task {
                       do {
                           let pkt = try await packet(pts)
                           if !now {
-                              town.addToBag(toy, name: name, kind: kind, packet: pkt)
+                              pocket = max(0, pocket - price)
+          town.addToBag(toy, name: name, kind: kind, price: price, packet: pkt)
                               sending = false
                               result = (true, away ? "\(name) is in the bag. It goes home with \(town.name(toy)) when you choose GO BACK › YES." :
                                                   "\(name) is in the bag. It's delivered by itself next time the device connects with Download.")
@@ -3630,7 +3645,7 @@ jobs:
                           progress = "Sending your gift…"
                           try await Task.detached(priority: .userInitiated) { try tl.finishItem(pkt) }.value
                           emu.note("gift sent: \(name) points=\(pts)")
-                          pocket = max(0, pocket - pts)
+                          pocket = max(0, pocket - pts - price)
                           sending = false
                           link.closeWith = "\(town.name(toy)) got \(name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁"
                       } catch {
@@ -3644,9 +3659,9 @@ jobs:
               private func send(_ it: Entry) {
                   switch it.source {
                   case .web(let w):
-                      deliver(name: it.name, kind: it.kind) { pts in try await WebMeets.itemPacket(w, points: pts) }
+                      deliver(name: it.name, kind: it.kind, price: it.price ?? 0) { pts in try await WebMeets.itemPacket(w, points: pts) }
                   case .pack(let p):
-                      deliver(name: it.name, kind: it.kind) { pts in
+                      deliver(name: it.name, kind: it.kind, price: it.price ?? 0) { pts in
                           guard let pk = Town.shared.itemPacket(p, points: pts) else { throw URLError(.cannotDecodeContentData) }
                           return pk
                       }
@@ -4942,6 +4957,8 @@ jobs:
                   var id = UUID()
                   var name: String
                   var kind: String
+              /// Gotchi Points it cost (refunded if you take it out of the bag).
+              var price: Int? = nil
               }
 
               // MARK: the bag (souvenirs) and the pocket (Gotchi Points for the toy)
@@ -4955,8 +4972,8 @@ jobs:
               func bag(_ toy: Toy) -> [BagItem] { state(toy).bag ?? [] }
 
               /// Keep a bought item (its delivery packet) until the toy can receive it.
-              func addToBag(_ toy: Toy, name: String, kind: String, packet: [UInt8]) {
-                  let it = BagItem(name: name, kind: kind)
+              func addToBag(_ toy: Toy, name: String, kind: String, price: Int = 0, packet: [UInt8]) {
+                  let it = BagItem(name: name, kind: kind, price: price)
                   try? Data(packet).write(to: bagDir(toy).appendingPathComponent(it.id.uuidString + ".bin"), options: .atomic)
                   var x = state(toy)
                   x.bag = (x.bag ?? []) + [it]

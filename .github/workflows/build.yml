@@ -4003,7 +4003,13 @@ jobs:
                   guard openForDownload else { return }
                   openForDownload = false
                   let link = TamaLink(emu: emu)
-                  DispatchQueue.global(qos: .userInitiated).async { link.close() }
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      // Just hanging up leaves the device on CONNECTING for ~20 s. A command it
+                      // doesn't expect in Download mode ends the session at once; then skip the
+                      // short FAIL message so it's straight back in its room.
+                      try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
+                      emu.fastForward(4)
+                  }
               }
           }
 
@@ -4101,9 +4107,9 @@ jobs:
 
               @ViewBuilder private var root: some View {
                   if arriving {
-                      ArrivalView(status: link.status).navigationTitle("Tamatown")
+                      ArrivalView(status: link.status)
                   } else if inTown && !downloadOnly {
-                      TownSquare(path: $path, onHome: { dismiss() }).navigationTitle("Tamatown")
+                      TownSquare(path: $path, onHome: { leave() }).navigationTitle("Tamatown")
                   } else {
                       TamaDepotView()
                           .toolbar {
@@ -4118,7 +4124,7 @@ jobs:
                   NavigationStack(path: $path) {
                       root
                           .navigationBarTitleDisplayMode(.inline)
-                          .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                          .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { leave() } } }
                           .navigationDestination(for: TownPlace.self) { place in
                               place.view.environmentObject(emu)
                           }
@@ -4137,7 +4143,7 @@ jobs:
                   .onChange(of: emu.appWaiting) { w in if w { connect() } }
                   .onChange(of: path) { p in
                       // Home = leave Tamatown; the device then asks "GO BACK?"
-                      if p.last == .home { path.removeLast(); dismiss() }
+                      if p.last == .home { path.removeLast(); leave() }
                   }
                   .onChange(of: link.closeWith) { m in
                       guard let m else { return }
@@ -4151,10 +4157,22 @@ jobs:
                       // Leaving Tamatown = going home: answer the device's GO BACK? with YES by
                       // itself (B shows the question, A moves to YES, B confirms); the device
                       // then calls the app and the homecoming runs quietly in the background.
-                      if let t = emu.toy, Town.shared.state(t).away, !link.busy, !emu.appWaiting {
+                      if !headingHome, let t = emu.toy, Town.shared.state(t).away, !link.busy, !emu.appWaiting {
                           emu.fastForward(1, keys: [.b, .a, .b])
                       }
                   }
+              }
+
+              @State private var headingHome = false
+
+              /// Done / Home. If your Tama is in town this means "go home": the device is
+              /// answered (GO BACK? › YES) before the sheet closes, so you never see I'M OUT.
+              private func leave() {
+                  guard let t = emu.toy, Town.shared.state(t).away, !link.busy, !emu.appWaiting else { dismiss(); return }
+                  headingHome = true
+                  emu.holdForApp = false
+                  emu.fastForward(1, keys: [.b, .a, .b])
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { dismiss() }
               }
 
               /// Like the phone app: as soon as the toy connects, see which menu it chose.
@@ -4680,9 +4698,6 @@ jobs:
                   ZStack {
                       LinearGradient(colors: [Color(red: 1, green: 0.85, blue: 0.93), Color(red: 0.86, green: 0.9, blue: 1)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
                       VStack(spacing: 10) {
-                          Text("Tamatown")
-                              .font(.system(size: 40, weight: .black, design: .rounded))
-                              .foregroundStyle(LinearGradient(colors: [.pink, .purple], startPoint: .leading, endPoint: .trailing))
                           ProgressView().tint(.pink)
                           Text(status.isEmpty ? "Connecting…" : status)
                               .font(.system(.headline, design: .rounded))

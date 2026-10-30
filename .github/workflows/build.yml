@@ -3004,6 +3004,7 @@ jobs:
                           AddToyView(firstRun: true)
                       } else {
                           DeviceView()
+                              .onAppear { Town.shared.loadIfPresent() }   // Tamatown ready before it's needed
                               .sheet(isPresented: $model.showAdd) {
                                   AddToyView(firstRun: false).environmentObject(model).environmentObject(model.emu)
                               }
@@ -3449,7 +3450,7 @@ jobs:
               }
 
               private var hintText: String {
-                  let name = emu.toy?.name ?? "your Tama"
+                  let name = town.name(emu.toy)
                   return away ? "Shopping in town: what you buy goes home with \(name)."
                               : "What you pick goes in the bag. It's delivered by itself next time the device connects (Connection › App › Download)."
               }
@@ -3567,8 +3568,9 @@ jobs:
 
               private func load() async {
                   loadError = nil
+                  if web.isEmpty, let cached = WebMeets.cachedItems() { web = cached }   // instant
                   entries = buildEntries()
-                  do { web = try await WebMeets.items() } catch { loadError = error.localizedDescription }
+                  do { web = try await WebMeets.items() } catch { if web.isEmpty { loadError = error.localizedDescription } }
                   entries = buildEntries()
               }
 
@@ -3586,7 +3588,7 @@ jobs:
                           if !now {
                               town.addToBag(toy, name: name, kind: kind, packet: pkt)
                               sending = false
-                              result = (true, away ? "\(name) is in the bag. It goes home with \(toy.name) when you choose GO BACK › YES." :
+                              result = (true, away ? "\(name) is in the bag. It goes home with \(town.name(toy)) when you choose GO BACK › YES." :
                                                   "\(name) is in the bag. It's delivered by itself next time the device connects with Download.")
                               return
                           }
@@ -3597,7 +3599,7 @@ jobs:
                           emu.note("gift sent: \(name) points=\(pts)")
                           pocket = max(0, pocket - pts)
                           sending = false
-                          link.closeWith = "\(toy.name) got \(name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁"
+                          link.closeWith = "\(town.name(toy)) got \(name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁"
                       } catch {
                           emu.note("gift failed: \(error.localizedDescription)")
                           sending = false
@@ -3647,6 +3649,8 @@ jobs:
               }
 
               let emu: Emulator
+              /// The device's answer to the last hello (it carries its mode and the Tama's name).
+              var hello: [UInt8] = []
               init(emu: Emulator) { self.emu = emu }
 
               var ready: Bool { (emu.withCore { tg_radio_ready($0) } ?? 0) != 0 }
@@ -3658,12 +3662,14 @@ jobs:
               }
 
               private func write(_ d: [UInt8]) throws {
-                  for _ in 0..<400 {
+                  // The emulated module takes the next chunk as soon as the device has read
+                  // the last one, so no artificial Bluetooth delays are needed.
+                  for _ in 0..<4000 {
                       guard let r = emu.withCore({ h in d.withUnsafeBufferPointer { tg_radio_write(h, $0.baseAddress, $0.count) } }) else {
                           throw LinkError.notRunning
                       }
                       if r == 1 { return }
-                      Thread.sleep(forTimeInterval: 0.005)
+                      Thread.sleep(forTimeInterval: 0.001)
                   }
                   throw LinkError.writeFailed
               }
@@ -3683,23 +3689,20 @@ jobs:
               func drain(_ seconds: Double) {
                   let end = Date().addingTimeInterval(seconds)
                   while Date() < end {
-                      if read() == nil { Thread.sleep(forTimeInterval: 0.01) }
+                      if read() == nil { Thread.sleep(forTimeInterval: 0.002) }
                   }
               }
 
               /// Send one packet.
               func send(_ pkt: [UInt8]) throws {
-                  Thread.sleep(forTimeInterval: 0.5)
+                  Thread.sleep(forTimeInterval: 0.02)
                   try write([0xF0, 0x8D])
-                  Thread.sleep(forTimeInterval: 0.06)
                   var i = 0
                   while i < pkt.count {
                       let j = min(i + 20, pkt.count)
                       try write(Array(pkt[i..<j]))
-                      Thread.sleep(forTimeInterval: 0.015)
                       i = j
                   }
-                  Thread.sleep(forTimeInterval: 0.06)
                   try write([0xF0, 0xCD])
               }
 
@@ -3739,7 +3742,7 @@ jobs:
                           if acked { return buffer }
                           throw LinkError.noAnswer
                       }
-                      Thread.sleep(forTimeInterval: 0.01)
+                      Thread.sleep(forTimeInterval: 0.002)
                   }
               }
 
@@ -3762,13 +3765,13 @@ jobs:
                   drain(0.05)
                   connect(true)
                   defer {
-                      drain(0.3)
+                      drain(0.05)
                       connect(false)
                   }
                   progress("Saying hello…")
                   try send(TamaLink.packet(op: op, cmd: 0))
                   _ = try answer(firstTimeout: firstTimeout)
-                  drain(0.3)
+                  drain(0.05)
                   guard let second else { return [] }
                   try send(second)
                   Thread.sleep(forTimeInterval: 0.05)
@@ -3802,8 +3805,9 @@ jobs:
                   do {
                       try send(TamaLink.packet(op: 0x17, cmd: 0))
                       let a = try answer()
-                      drain(0.3)
+                      drain(0.05)
                       guard a.count > 0x4C else { throw LinkError.noAnswer }
+                      hello = a
                       emu.linkBusy = false      // stay connected; the toy waits (held) until we continue
                       return a[0x4C]
                   } catch {
@@ -3833,7 +3837,7 @@ jobs:
 
               func close() {
                   emu.linkBusy = true
-                  drain(0.3)
+                  drain(0.05)
                   connect(false)
               }
           }
@@ -3871,7 +3875,7 @@ jobs:
                       do {
                           if st.away {
                               close = true
-                              let name = town.visitInfo(toy)?.name.capitalized ?? toy.name
+                              let name = town.name(toy)
                               if st.pending == .marry, let s = st.suitor, let pkt = town.marriagePacket(toy, s, babySex: st.babySex, genes: st.genes) {
                                   try link.marry(pkt, progress: progress)
                                   let f = DateFormatter(); f.dateStyle = .medium
@@ -3903,9 +3907,14 @@ jobs:
                               emu.saveNow()
                           } else {
                               let mode = try link.probe()
+                              let heard = Town.decodeName(link.hello)
+                              if !heard.isEmpty {
+                                  self.main { var x = town.state(toy); x.tamaName = heard; town.save(x, toy) }
+                              }
+                              let tama = town.name(toy)
                               emu.note("app connected, device mode \(String(format: "%02x", mode))")
                               if mode == TamaLink.modeVisit {
-                                  progress("\(toy.name) is coming to town…")
+                                  progress("\(tama) is coming to town…")
                                   let d = try link.finishVisit()
                                   emu.fastForward(20)       // play the goodbye scene now, while you look around town
                                   town.saveVisit(d, toy)
@@ -3917,7 +3926,7 @@ jobs:
                                       town.shuffle()
                                   }
                                   emu.saveNow()
-                                  msg = "\(toy.name) is in town! 🏙️ Date at Tama ♥ Party, shop at TamaDepot or play in the Arcade."
+                                  msg = "\(town.name(toy)) is in town! 🏙️ Date at Tama ♥ Party, shop at TamaDepot or play in the Arcade."
                               } else if mode == TamaLink.modeDownload {
                                   if let it = town.bag(toy).first, let data = town.bagData(toy, it),
                                      let pkt = Town.userItemPacket(data, points: Town.pocket) {
@@ -3947,7 +3956,12 @@ jobs:
                           self.running = false
                           self.busy = false
                           self.openForDownload = download
-                          if close { self.closeWith = msg ?? "" } else { self.lastMessage = msg }
+                          if close {
+                              if let msg, !msg.isEmpty { emu.say(msg, seconds: 7) }
+                              self.closeWith = msg ?? ""
+                          } else {
+                              self.lastMessage = msg
+                          }
                           if download { onDownload() }
                       }
                   }
@@ -3995,6 +4009,16 @@ jobs:
                   return d
               }
 
+              static var cacheURL: URL {
+                  FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("webmeets-items.json")
+              }
+
+              /// The catalog saved last time (instant; refreshed in the background).
+              static func cachedItems() -> [Item]? {
+                  guard let d = try? Data(contentsOf: cacheURL) else { return nil }
+                  return try? JSONDecoder().decode([Item].self, from: d)
+              }
+
               static func items() async throws -> [Item] {
                   let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("webmeets-items.json")
                   do {
@@ -4040,9 +4064,15 @@ jobs:
               /// Tamatown itself only appears while your Tama is visiting.
               private var inTown: Bool { emu.toy.map { town.state($0).away } ?? false }
 
+              /// The device is connecting and we don't know yet whether it's a Visit or a
+              /// Download: show a clean arrival screen instead of a half-loaded store.
+              private var arriving: Bool { !inTown && !downloadOnly && (link.busy || emu.appWaiting) }
+
               @ViewBuilder private var root: some View {
-                  if inTown && !downloadOnly {
-                      TownSquare(path: $path).navigationTitle("Tamatown")
+                  if arriving {
+                      ArrivalView(status: link.status).navigationTitle("Tamatown")
+                  } else if inTown && !downloadOnly {
+                      TownSquare(path: $path, onHome: { dismiss() }).navigationTitle("Tamatown")
                   } else {
                       TamaDepotView()
                           .toolbar {
@@ -4063,12 +4093,13 @@ jobs:
                           }
                   }
                   .tint(.pink)
-                  .overlay { if link.busy { BusyOverlay(text: link.status) } }
+                  .overlay { if link.busy && !arriving { BusyOverlay(text: link.status) } }
                   .alert("Tamatown", isPresented: Binding(get: { link.lastMessage != nil }, set: { if !$0 { link.lastMessage = nil } })) {
                       Button("OK") {}
                   } message: { Text(link.lastMessage ?? "") }
                   .onAppear {
                       emu.holdForApp = true      // the toy waits patiently while you're in here
+                      link.closeWith = nil
                       Town.shared.loadIfPresent()
                       connect()
                   }
@@ -4079,8 +4110,8 @@ jobs:
                   }
                   .onChange(of: link.closeWith) { m in
                       guard let m else { return }
+                      _ = m
                       link.closeWith = nil
-                      if !m.isEmpty { emu.say(m, seconds: 7) }
                       dismiss()
                   }
                   .onDisappear {
@@ -4175,6 +4206,12 @@ jobs:
 
           struct TownSquare: View {
               @Binding var path: [TownPlace]
+              /// Home leaves Tamatown (the device then asks "GO BACK?").
+              var onHome: () -> Void = {}
+
+              private func open(_ p: TownPlace) {
+                  if p == .home { onHome() } else { path.append(p) }
+              }
               @EnvironmentObject var emu: Emulator
               @ObservedObject var town = Town.shared
               private var away: Bool { emu.toy.map { town.state($0).away } ?? false }
@@ -4187,7 +4224,7 @@ jobs:
                   ScrollView {
                       VStack(spacing: 14) {
                           TownScene(open: away) { p in
-                              if away || p == .depa || p == .home || p == .settings { path.append(p) }
+                              if away || p == .depa || p == .home || p == .settings { open(p) }
                           }
                               .aspectRatio(sceneAspect, contentMode: .fit)
                               .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -4195,7 +4232,7 @@ jobs:
                           statusBanner
                           LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                               ForEach(away ? [TownPlace.party, .depa, .arcade, .home] : [TownPlace.depa, .home], id: \.self) { p in
-                                  Button { path.append(p) } label: { PlaceTile(place: p) }.buttonStyle(.plain)
+                                  Button { open(p) } label: { PlaceTile(place: p) }.buttonStyle(.plain)
                               }
                           }
                           Button { path.append(.settings) } label: {
@@ -4211,7 +4248,7 @@ jobs:
               private var statusBanner: some View {
                   let st = emu.toy.map { town.state($0) }
                   let away = st?.away ?? false
-                  let name = emu.toy?.name ?? "Your Tama"
+                  let name = town.name(emu.toy)
                   return HStack(spacing: 12) {
                       Image(systemName: emu.appWaiting ? "dot.radiowaves.left.and.right" : (away ? "figure.walk" : "house.fill"))
                           .font(.title2)
@@ -4604,6 +4641,27 @@ jobs:
                   }
               }
           }
+
+
+          /// Shown for the moment the device is connecting: the town picture with a
+          /// friendly status, instead of a spinner over a store that isn't needed yet.
+          struct ArrivalView: View {
+              let status: String
+              var body: some View {
+                  ZStack {
+                      LinearGradient(colors: [Color(red: 1, green: 0.85, blue: 0.93), Color(red: 0.86, green: 0.9, blue: 1)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
+                      VStack(spacing: 10) {
+                          Text("Tamatown")
+                              .font(.system(size: 40, weight: .black, design: .rounded))
+                              .foregroundStyle(LinearGradient(colors: [.pink, .purple], startPoint: .leading, endPoint: .trailing))
+                          ProgressView().tint(.pink)
+                          Text(status.isEmpty ? "Connecting…" : status)
+                              .font(.system(.headline, design: .rounded))
+                              .foregroundStyle(Color(red: 0.35, green: 0.2, blue: 0.45))
+                      }
+                  }
+              }
+          }
           TAMA_EOF
           cat > ios/TamaiOS/Tamatown/Town.swift <<'TAMA_EOF'
           import SwiftUI
@@ -4832,6 +4890,8 @@ jobs:
                   var married: [String] = []
                   /// Things bought for this toy that haven't reached it yet (souvenirs).
                   var bag: [BagItem]? = nil
+                  /// The Tamagotchi's own name, as the device reported it.
+                  var tamaName: String? = nil
               }
 
               struct BagItem: Codable, Identifiable, Equatable {
@@ -4908,6 +4968,26 @@ jobs:
                   if let d = try? Data(contentsOf: stateURL(toy)), let x = try? JSONDecoder().decode(State.self, from: d) { s = x }
                   stateCache[toy.id] = s
                   return s
+              }
+
+              /// The Tamagotchi's name (from the device), for messages. Falls back to "your Tama".
+              func name(_ toy: Toy?) -> String {
+                  guard let toy else { return "Your Tama" }
+                  if let n = visitInfo(toy)?.name, !n.isEmpty { return n.capitalized }
+                  if let n = state(toy).tamaName, !n.isEmpty { return n }
+                  return "Your Tama"
+              }
+
+              /// Read the name out of a device's hello answer or visit data.
+              static func decodeName(_ bytes: [UInt8]) -> String {
+                  guard bytes.count > 0x70 else { return "" }
+                  var p: UnsafeMutablePointer<UInt8>? = nil
+                  var n = 0
+                  bytes.withUnsafeBufferPointer { tg_mm_visit_name($0.baseAddress, $0.count, &p, &n) }
+                  guard let p else { return "" }
+                  let s = String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
+                  tg_free(p, n)
+                  return s.capitalized
               }
 
               /// Store what the device sent when it came to town.
@@ -5013,10 +5093,7 @@ jobs:
                   return nil
               }
               private var st: Town.State { toy.map { town.state($0) } ?? Town.State() }
-              private var tamaName: String {
-                  if let t = toy, let n = town.visitInfo(t)?.name, !n.isEmpty { return n.capitalized }
-                  return toy?.name ?? "Your Tama"
-              }
+              private var tamaName: String { town.name(toy) }
 
               var body: some View {
                   VStack(alignment: .leading, spacing: 16) {
@@ -5099,7 +5176,7 @@ jobs:
 
               private var visitCard: some View {
                   TownCard(tint: .pink) {
-                      Label("\(toy?.name ?? "Your Tama") isn't in town yet", systemImage: "figure.walk.motion")
+                      Label("\(tamaName) isn't in town yet", systemImage: "figure.walk.motion")
                           .font(.system(.headline, design: .rounded)).foregroundStyle(.pink)
                       Text("On the device choose Connection › App › Visit. TamaiOS brings your Tama to town by itself, then you can come here to meet someone. 💕")
                           .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
@@ -5587,8 +5664,14 @@ jobs:
                       if open { model.openTown = false; showApp = true }
                   }
                   .onChange(of: emu.appWaiting) { waiting in
-                      // the toy chose Connection › App: open the built-in app, like the phone did
-                      if waiting && !showSettings { showApp = true }
+                      // the device chose Connection › App, like with the phone app:
+                      // coming home from Tamatown is handled quietly; anything else opens Tamatown
+                      guard waiting, !showSettings else { return }
+                      if let t = emu.toy, Town.shared.state(t).away {
+                          AppLink.shared.start(emu: emu) {}
+                      } else {
+                          showApp = true
+                      }
                   }
                   .confirmationDialog("Restore this backup?", isPresented: Binding(get: { model.pendingBackup != nil }, set: { if !$0 { model.pendingBackup = nil } }), titleVisibility: .visible) {
                       Button("Restore", role: .destructive) {
@@ -6218,7 +6301,8 @@ jobs:
                           dt = 0
                       }
                       let t0 = CACurrentMediaTime()
-                      code = tg_tick(h, dt)
+                      // during a Bluetooth transfer the device runs 3x faster, so it's over sooner
+                      code = tg_tick(h, linkBusy ? min(dt * 3, 0.1) : dt)
                       stats.lastTickMs = (CACurrentMediaTime() - t0) * 1000
                       stats.ticks += 1
                       flags = tg_take_flags(h)

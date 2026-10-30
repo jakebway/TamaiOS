@@ -1,9 +1,7 @@
-# TamaiOS — Tamagotchi ON / Meets emulator for iPhone (bring your own ROM).
-# Optional: put your own dump at firmware/<anything>.bin in this repo (keep the
-# repo PRIVATE) and it is built into the app, which then opens straight to it.
-# Upload this file to .github/workflows/build.yml in a GitHub repo.
-# Every push (or "Run workflow" on the Actions tab) builds an unsigned
-# TamaiOS.ipa, downloadable from the run's "Artifacts" section.
+# TamaiOS — three bundled English device variants.
+# Commit this complete file as .github/workflows/build.yml.
+# Requires all three existing 8 MiB firmware files in firmware/.
+# Builds an unsigned IPA; first setup offers Fairy, Magic, or Wonder Garden.
 name: Build TamaiOS
 
 on:
@@ -2656,7 +2654,6 @@ jobs:
           def skyscraper(cx, base):
               lavender, mint, cream = (172, 161, 235), (169, 229, 224), (255, 245, 216)
               top = base - u(610)
-              # Shared ground shadow anchors the entrance and both side wings.
               shadow(lambda g: g.ellipse((cx - u(258), base - u(18), cx + u(258), base + u(53)), fill=255), off=(6, 7), blur=16, alpha=65)
               for side in (-1, 1):
                   x = cx + side * u(178)
@@ -2677,22 +2674,18 @@ jobs:
                       d.line([(x - u(18), y + u(10)), (x - u(18), y + u(41))], fill=(249, 255, 255), width=max(1, int(u(4))))
                       d.line([(x - u(21), y + u(50)), (x + u(21), y + u(50))], fill=(151, 214, 228), width=max(1, int(u(2))))
                   d.line([(cx - u(130), y + u(69)), (cx + u(130), y + u(69))], fill=(248, 225, 182), width=max(1, int(u(4))))
-              # Overlapping crown sections form one continuous silhouette.
               rrect((cx - u(126), top - u(106), cx + u(126), top + u(8)), u(20), lavender, top=(236, 226, 255))
               for offset in (-66, 0, 66):
                   x = cx + u(offset)
                   rrect((x - u(19), top - u(79), x + u(19), top - u(32)), u(10), (123, 201, 219), top=(222, 250, 255), width=max(1, int(u(3))))
-              # Dome ends at its equator; a visible drum bridges it to the cornice.
-              drum_top, drum_bottom = top - u(150), top - u(100)
-              rrect((cx - u(65), drum_top, cx + u(65), drum_bottom), u(5), mint, top=(223, 252, 242))
-              dome_box = (cx - u(65), top - u(215), cx + u(65), top - u(85))
-              d.pieslice(dome_box, 180, 360, fill=mint, outline=INK, width=LW)
+              # Drum overlaps dome equator and crown: no floating roof.
+              rrect((cx - u(65), top - u(150), cx + u(65), top - u(100)), u(5), mint, top=(223, 252, 242))
+              d.pieslice((cx - u(65), top - u(215), cx + u(65), top - u(85)), 180, 360, fill=mint, outline=INK, width=LW)
               d.arc((cx - u(46), top - u(204), cx + u(46), top - u(96)), 195, 258, fill=(239, 255, 248), width=max(1, int(u(6))))
               d.line([(cx, top - u(212)), (cx, top - u(247))], fill=INK, width=max(1, int(u(5))))
               star(cx, top - u(254), u(20), (255, 224, 136))
               rrect((cx - u(140), top - u(118), cx + u(140), top - u(96)), u(9), cream)
               rrect((cx - u(192), top - u(17), cx + u(192), top + u(23)), u(14), mint, top=(226, 255, 247))
-              # A glass arch and layered steps keep the lobby visually grounded.
               rrect((cx - u(108), base - u(155), cx + u(108), base - u(121)), u(13), cream, top=(255, 253, 237))
               rrect((cx - u(68), base - u(130), cx + u(68), base + u(4)), u(33), (93, 83, 149))
               rrect((cx - u(53), base - u(112), cx + u(53), base + u(2)), u(26), (156, 222, 220), top=(224, 255, 246), width=max(1, int(u(3))))
@@ -2746,10 +2739,10 @@ jobs:
               platform: iOS
               sources:
                 - path: TamaiOS
-                  excludes: ["Firmware.bin"]
-                - path: TamaiOS/Firmware.bin
+                  excludes: ["Firmware.bin", "BundledFirmware"]
+                - path: TamaiOS/BundledFirmware
+                  type: folder
                   buildPhase: resources
-                  optional: true
               settings:
                 base:
                   PRODUCT_BUNDLE_IDENTIFIER: com.jakebway.tamaios
@@ -2957,13 +2950,9 @@ jobs:
               @Published var pendingBackup: URL?
               /// Ask the toy screen to open Tamatown.
               @Published var openTown = false
+              @Published var openPickup = false
 
               init() {
-                  // firmware built into the app (firmware/*.bin in the repo): set up its
-                  // toy automatically, so there's nothing to import
-                  if let t = ToyStore.installBundled(), Prefs.d.string(forKey: "currentToy") == nil {
-                      Prefs.d.set(t.id, forKey: "currentToy")
-                  }
                   toys = ToyStore.list()
                   AppModel.current = self
                   if let t = currentToy { emu.load(t) }
@@ -3000,13 +2989,54 @@ jobs:
                   if let t = currentToy { play(t) }
               }
 
+
+              /// Replace only the selected device's working directory, with rollback on failure.
+              func resetCurrentDevice() throws {
+                  guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else {
+                      throw ImportError.unreadable("Finish the current device operation before resetting.")
+                  }
+                  let fm = FileManager.default
+                  let working = ToyStore.dir(toy.id)
+                  let staging = ToyStore.root.appendingPathComponent(".reset-" + UUID().uuidString, isDirectory: true)
+                  let previous = ToyStore.root.appendingPathComponent(".previous-" + UUID().uuidString, isDirectory: true)
+                  try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+                  defer { try? fm.removeItem(at: staging) }
+                  // Stop all writes before touching saves. unload() saves before closing the core.
+                  emu.unload()
+                  do {
+                      try fm.copyItem(at: ToyStore.romURL(toy.id), to: staging.appendingPathComponent("rom.bin"))
+                      var fresh = toy
+                      fresh.created = Date()
+                      try JSONEncoder().encode(fresh).write(to: staging.appendingPathComponent("toy.json"), options: .atomic)
+                      try fm.moveItem(at: working, to: previous)
+                      do {
+                          try fm.moveItem(at: staging, to: working)
+                      } catch {
+                          try fm.moveItem(at: previous, to: working)
+                          throw error
+                      }
+                      Town.shared.invalidateDeviceCache(toy)
+                      emu.appWaiting = false
+                      emu.holdForApp = false
+                      AppLink.shared.openForDownload = false
+                      AppLink.shared.closeWith = nil
+                      AppLink.shared.lastMessage = nil
+                      toys = ToyStore.list()
+                      Prefs.d.set(fresh.id, forKey: "currentToy")
+                      emu.load(fresh)
+                      try? fm.removeItem(at: previous)
+                  } catch {
+                      emu.load(toy)
+                      throw error
+                  }
+              }
+
               /// A file shared into the app (Files "Open in", AirDrop, Share sheet).
               func open(_ url: URL) {
                   if url.pathExtension.lowercased() == "tamaios" {
                       pendingBackup = url
                   } else {
-                      pendingImport = url
-                      showAdd = true
+                      emu.say("All three device variants are included. Use Settings › Add Device to choose one.")
                   }
               }
           }
@@ -3036,18 +3066,81 @@ jobs:
               var body: some View {
                   Group {
                       if model.toys.isEmpty {
-                          AddToyView(firstRun: true)
+                          BundledDevicePicker(firstRun: true)
                       } else {
                           DeviceView()
                               .onAppear { Town.shared.loadIfPresent() }   // Tamatown ready before it's needed
                               .sheet(isPresented: $model.showAdd) {
-                                  AddToyView(firstRun: false).environmentObject(model).environmentObject(model.emu)
+                                  BundledDevicePicker(firstRun: false).environmentObject(model).environmentObject(model.emu)
                               }
                       }
                   }
                   .preferredColorScheme(nil)
               }
           }
+          /// Shown only when no device exists, or explicitly through Add Device.
+          struct BundledDevicePicker: View {
+              var firstRun: Bool
+              @EnvironmentObject private var model: AppModel
+              @Environment(\.dismiss) private var dismiss
+              @State private var installing = false
+              @State private var errorMessage: String?
+
+              var body: some View {
+                  NavigationStack {
+                      ScrollView {
+                          VStack(spacing: 18) {
+                              Image(systemName: "sparkles").font(.largeTitle).foregroundStyle(.pink)
+                              Text(firstRun ? "Choose Your Device" : "Add a Device")
+                                  .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                              Text("Three worlds, ready to hatch. Everything you need is included.")
+                                  .font(.system(.subheadline, design: .rounded))
+                                  .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                              ForEach(BundledVariant.all) { variant in
+                                  Button { install(variant) } label: {
+                                      HStack(spacing: 18) {
+                                          EggBadge(theme: Theme.of(variant.color)).frame(width: 52, height: 65)
+                                          VStack(alignment: .leading, spacing: 4) {
+                                              Text(variant.name).font(.system(.title3, design: .rounded).weight(.bold))
+                                              Text("English • Included").font(.caption).foregroundStyle(.secondary)
+                                          }
+                                          Spacer()
+                                          Image(systemName: "chevron.right").font(.headline)
+                                      }
+                                      .padding(20).background(RoundedRectangle(cornerRadius: 24).fill(Color(.secondarySystemBackground)))
+                                  }
+                                  .buttonStyle(.plain).disabled(installing)
+                              }
+                              if installing { ProgressView("Preparing your device…") }
+                          }.padding(24)
+                      }
+                      .background(LinearGradient(colors: [Color.pink.opacity(0.08), Color.purple.opacity(0.06)], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
+                      .toolbar {
+                          if !firstRun {
+                              ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(installing) }
+                          }
+                      }
+                      .alert("Couldn't prepare your device", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+                          Button("OK", role: .cancel) {}
+                      } message: { Text(errorMessage ?? "") }
+                  }
+              }
+
+              private func install(_ variant: BundledVariant) {
+                  guard !installing else { return }
+                  installing = true
+                  DispatchQueue.main.async {
+                      do {
+                          let toy = try ToyStore.installBundled(variant)
+                          model.added(toy)
+                      } catch {
+                          errorMessage = error.localizedDescription
+                          installing = false
+                      }
+                  }
+              }
+          }
+
           TAMA_EOF
           cat > ios/TamaiOS/Tamatown/ArcadeView.swift <<'TAMA_EOF'
           import SwiftUI
@@ -5087,6 +5180,14 @@ jobs:
                   cacheLock.lock(); visitCache[toy.id] = nil; cacheLock.unlock()
               }
 
+              func invalidateDeviceCache(_ toy: Toy) {
+                  cacheLock.lock()
+                  stateCache[toy.id] = nil
+                  visitCache[toy.id] = nil
+                  cacheLock.unlock()
+                  objectWillChange.send()
+              }
+
               func save(_ s: State, _ toy: Toy) {
                   cacheLock.lock(); stateCache[toy.id] = s; cacheLock.unlock()
                   if let d = try? JSONEncoder().encode(s) { try? d.write(to: stateURL(toy), options: .atomic) }
@@ -5761,6 +5862,12 @@ jobs:
                           if let t = emu.toy, Town.shared.state(t).away, !showApp, !showSettings, !emu.appWaiting { showApp = true }
                       }
                   }
+                  .background(Color.clear.sheet(isPresented: $model.openPickup) {
+                      NavigationStack {
+                          TamaDepotView()
+                              .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.openPickup = false } } }
+                      }.environmentObject(emu)
+                  })
                   .onChange(of: model.openTown) { open in
                       if open { model.openTown = false; showApp = true }
                   }
@@ -6919,7 +7026,7 @@ jobs:
                   let fm = FileManager.default
                   guard let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
                   let dec = JSONDecoder()
-                  return items.compactMap { u in
+                  return items.filter { !$0.lastPathComponent.hasPrefix(".") }.compactMap { u in
                       guard let d = try? Data(contentsOf: u.appendingPathComponent("toy.json")),
                             let t = try? dec.decode(Toy.self, from: d),
                             fm.fileExists(atPath: romURL(t.id).path) else { return nil }
@@ -7002,17 +7109,29 @@ jobs:
               }
           }
 
-          extension ToyStore {
-              /// The firmware built into this copy of the app, if any.
-              static var bundledFirmware: URL? { Bundle.main.url(forResource: "Firmware", withExtension: "bin") }
+          struct BundledVariant: Identifiable {
+              let id: String
+              let name: String
+              let filename: String
+              let color: Int
 
-              /// Make (or find) the toy for the built-in firmware.
-              static func installBundled() -> Toy? {
-                  guard let url = bundledFirmware,
-                        let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-                        let c = try? check(data) else { return nil }
-                  if let t = list().first(where: { $0.id == c.stem }) { return t }
-                  return try? create(c, name: c.shortName, color: 0)
+              static let all: [BundledVariant] = [
+                  BundledVariant(id: "fairy", name: "Fairy", filename: "fw_tg18_en_v057_2019-05-13_fairy", color: 0),
+                  BundledVariant(id: "magic", name: "Magic", filename: "fw_tg18_en_v058_2019-05-13_magic", color: 4),
+                  BundledVariant(id: "wondergarden", name: "Wonder Garden", filename: "fw_tg18_en_v063_2020-02-13_wondergarden", color: 5)
+              ]
+          }
+
+          extension ToyStore {
+              static func installBundled(_ variant: BundledVariant) throws -> Toy {
+                  guard let url = Bundle.main.url(forResource: variant.filename, withExtension: "bin", subdirectory: "BundledFirmware") else {
+                      throw ImportError.unreadable("The bundled \(variant.name) firmware is missing. Reinstall a complete build.")
+                  }
+                  let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                  let checked = try check(data)
+                  // Choosing an existing variant resumes it instead of overwriting its save.
+                  if let existing = list().first(where: { $0.id == checked.stem }) { return existing }
+                  return try create(checked, name: variant.name, color: variant.color)
               }
           }
 
@@ -7718,6 +7837,7 @@ jobs:
 
               @State private var name = ""
               @State private var confirmRestart = false
+              @State private var showReset = false
               enum SettingsSheet: Identifiable {
                   case share(URL), picker
                   var id: String { if case .share(let u) = self { return u.path }; return "picker" }
@@ -7779,16 +7899,15 @@ jobs:
                           Section {
                               Button {
                                   dismiss()
-                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.openTown = true }
+                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.openPickup = true }
                               } label: {
-                                  Label("Tamatown", systemImage: "building.columns.fill")
+                                  Label("TamaDepot In-Store Pick Up", systemImage: "bag.fill")
                               }
                           } footer: {
-                              Text("Works like the old Tamagotchi app: on the device choose Connection › App. Visit takes your Tama to Tamatown; Download gets new items. It opens by itself.")
+                              Text("Browse items and add them to your bag. On your Tama, choose Connection › App › Download to pick them up.")
                           }
 
                           Section("Help") {
-                              NavigationLink { DumpHelpContent() } label: { Label("ROM Dumping Guide", systemImage: "questionmark.circle") }
                               NavigationLink { ConsoleView() } label: { Label("Console", systemImage: "terminal.fill") }
                           }
 
@@ -7796,7 +7915,16 @@ jobs:
                               Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
                                   .font(.footnote).foregroundStyle(.secondary)
                           }
+                          Section {
+                              Button(role: .destructive) { showReset = true } label: {
+                                  Label("Reset Device…", systemImage: "exclamationmark.triangle.fill")
+                              }
+                              .disabled(emu.toy == nil || emu.loading || AppLink.shared.busy)
+                          } header: { Text("Danger Zone") } footer: {
+                              Text("Erase this Tama and start fresh. Its device variant, other devices, and exported backups are kept.")
+                          }
                       }
+                      .sheet(isPresented: $showReset) { ResetDeviceView().environmentObject(model).environmentObject(emu) }
                       .navigationTitle("Settings")
                       .navigationBarTitleDisplayMode(.inline)
                       .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { if let t = emu.toy { rename(t) }; dismiss() } } }
@@ -7958,6 +8086,50 @@ jobs:
                   console.runScript(t, emu: emu)
               }
           }
+          struct ResetDeviceView: View {
+              @EnvironmentObject private var model: AppModel
+              @EnvironmentObject private var emu: Emulator
+              @Environment(\.dismiss) private var dismiss
+              @State private var confirmation = ""
+              @State private var errorMessage: String?
+              @State private var resetting = false
+
+              var body: some View {
+                  NavigationStack {
+                      Form {
+                          Section {
+                              Label("Erase and Start Over", systemImage: "exclamationmark.triangle.fill")
+                                  .foregroundStyle(.red).font(.headline)
+                              Text("This erases \(emu.toy?.name ?? "this device")'s Tama, generation history, saves, and pickup bag. It cannot be undone unless you have an exported backup.")
+                              Text("The same device variant starts fresh. Other devices and exported backups are not erased.")
+                          }
+                          Section("Type RESET to confirm") {
+                              TextField("RESET", text: $confirmation)
+                                  .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                              Button("Erase and Start Over", role: .destructive) {
+                                  guard confirmation == "RESET", !resetting else { return }
+                                  resetting = true
+                                  do {
+                                      try model.resetCurrentDevice()
+                                      dismiss()
+                                  } catch {
+                                      errorMessage = error.localizedDescription
+                                      resetting = false
+                                  }
+                              }.disabled(confirmation != "RESET" || resetting)
+                          }
+                      }
+                      .navigationTitle("Reset Device")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(resetting) } }
+                      .interactiveDismissDisabled(resetting)
+                      .alert("Couldn't reset", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+                          Button("OK", role: .cancel) {}
+                      } message: { Text(errorMessage ?? "") }
+                  }
+              }
+          }
+
           TAMA_EOF
           mkdir -p patches
           base64 --decode > patches/radio.patch <<'TAMA_EOF'
@@ -8188,17 +8360,30 @@ jobs:
           TAMA_EOF
           echo "Wrote $(ls -R ffi ios tools patches | wc -l) entries"
 
-      - name: Build in your firmware (firmware/*.bin, if you added one)
+      - name: Bundle Fairy, Magic, and Wonder Garden firmware
         run: |
-          f=$(ls firmware/*.bin 2>/dev/null | head -1 || true)
-          if [ -n "$f" ]; then
-            size=$(wc -c < "$f" | tr -d ' ')
-            if [ "$size" -lt 8388608 ]; then echo "::error::$f is $size bytes; a Tamagotchi ON dump is 8 MB (8388608 bytes)"; exit 1; fi
-            cp "$f" ios/TamaiOS/Firmware.bin
-            echo "Built in $f ($size bytes) - the app will open straight to this toy"
-          else
-            echo "No firmware/*.bin in the repo - the app will ask you to pick a ROM"
-          fi
+          python3 - <<'BUNDLE_FIRMWARE'
+          from pathlib import Path
+          import shutil
+          variants = [
+              "fw_tg18_en_v057_2019-05-13_fairy.bin",
+              "fw_tg18_en_v058_2019-05-13_magic.bin",
+              "fw_tg18_en_v063_2020-02-13_wondergarden.bin",
+          ]
+          destination = Path("ios/TamaiOS/BundledFirmware")
+          if destination.exists():
+              shutil.rmtree(destination)
+          destination.mkdir(parents=True)
+          for filename in variants:
+              source = Path("firmware") / filename
+              if not source.is_file() or source.stat().st_size != 8388608:
+                  raise SystemExit(f"Missing or invalid firmware: {source}; expected exactly 8388608 bytes")
+              shutil.copyfile(source, destination / filename)
+              print(f"Bundled {filename}")
+          legacy = Path("ios/TamaiOS/Firmware.bin")
+          if legacy.exists():
+              legacy.unlink()
+          BUNDLE_FIRMWARE
 
       - name: Get the emulator core (tg18-emu by oreo-fox, MIT licence) + Bluetooth patch
         run: |
@@ -8249,6 +8434,27 @@ jobs:
           test -s TamaiOS.ipa
           unzip -t TamaiOS.ipa
           ls -lh TamaiOS.ipa
+
+      - name: Verify all three firmware images inside the IPA
+        run: |
+          python3 - <<'VERIFY_FIRMWARE'
+          from pathlib import Path
+          import hashlib
+          import zipfile
+          names = [
+              "fw_tg18_en_v057_2019-05-13_fairy.bin",
+              "fw_tg18_en_v058_2019-05-13_magic.bin",
+              "fw_tg18_en_v063_2020-02-13_wondergarden.bin",
+          ]
+          with zipfile.ZipFile("ios/TamaiOS.ipa") as ipa:
+              for name in names:
+                  member = f"Payload/TamaiOS.app/BundledFirmware/{name}"
+                  bundled = ipa.read(member)
+                  original = (Path("firmware") / name).read_bytes()
+                  if len(bundled) != 8388608 or hashlib.sha256(bundled).digest() != hashlib.sha256(original).digest():
+                      raise SystemExit(f"Firmware verification failed: {name}")
+                  print(f"Verified in IPA: {name}")
+          VERIFY_FIRMWARE
 
       - name: Upload the IPA
         uses: actions/upload-artifact@v4

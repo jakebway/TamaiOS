@@ -3030,13 +3030,14 @@ jobs:
               @State private var timeLeft: Double = 0
               @State private var score = 0
               @State private var holes: [Suitor?] = Array(repeating: nil, count: 9)
+              @State private var lastShown: [Suitor?] = Array(repeating: nil, count: 9)
               @State private var shownAt: [Double] = Array(repeating: 0, count: 9)
               @State private var bursts: [Int: Double] = [:]      // hole -> time of the "+50"
               @State private var clock: Double = 0
               @State private var ticks = 0
 
-              private let length: Double = 30
-              private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+              private let length: Double = 25
+              private let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
               var body: some View {
                   ScrollView {
@@ -3046,7 +3047,6 @@ jobs:
                               .aspectRatio(0.9, contentMode: .fit)
                               .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
                               .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(Color.white, lineWidth: 4))
-                              .shadow(color: .purple.opacity(0.25), radius: 12, y: 6)
                           Text("Gotchi Points go to your Tama by themselves when it comes home from Tamatown.")
                               .font(.system(.caption, design: .rounded)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                       }
@@ -3101,13 +3101,12 @@ jobs:
 
               private func tama(_ i: Int, _ size: CGFloat) -> some View {
                   let up = holes[i] != nil
-                  let lift: CGFloat = up ? -size * 0.20 : size * 0.15
-                  let img = holes[i].flatMap { town.image($0) }
+                  // up: peeking over the bush; down: tucked behind it (the cell clips the rest)
+                  let lift: CGFloat = up ? -size * 0.24 : size * 0.30
+                  let img = lastShown[i].flatMap { town.image($0) }
                   return CharacterPicture(image: img)
                       .frame(width: size * 0.62, height: size * 0.62)
-                      .opacity(up ? 1 : 0)
                       .offset(y: lift)
-                      .mask(Rectangle().frame(width: size, height: size * 0.82).offset(y: -size * 0.18))
               }
 
               private func chip(icon: String, tint: Color, text: String) -> some View {
@@ -3148,25 +3147,17 @@ jobs:
 
               private func hole(_ i: Int, size: CGFloat) -> some View {
                   ZStack(alignment: .bottom) {
-                      // back of the bush
-                      Ellipse().fill(Color(red: 0.27, green: 0.55, blue: 0.30))
-                          .frame(width: size * 0.78, height: size * 0.34)
-                          .offset(y: -size * 0.12)
                       // the Tama, popping up from behind the bush
                       tama(i, size)
-                      // front of the bush
-                      ZStack {
-                          Ellipse().fill(Color(red: 0.36, green: 0.68, blue: 0.36))
-                              .frame(width: size * 0.86, height: size * 0.30)
-                          Ellipse().fill(Color.white.opacity(0.25))
-                              .frame(width: size * 0.40, height: size * 0.08)
-                              .offset(x: -size * 0.14, y: -size * 0.06)
-                      }
+                      // the bush in front (drawn once, never redrawn)
+                      BushView(size: size, variant: i % 3).equatable()
+                          .frame(width: size, height: size * 0.46)
                       if let t = bursts[i] {
                           burst(clock - t, size)
                       }
                   }
                   .frame(width: size, height: size * 0.82)
+                  .clipped()
                   .contentShape(Rectangle())
                   .onTapGesture { tap(i) }
               }
@@ -3225,26 +3216,27 @@ jobs:
               }
 
               private func tick() {
-                  clock += 0.1
+                  clock += 0.05
                   ticks += 1
-                  bursts = bursts.filter { clock - $0.value < 0.7 }
+                  if !bursts.isEmpty { bursts = bursts.filter { clock - $0.value < 0.7 } }
                   switch phase {
                   case .countdown:
-                      if ticks % 10 == 0 {
+                      if ticks % 20 == 0 {
                           if count > 1 { withAnimation(.spring()) { count -= 1 } } else { timeLeft = length; withAnimation { phase = .playing } }
                       }
                   case .playing:
-                      timeLeft -= 0.1
+                      timeLeft -= 0.05
                       if timeLeft <= 0 { finish(); return }
-                      let stay = 0.6 + 0.7 * (timeLeft / length)
+                      let stay = 0.45 + 0.55 * (timeLeft / length)
                       for i in 0..<9 where holes[i] != nil && clock - shownAt[i] > stay {
-                          withAnimation(.easeIn(duration: 0.15)) { holes[i] = nil }
+                          withAnimation(.easeIn(duration: 0.12)) { holes[i] = nil }
                       }
-                      if holes.compactMap({ $0 }).count < 3 && Double.random(in: 0...1) < 0.4 {
+                      if holes.compactMap({ $0 }).count < 4 && Double.random(in: 0...1) < 0.35 {
                           let free = (0..<9).filter { holes[$0] == nil && bursts[$0] == nil }
                           if let i = free.randomElement(), let t = randomTama() {
                               shownAt[i] = clock
-                              withAnimation(.spring(response: 0.25, dampingFraction: 0.55)) { holes[i] = t }
+                              lastShown[i] = t
+                              withAnimation(.spring(response: 0.18, dampingFraction: 0.6)) { holes[i] = t }
                           }
                       }
                   default: break
@@ -3263,7 +3255,51 @@ jobs:
                   score += 1
                   bursts[i] = clock
                   if haptics { Haptics.tap() }
-                  withAnimation(.easeOut(duration: 0.12)) { holes[i] = nil }
+                  withAnimation(.easeOut(duration: 0.08)) { holes[i] = nil }
+              }
+          }
+
+
+          /// A round, leafy bush: a cluster of outlined puffs with highlights and a few
+          /// berries. Equatable, so SwiftUI draws it once instead of on every game tick.
+          struct BushView: View, Equatable {
+              let size: CGFloat
+              let variant: Int
+
+              private static let ink = Color(red: 0.16, green: 0.33, blue: 0.18)
+              private static let leaf = [Color(red: 0.38, green: 0.74, blue: 0.36), Color(red: 0.34, green: 0.68, blue: 0.40), Color(red: 0.42, green: 0.76, blue: 0.32)]
+              private static let light = Color(red: 0.62, green: 0.88, blue: 0.50)
+              private static let berry = [Color(red: 1.0, green: 0.45, blue: 0.55), Color(red: 1.0, green: 0.82, blue: 0.35), Color.white]
+              // puffs as (x, y, radius) in units of the bush width, y from the bottom
+              private static let puffs: [(CGFloat, CGFloat, CGFloat)] = [
+                  (0.15, 0.16, 0.15), (0.33, 0.26, 0.17), (0.52, 0.28, 0.18), (0.70, 0.24, 0.17), (0.86, 0.15, 0.13),
+                  (0.08, 0.07, 0.10), (0.30, 0.10, 0.18), (0.55, 0.10, 0.20), (0.78, 0.09, 0.15)]
+
+              var body: some View {
+                  Canvas { ctx, sz in
+                      let w = sz.width * 0.92, x0 = sz.width * 0.04, base = sz.height
+                      func circle(_ p: (CGFloat, CGFloat, CGFloat), grow: CGFloat) -> Path {
+                          let r = p.2 * w + grow
+                          return Path(ellipseIn: CGRect(x: x0 + p.0 * w - r, y: base - p.1 * w - r, width: r * 2, height: r * 2))
+                      }
+                      let leaf = BushView.leaf[variant % 3]
+                      // outline: every puff a little bigger, in dark green
+                      for p in BushView.puffs { ctx.fill(circle(p, grow: max(2, w * 0.025)), with: .color(BushView.ink)) }
+                      for p in BushView.puffs { ctx.fill(circle(p, grow: 0), with: .color(leaf)) }
+                      // soft shading on the lower half, highlights on the top puffs
+                      ctx.fill(Path(CGRect(x: 0, y: base - w * 0.10, width: sz.width, height: w * 0.10)), with: .color(BushView.ink.opacity(0.18)))
+                      for p in BushView.puffs.prefix(5) {
+                          let r = p.2 * w * 0.42
+                          ctx.fill(Path(ellipseIn: CGRect(x: x0 + p.0 * w - r * 1.2, y: base - p.1 * w - p.2 * w * 0.55 - r * 0.5, width: r * 1.6, height: r)),
+                                   with: .color(BushView.light.opacity(0.85)))
+                      }
+                      // a few berries
+                      for (k, p) in [(0.28, 0.20), (0.62, 0.18), (0.80, 0.14)].enumerated() {
+                          let r = w * 0.035
+                          ctx.fill(Path(ellipseIn: CGRect(x: x0 + CGFloat(p.0) * w - r, y: base - CGFloat(p.1) * w - r, width: r * 2, height: r * 2)),
+                                   with: .color(BushView.berry[(k + variant) % 3]))
+                      }
+                  }
               }
           }
           TAMA_EOF
@@ -4037,6 +4073,10 @@ jobs:
                       connect()
                   }
                   .onChange(of: emu.appWaiting) { w in if w { connect() } }
+                  .onChange(of: path) { p in
+                      // Home = leave Tamatown; the device then asks "GO BACK?"
+                      if p.last == .home { path.removeLast(); dismiss() }
+                  }
                   .onChange(of: link.closeWith) { m in
                       guard let m else { return }
                       link.closeWith = nil
@@ -4095,7 +4135,7 @@ jobs:
               }
               var blurb: String {
                   switch self {
-                  case .home: return "Visit town, come home, family album"
+                  case .home: return "Leave Tamatown and head home"
                   case .party: return "Dates, marriage & gene mixing"
                   case .arcade: return "Play games, win Gotchi Points"
                   case .depa: return "Shop food, items, places & more"
@@ -4283,7 +4323,7 @@ jobs:
 
               private func buildings(_ w: CGFloat, _ h: CGFloat) -> some View {
                   ZStack {
-                      Button { go(.home) } label: { castle(w: w, h: h) }
+                      Button { go(.party) } label: { castle(w: w, h: h) }
                           .buttonStyle(.plain)
                           .position(x: w * 0.5, y: h * 0.47)
                       Button { go(.party) } label: { partyHall(w: w, h: h) }
@@ -4355,6 +4395,7 @@ jobs:
                       hotspot(.party, w, h, 1.0 / 6)
                       hotspot(.depa, w, h, 0.5)
                       hotspot(.arcade, w, h, 5.0 / 6)
+                      cornerButton("house.fill", "Home", .orange) { go(.home) }.position(x: 34, y: 34)
                       cornerButton("gearshape.fill", "Settings", .pink) { go(.settings) }.position(x: w - 34, y: 34)
                       walkersLayer(w, h)
                       HStack(spacing: w * 0.02) {
@@ -5043,7 +5084,7 @@ jobs:
                       suitorGrid
                       comeHomeHint
                   }
-                  if mode == .home && !st.married.isEmpty {
+                  if !st.married.isEmpty {
                       TownCard(tint: .yellow) {
                           Label("Family album", systemImage: "heart.text.square.fill")
                               .font(.system(.headline, design: .rounded)).foregroundStyle(.orange)

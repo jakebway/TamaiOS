@@ -1,9 +1,10 @@
 # TamaiOS — complete inline app source, Bluetooth patch, and regression tests.
-# Compile correction: scoped purchase mutation and immutable character IDs.
-# Download reliability, Daytime Mode, care banners, three bundled variants,
-# saves, artwork, and sound configuration are preserved.
+# Control-frame compatibility correction: accept complete mandatory headers
+# in extended acknowledgements, including the observed Wonder Garden 8-byte ACK.
+# Explicit completion checks, safe paid-item retries, and all prior features remain.
+# Includes the purchase-array compile correction and immutable character-ID cleanup.
 # Save as .github/workflows/build.yml; keep all three firmware/*.bin files.
-# No prior TamaiOS commit is required; standard build dependencies are fetched.
+# No previous TamaiOS commit is needed; standard build dependencies are fetched.
 name: Build TamaiOS
 'on':
   workflow_dispatch: {}
@@ -4169,7 +4170,7 @@ jobs:
                     if let frame = read() {
                         received = true
                         last = ProcessInfo.processInfo.systemUptime
-                        let preview = frame.prefix(12).map { String(format: "%02X", $0) }.joined(separator: " ")
+                        let preview = frame.prefix(20).map { String(format: "%02X", $0) }.joined(separator: " ")
                         emu.note("transfer RX bytes=\(frame.count) head=\(preview)")
                         switch try reply.consume(frame) {
                         case .requestData: try write([0xF0, 0x8E, 0x0D])
@@ -9074,6 +9075,7 @@ jobs:
             private(set) var expected: Int?
             private(set) var finalAck = false
             private(set) var dataEnded = false
+            private(set) var controlExtension: [UInt8] = []
             private var requested = false
 
             init(requiresPayload: Bool = false, requiresFinalAck: Bool = false) {
@@ -9081,8 +9083,10 @@ jobs:
                 self.requiresFinalAck = requiresFinalAck
             }
             var summary: String {
-                "expected=\(expected.map(String.init) ?? "none") received=\(payload.count) finalAck=\(finalAck) dataEnded=\(dataEnded)"
+                "expected=\(expected.map(String.init) ?? "none") received=\(payload.count) finalAck=\(finalAck) dataEnded=\(dataEnded) extensionBytes=\(controlExtension.count)"
             }
+            // Control notifications may contain bytes beyond their mandatory header.
+            // Keep those bytes available for diagnostics without guessing their meaning.
             mutating func consume(_ frame: [UInt8]) throws -> Event {
                 guard !frame.isEmpty else { return .waiting }
                 // While payload bytes remain, control-looking bytes are still payload.
@@ -9094,7 +9098,8 @@ jobs:
                 let tag: UInt16 = frame.count >= 2 ? UInt16(frame[0]) | UInt16(frame[1]) << 8 : 0
                 switch tag {
                 case 0x0CF0:
-                    guard frame.count == 4 else { throw TransferProtocolError.malformed("truncated acknowledgement") }
+                    guard frame.count >= 4 else { throw TransferProtocolError.malformed("truncated acknowledgement") }
+                    controlExtension = Array(frame.dropFirst(4))
                     let status = UInt16(frame[2]) | UInt16(frame[3]) << 8
                     if status == 0x0200 {
                         finalAck = true
@@ -9106,16 +9111,18 @@ jobs:
                     if !requested { requested = true; return .requestData }
                     return .waiting
                 case 0x0DF0:
-                    guard frame.count == 4, expected == nil else { throw TransferProtocolError.malformed("invalid or repeated reply header") }
+                    guard frame.count >= 4, expected == nil else { throw TransferProtocolError.malformed("invalid or repeated reply header") }
+                    controlExtension = Array(frame.dropFirst(4))
                     let size = Int(UInt16(frame[2]) | UInt16(frame[3]) << 8)
                     guard size <= 65535 else { throw TransferProtocolError.malformed("reply is too large") }
                     expected = size
                     payload.reserveCapacity(size)
                     return .waiting
                 case 0x4DF0, 0x5CF0:
-                    guard frame.count == 2, let expected, payload.count == expected else {
+                    guard frame.count >= 2, let expected, payload.count == expected else {
                         throw TransferProtocolError.incomplete("reply ended without its declared payload")
                     }
+                    controlExtension = Array(frame.dropFirst(2))
                     dataEnded = true
                     return requiresFinalAck ? .waiting : .completed
                 default:
@@ -9192,6 +9199,26 @@ jobs:
             mustThrow("wrong declared size") { try TransferPacket.validate(badLength) }
             mustThrow("short packet") { try TransferPacket.validate([1, 2, 3]) }
             mustThrow("oversize packet") { try TransferPacket.validate(packet(65536)) }
+
+            // Wonder Garden trace from build 39: an 8-byte progress acknowledgement.
+            var extendedAck = TransferReply(requiresPayload: true)
+            let observed = try extendedAck.consume([0xF0, 0x0C, 0x02, 0x01, 0x06, 0x06, 0x06, 0x00])
+            if case .requestData = observed { checks += 1 } else { fatalError("extended acknowledgement must request data") }
+            expect(!completed(observed), "258-byte progress acknowledgement is not terminal success")
+            expect(extendedAck.controlExtension == [6, 6, 6, 0], "preserve observed acknowledgement extension")
+            expect(extendedAck.payload.isEmpty, "ack extension never becomes data")
+            _ = try extendedAck.consume([0xF0, 0x0D, 2, 0, 6, 6, 6, 0])
+            _ = try extendedAck.consume([0xAA, 0xBB])
+            expect(completed(try extendedAck.consume([0xF0, 0x4D, 6, 6, 6, 0])), "extended data terminator after complete payload")
+            expect(extendedAck.payload == [0xAA, 0xBB], "reply payload excludes control extensions")
+
+            var extendedFinal = TransferReply(requiresFinalAck: true)
+            expect(completed(try extendedFinal.consume([0xF0, 0x0C, 0, 2, 6, 6, 6, 0])), "extended finished acknowledgement")
+            expect(extendedFinal.finalAck, "extended terminal acknowledgement recorded")
+            var extendedWithoutData = TransferReply(requiresPayload: true)
+            mustThrow("extended final ack still cannot replace hello payload") {
+                _ = try extendedWithoutData.consume([0xF0, 0x0C, 0, 2, 6, 6, 6, 0])
+            }
 
             var ackOnly = TransferReply()
             expect(completed(try ackOnly.consume([0xF0, 0x0C, 0, 2])), "explicit finished acknowledgement")

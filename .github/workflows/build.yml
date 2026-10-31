@@ -1,7 +1,7 @@
 # TamaiOS — all app source and Bluetooth patch embedded directly below.
 # No previous TamaiOS commit or historical source archive is required.
 # Save as .github/workflows/build.yml; keep the three firmware/*.bin files.
-# Current working app retained; adds event-based care notifications and carelog diagnostics.
+# Current working app retained; separate bathroom candidate and care-call notifications.
 # All app source remains embedded here. Standard build dependencies are fetched normally.
 name: Build TamaiOS
 'on':
@@ -7085,12 +7085,14 @@ jobs:
                     if now >= nextCarePoll {
                         nextCarePoll = now + 1
                         let sample = careSample()
+                        let bathroomRaw = bathroomSample()
                         let observedAt = ProcessInfo.processInfo.systemUptime
                         let expectedID = toyID
                         DispatchQueue.main.async {
                             guard let toy = self.toy, toy.id == expectedID else { return }
                             CareAlerts.shared.observe(mask: sample.mask, deviceID: toy.id, name: toy.name,
                                                       source: .poll, observedAt: observedAt, raw: sample.raw, stage: sample.stage)
+                            CareAlerts.shared.observeBathroom(raw: bathroomRaw, deviceID: toy.id, observedAt: observedAt)
                         }
                     }
                     audio.push(audioBuf, n)
@@ -7157,6 +7159,15 @@ jobs:
                     return (mask, rawOK == 1 ? Int(raw) : -1, stageOK == 1 ? Int(stage) : -1)
                 }
                 return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1)
+            }
+
+            private func bathroomSample() -> Int {
+                guard toyID == BathroomEventPolicy.supportedDeviceID else { return -1 }
+                return withCore { h -> Int in
+                    guard tg_profile_attention(h) >= 0 else { return -1 }
+                    var raw: UInt8 = 0
+                    return tg_peek(h, 0xF800_D888, &raw, 1) == 1 ? Int(raw) : -1
+                } ?? -1
             }
 
             private func careCall() {
@@ -8775,7 +8786,7 @@ jobs:
 
         final class CareAlerts: ObservableObject {
             static let shared = CareAlerts()
-            static let revision = "care-alert-events-v1"
+            static let revision = "care-alert-events-v1 / bathroom-candidate-v1"
             typealias Source = CareEventPolicy.Source
             @Published private(set) var status = "Checking notification settings…"
             @Published private(set) var lastError: String?
@@ -8788,6 +8799,9 @@ jobs:
             private let prefix = "tamaios-care-"
             private var generation = 0
             private var policy = CareEventPolicy()
+            private var bathroomPolicy = BathroomEventPolicy()
+            private var bathroomRaw: [String: Int] = [:]
+            private var bathroomRequests: [String: String] = [:]
             private var inFlight: Set<String> = []
             private var lastPollAttempt: [String: Double] = [:]
             private var lastMask: [String: Int] = [:]
@@ -8809,6 +8823,10 @@ jobs:
                 let stage: Int
                 let observedAt: Double
                 let generation: Int
+                let bathroomEpisode: Int
+                var policyKey: String {
+                    CareEventPolicy.deliveryKey(deviceID: deviceID, source: source, bathroomEpisode: bathroomEpisode)
+                }
             }
             private func count(_ key: String) { counters[key, default: 0] += 1 }
             private func record(_ text: String) {
@@ -8925,17 +8943,63 @@ jobs:
                     self.lastPollAttempt[deviceID] = now
                     self.inFlight.insert(deviceID)
                     let event = Event(id: UUID().uuidString, deviceID: deviceID, name: self.petName(deviceID: deviceID),
-                                      source: source, mask: mask, raw: raw, stage: stage, observedAt: observedAt, generation: self.generation)
+                                      source: source, mask: mask, raw: raw, stage: stage, observedAt: observedAt, generation: self.generation, bathroomEpisode: 0)
                     self.attempt(event, pass: 0)
                 }
             }
+            // Independent candidate detector: never modifies the care attention episode or its burst timer.
+            func observeBathroom(raw: Int, deviceID: String, observedAt: Double) {
+                DispatchQueue.main.async {
+                    guard deviceID == BathroomEventPolicy.supportedDeviceID else { return }
+                    self.count("bathroom samples")
+                    let previous = self.bathroomRaw[deviceID]
+                    self.bathroomRaw[deviceID] = raw
+                    self.samples[deviceID + ".bathroom"] = "observed=\(String(format: "%.3f", observedAt)) address=F800D888 raw=\(raw) candidate=true app=\(self.appState())"
+                    if previous != raw {
+                        self.record("BATHROOM RAW device=\(deviceID) \(previous.map { String($0) } ?? "unknown")->\(raw); candidate mapping, not firmware-verified")
+                    }
+                    guard let transition = self.bathroomPolicy.observe(raw: raw, deviceID: deviceID) else { return }
+                    self.record("BATHROOM CONFIRMED \(transition == .appeared ? "present" : "clean") after two matching samples")
+                    if transition == .cleared {
+                        if let identifier = self.bathroomRequests.removeValue(forKey: deviceID) {
+                            let center = UNUserNotificationCenter.current()
+                            center.removePendingNotificationRequests(withIdentifiers: [identifier])
+                            center.removeDeliveredNotifications(withIdentifiers: [identifier])
+                            self.record("BATHROOM CLEAR matching bathroom notification only")
+                        }
+                        return
+                    }
+                    self.count("bathroom candidate episodes")
+                    guard self.enabled else {
+                        self.count("bathroom skipped: settings disabled")
+                        self.record("BATHROOM SKIP settings disabled; episode observed, not queued")
+                        return
+                    }
+                    guard UIApplication.shared.applicationState != .active else {
+                        self.count("bathroom skipped: foreground")
+                        self.record("BATHROOM SKIP foreground; same episode will not repeat on leaving app")
+                        return
+                    }
+                    let episode = self.bathroomPolicy.episodes[deviceID] ?? 0
+                    let event = Event(id: UUID().uuidString, deviceID: deviceID, name: self.petName(deviceID: deviceID),
+                                      source: .bathroom, mask: 0, raw: raw, stage: -1, observedAt: observedAt,
+                                      generation: self.generation, bathroomEpisode: episode)
+                    guard !self.inFlight.contains(event.policyKey) else { return }
+                    self.inFlight.insert(event.policyKey)
+                    self.attempt(event, pass: 0)
+                }
+            }
+
             private func skip(_ event: Event, _ reason: String) {
-                if event.generation == generation { inFlight.remove(event.deviceID) }
+                if event.generation == generation { inFlight.remove(event.policyKey) }
                 count("skipped: " + reason)
                 record("SKIP event=\(event.id) source=\(event.source.rawValue) reason=\(reason)")
             }
             private func attempt(_ event: Event, pass: Int) {
                 guard event.generation == generation else { skip(event, "superseded by foreground or settings change"); return }
+                guard event.source != .bathroom || bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.bathroomEpisode) else {
+                    skip(event, "bathroom candidate cleared or superseded"); return
+                }
                 guard enabled else { skip(event, "settings disabled"); return }
                 guard AppModel.current?.emu.toy?.id == event.deviceID else { skip(event, "device changed"); return }
                 let state = UIApplication.shared.applicationState
@@ -8950,24 +9014,33 @@ jobs:
                         guard event.generation == self.generation, self.enabled,
                               UIApplication.shared.applicationState == .background,
                               AppModel.current?.emu.toy?.id == event.deviceID else { self.skip(event, "app or device changed before scheduling"); return }
+                        guard event.source != .bathroom || self.bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.bathroomEpisode) else {
+                            self.skip(event, "bathroom candidate cleared before scheduling"); return
+                        }
                         let allowed = settings.authorizationStatus == .authorized || settings.authorizationStatus == .ephemeral || settings.authorizationStatus == .provisional
                         guard allowed else { self.skip(event, "notification permission unavailable"); self.refresh(); return }
                         let content = UNMutableNotificationContent()
-                        content.title = "\(event.name) needs you!"
-                        content.body = "Open TamaiOS to check on them."
+                        content.title = event.source == .bathroom ? "\(event.name) is going to the bathroom" : "\(event.name) needs you!"
+                        content.body = event.source == .bathroom ? "Open TamaiOS to help them clean up." : "Open TamaiOS to check on them."
                         content.sound = .default
                         content.threadIdentifier = self.prefix + event.deviceID
-                        content.categoryIdentifier = "TAMAIOS_CARE"
+                        content.categoryIdentifier = event.source == .bathroom ? "TAMAIOS_BATHROOM" : "TAMAIOS_CARE"
                         content.userInfo = ["deviceID": event.deviceID, "careEventID": event.id, "careSource": event.source.rawValue]
                         let request = UNNotificationRequest(identifier: self.prefix + event.deviceID + "-" + event.id, content: content, trigger: nil)
                         self.record("REQUEST event=\(event.id) source=\(event.source.rawValue) raw=\(event.raw) mask=\(event.mask) age=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - event.observedAt))s auth=\(settings.authorizationStatus.rawValue) alerts=\(settings.alertSetting.rawValue)")
+                        if event.source == .bathroom { self.bathroomRequests[event.deviceID] = request.identifier }
                         UNUserNotificationCenter.current().add(request) { error in
                             DispatchQueue.main.async {
-                                if event.generation == self.generation { self.inFlight.remove(event.deviceID) }
+                                if event.generation == self.generation { self.inFlight.remove(event.policyKey) }
                                 if let error {
                                     self.lastError = error.localizedDescription
                                     self.count("request failed")
                                     self.record("ERROR event=\(event.id) \(error.localizedDescription)")
+                                } else if event.source == .bathroom && !self.bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.bathroomEpisode) {
+                                    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [request.identifier])
+                                    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [request.identifier])
+                                    self.count("cleared: bathroom no longer present")
+                                    self.record("CLEAR event=\(event.id) bathroom candidate cleared or superseded")
                                 } else if event.generation != self.generation || !self.enabled || UIApplication.shared.applicationState != .background {
                                     UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [request.identifier])
                                     UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [request.identifier])
@@ -8975,7 +9048,11 @@ jobs:
                                     self.record("CLEAR event=\(event.id) app returned or settings changed")
                                 } else {
                                     self.lastError = nil
-                                    self.policy.accepted(mask: event.mask, deviceID: event.deviceID, at: ProcessInfo.processInfo.systemUptime)
+                                    if event.source != .bathroom {
+                                        self.policy.accepted(mask: event.mask, deviceID: event.deviceID, at: ProcessInfo.processInfo.systemUptime)
+                                    } else {
+                                        self.count("bathroom request accepted")
+                                    }
                                     self.count("request accepted")
                                     self.record("ACCEPTED event=\(event.id); iOS accepted request, not proof of visible banner")
                                     AppModel.current?.emu.note("care notification request accepted (\(event.source.rawValue))")
@@ -9011,6 +9088,8 @@ jobs:
                 var lines = [Self.revision,
                              "settings: care=\(Prefs.flag("callAlerts")) background=\(Prefs.flag("liveInBackground")) app=\(appState())",
                              "burst filter: \(CareEventPolicy.burstWindow)s; later detector calls stay eligible when mask is unchanged",
+                             "bathroom: candidate F800D888=1; two matching 1-second samples; one attempt per episode until confirmed zero; Wonder Garden EN v063 only",
+                             "bathroom is independent of care calls; existing foreground suppression remains enabled",
                              "permission snapshot: \(permissionSummary)",
                              "system snapshot: \(systemSnapshotAt.map { String(describing: $0) } ?? "not captured") pending=\(pendingCount) delivered=\(deliveredCount)",
                              "Request acceptance and delivered-list entries do not prove the user saw a banner."]
@@ -9031,7 +9110,10 @@ jobs:
         import Foundation
 
         struct CareEventPolicy {
-            enum Source: String { case poll, sound }
+            enum Source: String { case poll, sound, bathroom }
+            static func deliveryKey(deviceID: String, source: Source, bathroomEpisode: Int = 0) -> String {
+                source == .bathroom ? deviceID + ".bathroom." + String(bathroomEpisode) : deviceID
+            }
             static let burstWindow = 2.5
             private(set) var notifiedEpisodes: Set<String> = []
             private(set) var lastScheduled: [String: Double] = [:]
@@ -9051,6 +9133,43 @@ jobs:
                 if mask > 0 { notifiedEpisodes.insert(deviceID) }
             }
             mutating func foregroundReset() { notifiedEpisodes.removeAll() }
+        }
+
+
+        // Candidate mapping from the user's three pre-cleanup and two post-cleanup samples.
+        // This is intentionally limited to that exact ROM, and accepts only observed 0/1 values.
+        struct BathroomEventPolicy {
+            static let supportedDeviceID = "fw_tg18_en_v063_2020-02-13_wondergarden"
+            enum Transition: Equatable { case appeared, cleared }
+            private(set) var present: [String: Bool] = [:]
+            private(set) var episodes: [String: Int] = [:]
+            private var candidates: [String: Bool] = [:]
+            private var confirmations: [String: Int] = [:]
+            mutating func observe(raw: Int, deviceID: String) -> Transition? {
+                guard deviceID == Self.supportedDeviceID else { return nil }
+                guard raw == 0 || raw == 1 else {
+                    candidates.removeValue(forKey: deviceID)
+                    confirmations.removeValue(forKey: deviceID)
+                    return nil
+                }
+                let candidate = raw == 1
+                if candidates[deviceID] == candidate {
+                    confirmations[deviceID] = min(2, (confirmations[deviceID] ?? 0) + 1)
+                } else {
+                    candidates[deviceID] = candidate
+                    confirmations[deviceID] = 1
+                }
+                guard confirmations[deviceID] == 2, present[deviceID] != candidate else { return nil }
+                present[deviceID] = candidate
+                if candidate {
+                    episodes[deviceID, default: 0] += 1
+                    return .appeared
+                }
+                return .cleared
+            }
+            func isCurrent(deviceID: String, episode: Int) -> Bool {
+                present[deviceID] == true && episodes[deviceID] == episode
+            }
         }
         CARE_POLICY_SOURCE_EOF
     - name: Write ios/TamaiOS/Core/DaytimeClock.swift
@@ -9268,7 +9387,40 @@ jobs:
                 precondition(policy.blockReason(mask: 1, deviceID: "another-device", source: .sound, now: 620) == nil)
                 policy.foregroundReset()
                 precondition(policy.blockReason(mask: 1, deviceID: id, source: .poll, now: 630) == nil)
-                print("Care policy tests passed: repeat calls, burst filtering, rearm, device separation.")
+                let bathroomID = BathroomEventPolicy.supportedDeviceID
+                var bathroom = BathroomEventPolicy()
+                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == nil)
+                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == .cleared)
+                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == nil)
+                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == .appeared)
+                let episode1 = bathroom.episodes[bathroomID]!
+                precondition(bathroom.isCurrent(deviceID: bathroomID, episode: episode1))
+                for _ in 0..<100 { precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == nil) }
+                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == nil)
+                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == .cleared)
+                precondition(!bathroom.isCurrent(deviceID: bathroomID, episode: episode1))
+                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == nil)
+                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == .appeared)
+                precondition(bathroom.episodes[bathroomID] == episode1 + 1)
+                precondition(!bathroom.isCurrent(deviceID: bathroomID, episode: episode1))
+                var invalid = BathroomEventPolicy()
+                precondition(invalid.observe(raw: 1, deviceID: bathroomID) == nil)
+                precondition(invalid.observe(raw: -1, deviceID: bathroomID) == nil)
+                precondition(invalid.observe(raw: 1, deviceID: bathroomID) == nil)
+                precondition(invalid.observe(raw: 2, deviceID: bathroomID) == nil)
+                precondition(invalid.observe(raw: 1, deviceID: "unsupported-rom") == nil)
+                precondition(invalid.observe(raw: 1, deviceID: "unsupported-rom") == nil)
+                precondition(invalid.present.isEmpty)
+                let careKey = CareEventPolicy.deliveryKey(deviceID: bathroomID, source: .sound)
+                let bathroomKey = CareEventPolicy.deliveryKey(deviceID: bathroomID, source: .bathroom, bathroomEpisode: 1)
+                precondition(careKey != bathroomKey)
+                var separation = CareEventPolicy()
+                separation.accepted(mask: 3, deviceID: careKey, at: 100)
+                precondition(separation.blockReason(mask: 0, deviceID: bathroomKey, source: .bathroom, now: 100) == nil)
+                separation.accepted(mask: 0, deviceID: bathroomKey, at: 200)
+                precondition(separation.blockReason(mask: 3, deviceID: careKey, source: .sound, now: 200) == nil)
+                print("Bathroom candidate tests passed: confirmation, deduplication, cleanup/rearm, stale episodes, ROM guard, care independence.")
+        print("Care policy tests passed: repeat calls, burst filtering, rearm, device separation.")
             }
         }
         CARE_TESTS_EOF

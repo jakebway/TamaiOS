@@ -1,9 +1,8 @@
-# TamaiOS — full app source and Bluetooth patch embedded directly below.
-# No prior TamaiOS commit, source archive, or history restoration is used.
-# Save as .github/workflows/build.yml. The three firmware/*.bin files are required.
-# Standard dependencies (upstream emulator core, Rust crates, XcodeGen, Pillow)
-# are fetched during the build, as in the original workflow.
-# Source is split into readable, bounded steps; all chunks are included here.
+# TamaiOS — all app source and Bluetooth patch embedded directly below.
+# No previous TamaiOS commit or historical source archive is required.
+# Save as .github/workflows/build.yml; keep the three firmware/*.bin files.
+# Adds background-only care banners, permission diagnostics, test banners,
+# and per-device Daytime Mode. Standard build dependencies are fetched normally.
 name: Build TamaiOS
 'on':
   workflow_dispatch: {}
@@ -15,7 +14,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
-    - name: Get your repository and firmware
+    - name: Get your repository and bundled firmware
       uses: actions/checkout@v4
     - name: Write ffi/Cargo.toml
       run: |
@@ -1308,16 +1307,15 @@ jobs:
             let s = unsafe { bytes(p, n) }.map(mm::visit_tama_name).unwrap_or_default();
             give_string(s, out, out_len)
         }
-        // English TG18 Param block; points are a little-endian u16 at +0x20.
-        // Layout reference: Paramix-Studio src/app.js and t18/src/app/main.c.
-        fn wallet_base(e: &Emu) -> Option<u32> {
+        // English TG18 Param layout; guarded by the exact known firmware fingerprints.
+        fn profile_base(e: &Emu) -> Option<u32> {
             match tg18::code_hash(&e.image) {
                 0xD780_5452_8833_EB90 | 0x8313_24F3_B2FA_6768 | 0xA38D_22B6_76C5_3108 => Some(0xF800_D864),
                 _ => None,
             }
         }
-        fn wallet_read(e: &mut Emu) -> Option<u16> {
-            let base = wallet_base(e)?;
+        fn profile_points(e: &mut Emu) -> Option<u16> {
+            let base = profile_base(e)?;
             if !(1..=4).contains(&e.m.sys.read8(base + 0x52)) { return None; }
             Some(u16::from_le_bytes([e.m.sys.read8(base + 0x20), e.m.sys.read8(base + 0x21)]))
         }
@@ -1325,20 +1323,41 @@ jobs:
         pub extern "C" fn tg_profile_points(e: *mut Emu) -> i32 {
             if e.is_null() { return -1; }
             let em = unsafe { &mut *e };
-            catch_unwind(AssertUnwindSafe(|| wallet_read(em).map(i32::from).unwrap_or(-1))).unwrap_or(-1)
+            catch_unwind(AssertUnwindSafe(|| profile_points(em).map(i32::from).unwrap_or(-1))).unwrap_or(-1)
         }
         #[no_mangle]
         pub extern "C" fn tg_profile_adjust_points(e: *mut Emu, delta: i32) -> i32 {
             if e.is_null() { return -1; }
             let em = unsafe { &mut *e };
             catch_unwind(AssertUnwindSafe(|| {
-                let Some(base) = wallet_base(em) else { return -1; };
-                let Some(current) = wallet_read(em) else { return -1; };
+                let Some(base) = profile_base(em) else { return -1; };
+                let Some(current) = profile_points(em) else { return -1; };
                 let next = i64::from(current) + i64::from(delta);
                 if !(0..=65535).contains(&next) { return -1; }
                 em.m.sys.poke(base + 0x20, &(next as u16).to_le_bytes());
                 next as i32
             })).unwrap_or(-1)
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_profile_attention(e: *mut Emu) -> i32 {
+            if e.is_null() { return -1; }
+            let em = unsafe { &mut *e };
+            catch_unwind(AssertUnwindSafe(|| {
+                let Some(base) = profile_base(em) else { return -1; };
+                if !(1..=4).contains(&em.m.sys.read8(base + 0x52)) { return 0; }
+                (em.m.sys.read8(base + 0x0C) & 0x0F) as i32
+            })).unwrap_or(-1)
+        }
+
+        #[cfg(test)]
+        mod profile_bridge_tests {
+            use super::*;
+            #[test]
+            fn no_device_is_not_a_zero_balance_or_care_call() {
+                assert_eq!(tg_profile_points(std::ptr::null_mut()), -1);
+                assert_eq!(tg_profile_adjust_points(std::ptr::null_mut(), 100), -1);
+                assert_eq!(tg_profile_attention(std::ptr::null_mut()), -1);
+            }
         }
 
         TAMAIOS_SOURCE_EOF
@@ -2759,7 +2778,6 @@ jobs:
             for offset in (-66, 0, 66):
                 x = cx + u(offset)
                 rrect((x - u(19), top - u(79), x + u(19), top - u(32)), u(10), (123, 201, 219), top=(222, 250, 255), width=max(1, int(u(3))))
-            # The drum bridges the dome equator and cornice without a gap.
             rrect((cx - u(65), top - u(150), cx + u(65), top - u(100)), u(5), mint, top=(223, 252, 242))
             d.pieslice((cx - u(65), top - u(215), cx + u(65), top - u(85)), 180, 360, fill=mint, outline=INK, width=LW)
             d.arc((cx - u(46), top - u(204), cx + u(46), top - u(96)), 195, 258, fill=(239, 255, 248), width=max(1, int(u(6))))
@@ -2978,6 +2996,7 @@ jobs:
 
         int32_t tg_profile_points(Emu *e);
         int32_t tg_profile_adjust_points(Emu *e, int32_t delta);
+        int32_t tg_profile_attention(Emu *e);
 
         #endif
         TAMAIOS_SOURCE_EOF
@@ -3043,12 +3062,23 @@ jobs:
                 UNUserNotificationCenter.current().delegate = self
                 return true
             }
+            func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                        withCompletionHandler completionHandler: @escaping () -> Void) {
+                DispatchQueue.main.async {
+                    if let id = response.notification.request.content.userInfo["deviceID"] as? String,
+                       let model = AppModel.current, let toy = model.toys.first(where: { $0.id == id }), model.emu.toy?.id != id {
+                        model.play(toy)
+                    }
+                    CareAlerts.shared.cancelAll()
+                    completionHandler()
+                }
+            }
             func applicationWillTerminate(_ application: UIApplication) {
                 AppModel.current?.emu.willTerminate()
             }
             func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-                completionHandler([])  // in the app you can already hear it
+                completionHandler([])  // Always suppress foreground banners and notification sounds.
             }
         }
 
@@ -3101,11 +3131,8 @@ jobs:
                 if let t = currentToy { play(t) }
             }
 
-            /// Swap only this device's working directory, with rollback on failure.
             func resetCurrentDevice() throws {
-                guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else {
-                    throw ImportError.unreadable("Finish the current operation before resetting.")
-                }
+                guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else { throw ImportError.unreadable("Finish the current operation before resetting.") }
                 let fm = FileManager.default
                 let working = ToyStore.dir(toy.id)
                 let staging = ToyStore.root.appendingPathComponent(".reset-" + UUID().uuidString, isDirectory: true)
@@ -3122,6 +3149,8 @@ jobs:
                     do { try fm.moveItem(at: staging, to: working) }
                     catch { try fm.moveItem(at: previous, to: working); throw error }
                     Town.shared.invalidateDeviceCache(toy)
+                    DaytimeClock.disable(toy.id)
+                    CareAlerts.shared.cancelAll()
                     emu.appWaiting = false
                     emu.holdForApp = false
                     AppLink.shared.openForDownload = false
@@ -3181,7 +3210,6 @@ jobs:
                 .preferredColorScheme(nil)
             }
         }
-        /// Setup is shown only with no saved device, or explicitly through Add Device.
         struct BundledDevicePicker: View {
             var firstRun: Bool
             @EnvironmentObject private var model: AppModel
@@ -3194,8 +3222,7 @@ jobs:
                         VStack(spacing: 18) {
                             Image(systemName: "sparkles").font(.largeTitle).foregroundStyle(.pink)
                             Text(firstRun ? "Choose Your Device" : "Add a Device").font(.system(.largeTitle, design: .rounded).weight(.bold))
-                            Text("Three worlds, ready to hatch. Everything you need is included.")
-                                .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            Text("Three worlds, ready to hatch. Everything you need is included.").foregroundStyle(.secondary).multilineTextAlignment(.center)
                             ForEach(BundledVariant.all) { variant in
                                 Button { install(variant) } label: {
                                     HStack(spacing: 18) {
@@ -3720,8 +3747,7 @@ jobs:
                 TownCard(tint: .orange) {
                     Label("Send Gotchi Points", systemImage: "gift.fill").font(.headline)
                     TextField("Amount (1–65,535)", text: $giftAmount).keyboardType(.numberPad).textFieldStyle(.roundedBorder)
-                    Text("Bonus gift through Connection › App › Download. The profile can hold up to 65,535 G.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Bonus gift through Connection › App › Download. The profile can hold up to 65,535 G.").font(.caption).foregroundStyle(.secondary)
                     Button(live ? "Send gift…" : "Queue download gift…") { confirmingGift = true }
                         .buttonStyle(.borderedProminent).tint(.orange).disabled(enteredGift == nil || sending)
                     if let toy = emu.toy {
@@ -3729,12 +3755,9 @@ jobs:
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("\(gift.amount) G — " + (gift.attempted ? "check delivery" : "queued for Download")).font(.subheadline)
                                 if gift.attempted {
-                                    Text("Delivery was attempted. Check the profile before creating another gift. This request will not be retried automatically.")
-                                        .font(.caption).foregroundStyle(.secondary)
+                                    Text("Delivery was attempted. Check the profile before creating another gift. This request will not be retried automatically.").font(.caption).foregroundStyle(.secondary)
                                 }
-                                Button(gift.attempted ? "Dismiss request" : "Cancel gift", role: .destructive) {
-                                    town.removeGift(gift.id, for: toy)
-                                }.font(.caption).disabled(sending)
+                                Button(gift.attempted ? "Dismiss request" : "Cancel gift", role: .destructive) { town.removeGift(gift.id, for: toy) }.font(.caption).disabled(sending)
                             }
                         }
                     }
@@ -3744,20 +3767,15 @@ jobs:
                 guard !sending, let toy = emu.toy, let amount = enteredGift else { return }
                 wallet.refresh(emu)
                 if let balance = wallet.balance, amount > DeviceWallet.maximum - balance {
-                    result = (false, "There is room for \(DeviceWallet.maximum - balance) G. Enter a smaller gift.")
-                    return
+                    result = (false, "There is room for \(DeviceWallet.maximum - balance) G. Enter a smaller gift."); return
                 }
                 town.queuePoints(amount, for: toy)
                 giftAmount = ""
-                guard live else {
-                    result = (true, "Gift queued. On your Tama choose Connection › App › Download.")
-                    return
-                }
+                guard live else { result = (true, "Gift queued. On your Tama choose Connection › App › Download."); return }
                 guard let gift = town.state(toy).pointGifts?.first(where: { !$0.attempted }) else { return }
                 let balance = emu.withCore { tg_profile_points($0) } ?? -1
                 guard balance >= 0, gift.amount <= DeviceWallet.maximum - Int(balance) else {
-                    result = (false, "Gift remains queued until the profile is ready and has room.")
-                    return
+                    result = (false, "Gift remains queued until the profile is ready and has room."); return
                 }
                 town.markGiftAttempt(gift.id, for: toy)
                 sending = true
@@ -3766,9 +3784,7 @@ jobs:
                 let transport = TamaLink(emu: emu)
                 Task {
                     do {
-                        try await Task.detached(priority: .userInitiated) {
-                            try transport.finishItem(Town.pointsPacket(gift.amount))
-                        }.value
+                        try await Task.detached(priority: .userInitiated) { try transport.finishItem(Town.pointsPacket(gift.amount)) }.value
                         town.removeGift(gift.id, for: toy)
                         wallet.refresh(emu)
                         emu.saveNow()
@@ -3883,15 +3899,15 @@ jobs:
                                 .background(Color.blue.opacity(0.08))
                         }
                     }
+                    .frame(width: it.kind == "wallpaper" ? 80 : 52, height: it.kind == "wallpaper" ? 80 : 52)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    Text(it.name).font(.system(.caption, design: .rounded).weight(.semibold))
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Tamatown/TamaDepotView.swift (2/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Tamatown"
         cat >> 'ios/TamaiOS/Tamatown/TamaDepotView.swift' <<'TAMAIOS_SOURCE_EOF'
-                    .frame(width: it.kind == "wallpaper" ? 80 : 52, height: it.kind == "wallpaper" ? 80 : 52)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    Text(it.name).font(.system(.caption, design: .rounded).weight(.semibold))
                         .lineLimit(2).multilineTextAlignment(.center)
                     if let n = it.note {
                         Text(n).font(.caption2).foregroundStyle(.pink)
@@ -4299,10 +4315,7 @@ jobs:
                                         self.main { town.markGiftAttempt(gift.id, for: toy) }
                                         progress("Sending \(gift.amount) Gotchi Points…")
                                         try link.finishItem(Town.pointsPacket(gift.amount))
-                                        self.main {
-                                            town.removeGift(gift.id, for: toy)
-                                            DeviceWallet.shared.refresh(emu)
-                                        }
+                                        self.main { town.removeGift(gift.id, for: toy); DeviceWallet.shared.refresh(emu) }
                                         emu.saveNow()
                                         close = true
                                         msg = "Sent \(gift.amount) Gotchi Points! Watch the device."
@@ -4353,13 +4366,13 @@ jobs:
                 let link = TamaLink(emu: emu)
                 DispatchQueue.global(qos: .userInitiated).async {
                     // Just hanging up leaves the device on CONNECTING for ~20 s. A command it
+                    // doesn't expect in Download mode ends the session at once; then skip the
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Tamatown/TamaLink.swift (2/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Tamatown"
         cat >> 'ios/TamaiOS/Tamatown/TamaLink.swift' <<'TAMAIOS_SOURCE_EOF'
-                    // doesn't expect in Download mode ends the session at once; then skip the
                     // short FAIL message so it's straight back in its room.
                     try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
                     emu.fastForward(4)
@@ -5336,7 +5349,6 @@ jobs:
                 defer { tg_free(p, n) }
                 return Array(UnsafeBufferPointer(start: p, count: n))
             }
-
             struct BagItem: Codable, Identifiable, Equatable {
                 var id = UUID()
                 var name: String
@@ -5455,10 +5467,7 @@ jobs:
             }
 
             func invalidateDeviceCache(_ toy: Toy) {
-                cacheLock.lock()
-                stateCache[toy.id] = nil
-                visitCache[toy.id] = nil
-                cacheLock.unlock()
+                cacheLock.lock(); stateCache[toy.id] = nil; visitCache[toy.id] = nil; cacheLock.unlock()
                 objectWillChange.send()
             }
 
@@ -5536,7 +5545,6 @@ jobs:
                 }
             }
         }
-        /// Shared presentation of the active device's balance; never a second wallet.
         final class DeviceWallet: ObservableObject {
             static let shared = DeviceWallet()
             static let maximum = 65535
@@ -6183,9 +6191,7 @@ jobs:
                 }
                 .background(Color.clear.sheet(isPresented: $model.openPickup) {
                     NavigationStack {
-                        TamaDepotView().toolbar {
-                            ToolbarItem(placement: .confirmationAction) { Button("Done") { model.openPickup = false } }
-                        }
+                        TamaDepotView().toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.openPickup = false } } }
                     }.environmentObject(emu)
                 })
                 .onChange(of: model.openTown) { open in
@@ -6222,7 +6228,7 @@ jobs:
             private func topBar(_ theme: Theme) -> some View {
                 HStack {
                     VStack(alignment: .leading, spacing: 0) {
-                        Text(emu.toy?.name ?? "TamaiOS")
+                        Text((emu.daytimeMode ? "☀️ " : "") + (emu.toy?.name ?? "TamaiOS"))
                             .font(.system(.title3, design: .rounded).weight(.heavy))
                         if let r = emu.toy?.romName {
                             Text(r).font(.system(.caption2, design: .rounded)).opacity(0.7)
@@ -6608,6 +6614,33 @@ jobs:
                 ffUntilWaiting = true
                 wake.signal()
             }
+            @Published private(set) var clockChanging = false
+            var daytimeMode: Bool { DaytimeClock.enabled(toy?.id) }
+
+            func setDaytimeMode(_ enabled: Bool) {
+                guard let toy, !clockChanging, !loading, !linkBusy, !appWaiting else {
+                    say("Finish the current device operation before changing its clock.")
+                    return
+                }
+                if enabled { DaytimeClock.enable(toy.id) } else { DaytimeClock.disable(toy.id) }
+                clockChanging = true
+                objectWillChange.send()
+                let target = DaytimeClock.target(toy.id)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let ok = self.withCore { h -> Int32 in
+                        tg_set_wall_clock(h, target)
+                        return tg_sync_clock(h, target)
+                    } ?? 0
+                    DispatchQueue.main.async {
+                        self.clockChanging = false
+                        self.saveNow()
+                        self.say(ok == 1
+                            ? (enabled ? "Daytime Mode: your Tama's day starts at noon. ☀️" : "Clock returned to your iPhone's current time.")
+                            : "Clock change is pending. It will be retried when the device can safely change time.")
+                    }
+                }
+            }
+
             private var visible = true
             private var backgroundAt: Date?
             private var lastCall = Date.distantPast
@@ -6682,7 +6715,7 @@ jobs:
                                 tg_create(r.bindMemory(to: UInt8.self).baseAddress, r.count,
                                           s.bindMemory(to: UInt8.self).baseAddress, s.count,
                                           f.bindMemory(to: UInt8.self).baseAddress, f.count,
-                                          meta.isEmpty ? nil : m, rtcNow(), &elapsed)
+                                          meta.isEmpty ? nil : m, DaytimeClock.target(toy.id), &elapsed)
                             }
                         }
                     }
@@ -6782,6 +6815,7 @@ jobs:
                 var needFrame = true
                 var lastPublish = 0.0
                 var asleep = false
+                var nextCarePoll = last
                 var nextRadio = last
                 var radioReady = false
                 while !stopFlag {
@@ -6841,7 +6875,7 @@ jobs:
                     let inputs = inputQ
                     inputQ.removeAll(keepingCapacity: true)
                     inputLock.unlock()
-                    let wallNow: Double? = now >= nextWall ? rtcNow() : nil
+                    let wallNow: Double? = now >= nextWall ? DaytimeClock.target(currentID) : nil
                     if wallNow != nil { nextWall = now + 1 }
 
                     var code: Int32 = 0, flags: UInt32 = 0, n = 0, isDark = false, published = false
@@ -6856,11 +6890,11 @@ jobs:
                     // than a minute off, re-set it while nobody is pressing buttons.
                     if let w = wallNow, now >= nextClockFix, now - lastInput > 15, !radioReady, tg_is_asleep(h) == 0,
                        abs(tg_clock_drift(h)) > 60 {
-                        nextClockFix = now + 120
+                        nextClockFix = now + 15
                         let off = tg_clock_drift(h)
                         if tg_sync_clock(h, w) == 1 {
-                            note("clock set to iPhone time automatically (was off by \(Int(off)) s)")
-                            say("Clock matched to your iPhone. 🕒")
+                            note("clock matched to selected time mode (was off by \(Int(off)) s)")
+                            say(DaytimeClock.enabled(currentID) ? "Daytime Mode clock restored. ☀️" : "Clock matched to your iPhone. 🕒")
                         }
                     }
                     if dt > lp.gap {
@@ -6870,6 +6904,12 @@ jobs:
                         dt = 0
                     }
                     let t0 = CACurrentMediaTime()
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/Emulator.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat >> 'ios/TamaiOS/Core/Emulator.swift' <<'TAMAIOS_SOURCE_EOF'
                     // during a Bluetooth transfer the device runs 3x faster, so it's over sooner
                     code = tg_tick(h, linkBusy ? min(dt * 3, 0.1) : dt)
                     stats.lastTickMs = (CACurrentMediaTime() - t0) * 1000
@@ -6901,12 +6941,16 @@ jobs:
                     }
                     lock.unlock()
 
-        TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Core/Emulator.swift (2/2)
-      run: |
-        set -euo pipefail
-        mkdir -p "ios/TamaiOS/Core"
-        cat >> 'ios/TamaiOS/Core/Emulator.swift' <<'TAMAIOS_SOURCE_EOF'
+                    if now >= nextCarePoll {
+                        nextCarePoll = now + 1
+                        let mask = withCore { tg_profile_attention($0) } ?? -1
+                        if mask >= 0 {
+                            DispatchQueue.main.async {
+                                guard let toy = self.toy else { return }
+                                CareAlerts.shared.observe(mask: Int(mask), deviceID: toy.id, name: toy.name)
+                            }
+                        }
+                    }
                     audio.push(audioBuf, n)
                     if published { publish(pixels, dark: isDark) }
                     if radioChanged {
@@ -6916,8 +6960,8 @@ jobs:
                     }
                     if flags & 2 != 0 { careCall() }
                     if flags & 16 != 0 {
-                        note("clock synced to iPhone time")
-                        if !syncAnnounced { syncAnnounced = true; say("Your device's clock now matches your iPhone. 🕒") }
+                        note("clock synced to selected time mode")
+                        if !syncAnnounced { syncAnnounced = true; say(DaytimeClock.enabled(currentID) ? "Daytime Mode is active. ☀️" : "Your device's clock now matches your iPhone. 🕒") }
                     }
                     if code != 0 && code != lastCode { report(code) }
                     lastCode = code
@@ -6964,11 +7008,10 @@ jobs:
                 DispatchQueue.main.async {
                     self.calling = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.calling = false }
-                    let active = UIApplication.shared.applicationState == .active
-                    if !active && Prefs.flag("callAlerts") && Date().timeIntervalSince(self.lastCall) > Prefs.num("p.call_gap_s") {
-                        self.lastCall = Date()
-                        Notifier.postCall(name: self.toy?.name ?? "Your pet")
-                    }
+                    guard let toy = self.toy else { return }
+                    let mask = self.withCore { tg_profile_attention($0) } ?? -1
+                    // Supported firmware uses actual attention flags, not arbitrary buzzer sounds.
+                    CareAlerts.shared.observe(mask: mask >= 0 ? Int(mask) : 16, deviceID: toy.id, name: toy.name)
                 }
             }
 
@@ -7055,6 +7098,8 @@ jobs:
             /// Set the toy to iPhone time now. Returns whether it worked.
             @discardableResult
             func syncClock() -> Bool {
+                if let id = toy?.id { DaytimeClock.disable(id) }
+                objectWillChange.send()
                 let now = rtcNow()
                 let ok = withCore { tg_sync_clock($0, now) } ?? 0
                 say(ok == 1 ? "Clock set to your iPhone's time. 🕒" : "The device can't take a new time right now (maybe it's calling, or still in setup). TamaiOS will keep trying by itself.")
@@ -7096,6 +7141,8 @@ jobs:
 
             func enterForeground() {
                 visible = true
+                CareAlerts.shared.cancelAll()
+                CareAlerts.shared.prepare()
                 guard handle != nil else { return }
                 if paused {
                     let away = backgroundAt.map { Date().timeIntervalSince($0) } ?? 0
@@ -7139,21 +7186,13 @@ jobs:
         }
 
         enum Notifier {
-            static func ask(_ done: ((Bool) -> Void)? = nil) {
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { ok, _ in
-                    DispatchQueue.main.async { done?(ok) }
-                }
-            }
-
+            static func ask(_ done: ((Bool) -> Void)? = nil) { CareAlerts.shared.ask(done) }
             static func postCall(name: String) {
-                let c = UNMutableNotificationContent()
-                c.title = "\(name) is calling!"
-                c.body = "Your pet needs you. Tap to see what it wants."
-                c.sound = .default
-                let r = UNNotificationRequest(identifier: "call-\(Date().timeIntervalSince1970)", content: c, trigger: nil)
-                UNUserNotificationCenter.current().add(r)
+                guard let id = AppModel.current?.emu.toy?.id else { return }
+                CareAlerts.shared.observe(mask: 16, deviceID: id, name: name)
             }
         }
+
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Core/LCD.swift
       run: |
@@ -7468,7 +7507,6 @@ jobs:
                 BundledVariant(id: "wondergarden", name: "Wonder Garden", filename: "fw_tg18_en_v063_2020-02-13_wondergarden", color: 5)
             ]
         }
-
         extension ToyStore {
             static func installBundled(_ variant: BundledVariant) throws -> Toy {
                 guard let url = Bundle.main.url(forResource: variant.filename, withExtension: "bin", subdirectory: "BundledFirmware") else {
@@ -8176,7 +8214,7 @@ jobs:
             """
         }
         TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Screens/SettingsView.swift
+    - name: Write ios/TamaiOS/Screens/SettingsView.swift (1/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Screens"
@@ -8198,6 +8236,7 @@ jobs:
             @AppStorage("neverSleep") private var neverSleep = false
             @AppStorage("showHints") private var showHints = true
 
+            @ObservedObject private var careAlerts = CareAlerts.shared
             @State private var name = ""
             @State private var confirmRestart = false
             @State private var showReset = false
@@ -8223,6 +8262,14 @@ jobs:
                             } header: { Text(toy.romName) }
                         }
 
+                        Section {
+                            Toggle(isOn: Binding(get: { emu.daytimeMode }, set: { emu.setDaytimeMode($0) })) {
+                                Label("Daytime Mode", systemImage: "sun.max.fill")
+                            }.disabled(emu.clockChanging || emu.loading || emu.linkBusy || emu.appWaiting)
+                            if emu.clockChanging { ProgressView("Updating device clock…") }
+                        } header: { Text("Clock") } footer: {
+                            Text("Start your Tama’s day at noon to play after bedtime. Time continues normally. Turn off to return to your iPhone’s current date and time.")
+                        }
                         Section("Sound & Haptics") {
                             Toggle("Sound", isOn: $soundOn)
                             HStack {
@@ -8238,13 +8285,22 @@ jobs:
                         Section {
                             Toggle("Background Mode", isOn: $live)
                             Toggle("Care Notifications", isOn: $callAlerts)
-                                .onChange(of: callAlerts) { on in if on { Notifier.ask() } }
+                                .onChange(of: callAlerts) { on in if on { Notifier.ask() } else { careAlerts.cancelAll() } }
                             Toggle("Prevent Auto-Lock", isOn: $keepAwake)
                             Toggle("Always-On Display", isOn: $neverSleep)
                         } header: { Text("Power & Background") } footer: {
                             Text("Background Mode keeps your Tama running in real time after you leave the app, like the real device, and lets Care Notifications reach you. It uses a little battery. When it's off, your Tama pauses while the app is closed and its clock catches up when you return.")
                         }
 
+                        Section("Care Notification Banners") {
+                            Text(careAlerts.status).font(.subheadline)
+                            if let error = careAlerts.lastError { Text(error).font(.caption).foregroundStyle(.orange) }
+                            Button("Enable Notification Permission") { careAlerts.ask() }
+                            Button("Open iPhone Notification Settings") { careAlerts.openSettings() }
+                            Button("Test Banner in 5 Seconds") { careAlerts.testBanner() }.disabled(!live || !callAlerts)
+                            Text("For the test, leave TamaiOS within 5 seconds. No banner appears while you are in the app. Enable Allow Notifications and Banners in iPhone Settings. Focus and Scheduled Summary can delay alerts.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         Section {
                             Button { makeBackup() } label: { Label("Back Up", systemImage: "square.and.arrow.up") }
                             Button { sheet = .picker } label: { Label("Restore from Backup", systemImage: "square.and.arrow.down") }
@@ -8289,11 +8345,11 @@ jobs:
                     .navigationTitle("Settings")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { if let t = emu.toy { rename(t) }; dismiss() } } }
-                    .onAppear { name = emu.toy?.name ?? "" }
+                    .onAppear { name = emu.toy?.name ?? ""; careAlerts.prepare() }
                     .onChange(of: soundOn) { _ in emu.applySettings() }
                     .onChange(of: volume) { _ in emu.applySettings() }
                     .onChange(of: neverSleep) { _ in emu.applySettings() }
-                    .onChange(of: live) { _ in emu.applySettings(); emu.audio.restart() }
+                    .onChange(of: live) { _ in emu.applySettings(); emu.audio.restart(); careAlerts.prepare() }
                     .onChange(of: keepAwake) { v in UIApplication.shared.isIdleTimerDisabled = v }
                     .confirmationDialog("Restart the device?", isPresented: $confirmRestart, titleVisibility: .visible) {
                         Button("Restart", role: .destructive) { emu.restart(); dismiss() }
@@ -8471,14 +8527,206 @@ jobs:
                             }.disabled(confirmation != "RESET" || resetting)
                         }
                     }
-                    .navigationTitle("Reset Device")
-                    .navigationBarTitleDisplayMode(.inline)
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Screens/SettingsView.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Screens"
+        cat >> 'ios/TamaiOS/Screens/SettingsView.swift' <<'TAMAIOS_SOURCE_EOF'
+                    .navigationTitle("Reset Device").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(resetting) } }
                     .interactiveDismissDisabled(resetting)
                     .alert("Couldn't reset", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                         Button("OK", role: .cancel) {}
                     } message: { Text(errorMessage ?? "") }
                 }
+            }
+        }
+
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/CareAlerts.swift
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat > 'ios/TamaiOS/Core/CareAlerts.swift' <<'TAMAIOS_SOURCE_EOF'
+        import Foundation
+        import UIKit
+        import UserNotifications
+        import Combine
+
+        /// Local care banners. No remote push service is needed.
+        final class CareAlerts: ObservableObject {
+            static let shared = CareAlerts()
+            @Published private(set) var status = "Checking notification settings…"
+            @Published private(set) var lastError: String?
+            private let prefix = "tamaios-care-"
+            private var sentMasks: [String: Int] = [:]
+            private var inFlight: Set<String> = []
+            private var lastAttempts: [String: Date] = [:]
+
+            private var enabled: Bool { Prefs.flag("callAlerts") && Prefs.flag("liveInBackground") }
+
+            func refresh() {
+                UNUserNotificationCenter.current().getNotificationSettings { settings in
+                    DispatchQueue.main.async {
+                        switch settings.authorizationStatus {
+                        case .notDetermined: self.status = "Permission not requested"
+                        case .denied: self.status = "Notifications blocked in iPhone Settings"
+                        case .provisional: self.status = "Quiet delivery only — enable alerts in iPhone Settings"
+                        case .authorized, .ephemeral:
+                            self.status = settings.alertSetting == .enabled && settings.alertStyle != .none
+                                ? "Visual alerts allowed by iOS" : "Banners disabled in iPhone Settings"
+                        @unknown default: self.status = "Check iPhone notification settings"
+                        }
+                    }
+                }
+            }
+
+            func prepare() {
+                refresh()
+                guard enabled else { cancelAll(); return }
+                UNUserNotificationCenter.current().getNotificationSettings { settings in
+                    guard settings.authorizationStatus == .notDetermined else { return }
+                    DispatchQueue.main.async {
+                        guard UIApplication.shared.applicationState == .active else { return }
+                        self.ask()
+                    }
+                }
+            }
+
+            func ask(_ done: ((Bool) -> Void)? = nil) {
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                    DispatchQueue.main.async {
+                        if let error { self.lastError = error.localizedDescription }
+                        self.refresh()
+                        done?(granted)
+                    }
+                }
+            }
+
+            func cancelAll() {
+                let center = UNUserNotificationCenter.current()
+                center.getPendingNotificationRequests { requests in
+                    center.removePendingNotificationRequests(withIdentifiers: requests.map(\.identifier).filter { $0.hasPrefix(self.prefix) })
+                }
+                center.getDeliveredNotifications { notifications in
+                    center.removeDeliveredNotifications(withIdentifiers: notifications.map { $0.request.identifier }.filter { $0.hasPrefix(self.prefix) })
+                }
+            }
+
+            func observe(mask: Int, deviceID: String, name: String) {
+                DispatchQueue.main.async {
+                    if mask == 0 {
+                        self.sentMasks[deviceID] = nil
+                        self.lastAttempts[deviceID] = nil
+                        let identifier = self.prefix + deviceID
+                        let center = UNUserNotificationCenter.current()
+                        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+                        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+                        return
+                    }
+                    guard mask > 0, self.enabled,
+                          UIApplication.shared.applicationState == .background,
+                          self.sentMasks[deviceID] != mask,
+                          !self.inFlight.contains(deviceID) else { return }
+                    if let last = self.lastAttempts[deviceID], Date().timeIntervalSince(last) < 15 { return }
+                    self.lastAttempts[deviceID] = Date()
+                    self.inFlight.insert(deviceID)
+                    let center = UNUserNotificationCenter.current()
+                    center.getNotificationSettings { settings in
+                        DispatchQueue.main.async {
+                            guard self.enabled, UIApplication.shared.applicationState == .background,
+                                  AppModel.current?.emu.toy?.id == deviceID,
+                                  settings.authorizationStatus == .authorized || settings.authorizationStatus == .ephemeral else {
+                                self.inFlight.remove(deviceID)
+                                self.refresh()
+                                return
+                            }
+                            if let emu = AppModel.current?.emu {
+                                let currentMask = emu.withCore { tg_profile_attention($0) } ?? -1
+                                if currentMask == 0 {
+                                    self.inFlight.remove(deviceID)
+                                    return
+                                }
+                            }
+                            let content = UNMutableNotificationContent()
+                            content.title = "\(name) needs you!"
+                            content.body = "Your Tama has a care call. Tap to check on it."
+                            content.sound = .default
+                            content.threadIdentifier = self.prefix + deviceID
+                            content.categoryIdentifier = "TAMAIOS_CARE"
+                            content.userInfo = ["deviceID": deviceID]
+                            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+                            let request = UNNotificationRequest(identifier: self.prefix + deviceID, content: content, trigger: trigger)
+                            center.add(request) { error in
+                                DispatchQueue.main.async {
+                                    self.inFlight.remove(deviceID)
+                                    if let error {
+                                        self.lastError = error.localizedDescription
+                                        AppModel.current?.emu.note("care notification failed: " + error.localizedDescription)
+                                    } else {
+                                        self.sentMasks[deviceID] = mask
+                                        AppModel.current?.emu.note("care banner scheduled for " + deviceID)
+                                        if !self.enabled || UIApplication.shared.applicationState != .background {
+                                            center.removePendingNotificationRequests(withIdentifiers: [request.identifier])
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            func testBanner() {
+                guard enabled else { lastError = "Enable Background Mode and Care Notifications first."; return }
+                ask { granted in
+                    guard granted else { self.lastError = "Allow notifications in iPhone Settings first."; return }
+                    let content = UNMutableNotificationContent()
+                    content.title = "TamaiOS Care Notifications"
+                    content.body = "Test banner — care alerts are ready."
+                    content.sound = .default
+                    let request = UNNotificationRequest(identifier: self.prefix + "test", content: content,
+                        trigger: UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false))
+                    UNUserNotificationCenter.current().add(request) { error in
+                        DispatchQueue.main.async {
+                            self.lastError = error?.localizedDescription
+                            self.status = error == nil ? "Test scheduled: leave TamaiOS within 5 seconds" : "Test could not be scheduled"
+                        }
+                    }
+                }
+            }
+
+            func openSettings() {
+                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(url)
+            }
+        }
+
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/DaytimeClock.swift
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat > 'ios/TamaiOS/Core/DaytimeClock.swift' <<'TAMAIOS_SOURCE_EOF'
+        import Foundation
+
+        /// A per-device offset: time advances normally, rather than freezing at noon.
+        enum DaytimeClock {
+            private static func key(_ id: String) -> String { "daytime.offset." + id }
+            static func enabled(_ id: String?) -> Bool {
+                guard let id else { return false }
+                return UserDefaults.standard.object(forKey: key(id)) != nil
+            }
+            static func enable(_ id: String) {
+                let now = Date()
+                let noon = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: now) ?? now
+                UserDefaults.standard.set(noon.timeIntervalSince(now), forKey: key(id))
+            }
+            static func disable(_ id: String) { UserDefaults.standard.removeObject(forKey: key(id)) }
+            static func target(_ id: String?) -> Double {
+                guard let id, enabled(id) else { return rtcNow() }
+                return rtcNow() + UserDefaults.standard.double(forKey: key(id))
             }
         }
 
@@ -8603,7 +8851,7 @@ jobs:
         \ {\n+                    let sel = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66], self.gpio[0x67]])\
         \ & 0x1000 == 0;\n+                    self.radio.as_mut().unwrap().select(sel);\n+                }\n      \
         \       }\n             Some(_) => {}\n             None => self.mmio_write(addr, size, val),\nTAMAIOS_SOURCE_EOF\n"
-    - name: Bundle all three included device variants
+    - name: Bundle Fairy, Magic, and Wonder Garden
       run: |
         set -euo pipefail
         python3 - <<'BUNDLE_FIRMWARE'
@@ -8649,6 +8897,12 @@ jobs:
       run: |
         brew install xcodegen
         cd ios && xcodegen generate
+    - name: Validate generated Swift syntax
+      run: |
+        set -euo pipefail
+        xcrun --sdk iphoneos swiftc -frontend -parse -target arm64-apple-ios16.0 \
+          -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+          $(find ios/TamaiOS -name '*.swift' -print) 2>&1 | tee ios/swift-syntax.log
     - name: Build the app
       run: |
         set -euo pipefail
@@ -8701,5 +8955,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: TamaiOS-build-diagnostics
-        path: ios/build.log
+        path: |-
+          ios/build.log
+          ios/swift-syntax.log
         if-no-files-found: ignore

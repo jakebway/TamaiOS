@@ -3,7 +3,7 @@ name: TamaiOS Care Observation Harness
   workflow_dispatch:
     inputs:
       firmware:
-        description: English firmware to observe
+        description: English firmware
         type: choice
         required: true
         default: fw_tg18_en_v063_2020-02-13_wondergarden.bin
@@ -12,20 +12,20 @@ name: TamaiOS Care Observation Harness
         - fw_tg18_en_v058_2019-05-13_magic.bin
         - fw_tg18_en_v063_2020-02-13_wondergarden.bin
       seconds:
-        description: Emulated seconds, 1–3600
-        type: string
+        description: Emulated seconds (1–3600)
         required: true
-        default: '120'
+        default: '20'
+        type: string
       snapshot:
         description: Optional existing repository snapshot path
-        type: string
         required: false
         default: ''
+        type: string
       presses:
-        description: 'Optional button script: 4:B 8:A 10:B'
-        type: string
+        description: Button script, e.g. 10:B
         required: false
-        default: ''
+        default: 10:B
+        type: string
 permissions:
   contents: read
 jobs:
@@ -41,18 +41,16 @@ jobs:
       run: python3 -m pip install PyYAML==6.0.2
     - name: Prepare pinned core and current app radio patch
       run: "python3 - <<'PY'\nimport pathlib, subprocess, yaml\nworkflow = yaml.safe_load(pathlib.Path('.github/workflows/build.yml').read_text())\n\
-        steps = workflow['jobs']['build']['steps']\npatch_steps = [step for step in steps if step.get('name') ==\
-        \ 'Write patches/radio.patch']\nif len(patch_steps) != 1:\n    raise SystemExit('Cannot identify the current\
-        \ app radio-patch generator.')\nsubprocess.run(['bash', '-euo', 'pipefail', '-c', patch_steps[0]['run']],\
-        \ check=True)\nsubprocess.run(['git', 'clone', 'https://github.com/oreo-fox/tg18-emu', 'upstream'], check=True)\n\
-        subprocess.run(['git', '-C', 'upstream', 'checkout', '41204c92e98a8882d5c90a9876d8990f3b63e285'], check=True)\n\
-        subprocess.run(['git', '-C', 'upstream', 'apply', '../patches/radio.patch'], check=True)\nsource = pathlib.Path('upstream/core/src/bin/tg18cli.rs').read_text()\n\
+        steps = [s for s in workflow['jobs']['build']['steps'] if s.get('name') == 'Write patches/radio.patch']\n\
+        if len(steps) != 1: raise SystemExit('Cannot identify current app radio patch.')\nsubprocess.run(['bash','-euo','pipefail','-c',steps[0]['run']],check=True)\n\
+        subprocess.run(['git','clone','https://github.com/oreo-fox/tg18-emu','upstream'],check=True)\nsubprocess.run(['git','-C','upstream','checkout','41204c92e98a8882d5c90a9876d8990f3b63e285'],check=True)\n\
+        subprocess.run(['git','-C','upstream','apply','../patches/radio.patch'],check=True)\nsource = pathlib.Path('upstream/core/src/bin/tg18cli.rs').read_text()\n\
         needle = 'let outcome = m.run_with_sleep(end);'\nanchor = 'use std::process::exit;'\nif source.count(needle)\
-        \ != 1 or source.count(anchor) != 1:\n    raise SystemExit('Pinned CLI changed; refusing ambiguous source\
-        \ edits.')\nimports = 'use std::io::Write;\\nuse tg18::sound::CallDetector;\\n'\nreplacement = 'let mut\
-        \ detector = CallDetector::default();\\n    let mut seen_sound = m.sys.sound.events.len();\\n    let mut\
-        \ previous = Vec::new();\\n    let mut sequence = 0usize;\\n    let mut stream = std::io::BufWriter::new(std::fs::File::create(\"\
-        observations.jsonl\").expect(\"observations\"));\\n    let outcome = loop {\\n        let target = end.min(m.executed.saturating_add((CPU_HZ\
+        \ != 1 or source.count(anchor) != 1: raise SystemExit('Pinned CLI changed.')\nimports = \"use std::io::Write;\\\
+        nuse tg18::sound::CallDetector;\\n\"\nreplacement = 'let mut detector = CallDetector::default();\\n    let\
+        \ mut seen_sound = m.sys.sound.events.len();\\n    let mut previous = Vec::new();\\n    let mut sequence\
+        \ = 0usize;\\n    let mut stream = std::io::BufWriter::new(std::fs::File::create(\"observations.jsonl\"\
+        ).expect(\"observations\"));\\n    let outcome = loop {\\n        let target = end.min(m.executed.saturating_add((CPU_HZ\
         \ * 0.25) as u64));\\n        let outcome = m.run_with_sleep(target);\\n        let sound_count = m.sys.sound.events.len();\\\
         n        let first = seen_sound.min(sound_count);\\n        let detected = detector.feed(&m.sys.sound.events[first..]);\\\
         n        let new_sound_events = sound_count - first;\\n        seen_sound = sound_count;\\n        let raw:\
@@ -64,17 +62,16 @@ jobs:
         : new_sound_events, \"care_detector_matched\": detected,\\n                \"candidate_profile_base\": \"\
         F800D864\", \"candidate_raw_hex\": raw.iter().map(|v| format!(\"{:02X}\", v)).collect::<String>(),\\n  \
         \              \"candidate_attention_byte\": raw[12], \"current_app_mask\": raw[12] & 15,\\n           \
-        \     \"frame\": frame.as_deref(),\\n                \"interpretation\": \"raw candidate fields only; care\
-        \ meanings are not validated\"\\n            });\\n            writeln!(stream, \"{}\", record).expect(\"\
-        observation write\");\\n            if let Some(frame) = frame {\\n                std::fs::create_dir_all(\"\
-        frames\").expect(\"frames\");\\n                tg18::png::write(&frame, 128, 128, &m.lcd_rgb(), 3).expect(\"\
-        frame\");\\n            }\\n            previous = raw;\\n            sequence += 1;\\n        }\\n    \
-        \    if m.executed >= end || !matches!(outcome, Outcome::Limit | Outcome::PowerOff) { break outcome; }\\\
-        n    };\\n    stream.flush().expect(\"flush observations\");'\n# Preserve the original leading //! module\
-        \ documentation. Insert imports at an item boundary.\nsource = source.replace(anchor, imports + anchor,\
-        \ 1).replace(needle, replacement, 1)\nfirst_item = source.index('use std::io::Write;')\nif any(line.lstrip().startswith('//!')\
-        \ for line in source[first_item:].splitlines()):\n    raise SystemExit('Inner module docs unexpectedly occur\
-        \ after code.')\npathlib.Path('upstream/core/src/bin/careprobe.rs').write_text(source)\n\nPY\n"
+        \     \"frame\": frame.as_deref(), \"interpretation\": \"raw candidate fields; care meanings not validated\"\
+        \\n            });\\n            writeln!(stream, \"{}\", record).expect(\"observation write\");\\n    \
+        \        if let Some(frame) = frame {\\n                std::fs::create_dir_all(\"frames\").expect(\"frames\"\
+        );\\n                tg18::png::write(&frame, 128, 128, &m.lcd_rgb(), 3).expect(\"frame\");\\n         \
+        \   }\\n            previous = raw; sequence += 1;\\n        }\\n        if m.executed >= end || !matches!(outcome,\
+        \ Outcome::Limit | Outcome::PowerOff) { break outcome; }\\n    };\\n    stream.flush().expect(\"flush observations\"\
+        );'\nsource = source.replace(anchor,imports+anchor,1).replace(needle,replacement,1)\nif any(line.lstrip().startswith('//!')\
+        \ for line in source[source.index('use std::io::Write;'):].splitlines()):\n    raise SystemExit('Module\
+        \ documentation appears after code.')\npathlib.Path('upstream/core/src/bin/careprobe.rs').write_text(source)\n\
+        \nPY\n"
     - name: Build headless observation runner
       run: 'set -euo pipefail
 
@@ -85,29 +82,40 @@ jobs:
         EMU_SECONDS: ${{ inputs.seconds }}
         SNAPSHOT_PATH: ${{ inputs.snapshot }}
         BUTTON_PRESSES: ${{ inputs.presses }}
-      run: "python3 - <<'PY'\nimport hashlib, json, os, pathlib, re, subprocess\nroot = pathlib.Path.cwd().resolve()\n\
-        rom = root / 'firmware' / os.environ['ROM_FILE']\nimage = rom.read_bytes()\nif len(image) != 8388608 or\
-        \ image[:4] != b'SPII':\n    raise SystemExit('Expected 8 MiB SPII firmware, not an LFS pointer or archive.')\n\
-        seconds = float(os.environ['EMU_SECONDS'])\nif not 1 <= seconds <= 3600: raise SystemExit('Seconds must\
-        \ be between 1 and 3600.')\nargs = [str(root / 'upstream/target/release/careprobe'), str(rom), '--seconds',\
-        \ str(seconds), '--quiet', '--never-sleep', '--screenshot', 'final.png']\nsnapshot = os.environ.get('SNAPSHOT_PATH','').strip()\n\
-        if snapshot:\n    snap = (root / snapshot).resolve()\n    if root not in snap.parents or not snap.is_file():\
-        \ raise SystemExit('Snapshot must exist inside this repository.')\n    args += ['--snapshot-in',str(snap)]\n\
-        for press in os.environ.get('BUTTON_PRESSES','').split():\n    if not re.fullmatch(r'\\d+(?:\\.\\d+)?:[ABC](?:\\\
-        +[ABC])*',press): raise SystemExit('Press syntax: 4:B 8:A 10:B')\n    args += ['--press',press]\nout = root\
-        \ / 'harness-results'\nout.mkdir(exist_ok=True)\nmanifest = {'harness_revision':'care-harness-docfix-v2','rom':rom.name,'sha256':hashlib.sha256(image).hexdigest(),'core_commit':'41204c92e98a8882d5c90a9876d8990f3b63e285','seconds_requested':seconds,'snapshot_used':bool(snapshot),'presses':os.environ.get('BUTTON_PRESSES',''),'scope':'Headless\
-        \ observations only; fresh firmware can remain in setup. No care state is validated by a successful boot.'}\n\
-        (out/'manifest.json').write_text(json.dumps(manifest,indent=2))\nwith (out/'run.log').open('w') as log:\n\
-        \    result = subprocess.run(args,cwd=out,stdout=log,stderr=subprocess.STDOUT,timeout=600)\nmanifest['process_exit_code']\
-        \ = result.returncode\ntrace = out/'observations.jsonl'\nrows = [json.loads(line) for line in trace.read_text().splitlines()\
-        \ if line.strip()] if trace.exists() else []\nmanifest['record_count'] = len(rows)\nmanifest['care_detector_matches']\
-        \ = sum(bool(row['care_detector_matched']) for row in rows)\nmanifest['records_with_sound'] = sum(row['new_sound_events']\
-        \ > 0 for row in rows)\n(out/'manifest.json').write_text(json.dumps(manifest,indent=2))\nsummary = '# Firmware\
-        \ observation harness\\n\\n```json\\n'+json.dumps(manifest,indent=2)+'\\n```\\n\\nCompare frames with raw\
-        \ observations. No firmware or save snapshots are included.\\n'\n(out/'summary.md').write_text(summary)\n\
-        with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write(summary)\nlog_text = (out/'run.log').read_text(errors='replace')\n\
-        if result.returncode or any(marker in log_text for marker in ['result: Crash','result: Stuck','result: BleFail']):\n\
-        \    raise SystemExit(result.returncode or 1)\n\nPY\n"
+      run: "python3 - <<'PY'\nimport hashlib, json, math, os, pathlib, subprocess\ndef parse_presses(text):\n  \
+        \  parsed = []\n    for token in text.split():\n        stamp, separator, keys = token.partition(':')\n\
+        \        if not separator or not stamp or not keys:\n            raise ValueError(f'Invalid press {token!r};\
+        \ use 10:B or 4:B 8:A 10:B.')\n        if any(c not in '0123456789.' for c in stamp) or stamp.count('.')\
+        \ > 1:\n            raise ValueError(f'Invalid timestamp in {token!r}.')\n        try:\n            seconds\
+        \ = float(stamp)\n        except ValueError:\n            raise ValueError(f'Invalid timestamp in {token!r}.')\
+        \ from None\n        if not math.isfinite(seconds) or seconds < 0:\n            raise ValueError(f'Invalid\
+        \ timestamp in {token!r}.')\n        parts = keys.upper().split('+')\n        if any(key not in ('A', 'B',\
+        \ 'C') for key in parts):\n            raise ValueError(f'Invalid buttons in {token!r}; use A, B, C, or\
+        \ A+B.')\n        parsed.append(f'{seconds:g}:' + '+'.join(parts))\n    return parsed\nroot = pathlib.Path.cwd().resolve()\n\
+        out = root / 'harness-results'\nout.mkdir(exist_ok=True)\nmanifest = {'harness_revision':'care-harness-inputfix-v3','presses_received':os.environ.get('BUTTON_PRESSES','')}\n\
+        try:\n    presses = parse_presses(manifest['presses_received'])\n    manifest['presses'] = presses\n   \
+        \ seconds = float(os.environ['EMU_SECONDS'])\n    if not math.isfinite(seconds) or not 1 <= seconds <= 3600:\
+        \ raise ValueError('Seconds must be 1–3600.')\n    if any(float(press.split(':')[0]) > seconds for press\
+        \ in presses): raise ValueError('A press is after the end of the run.')\n    rom = root / 'firmware' / os.environ['ROM_FILE']\n\
+        \    image = rom.read_bytes()\n    if len(image) != 8388608 or image[:4] != b'SPII': raise ValueError('Expected\
+        \ an 8 MiB SPII image.')\n    manifest.update(rom=rom.name,sha256=hashlib.sha256(image).hexdigest(),core_commit='41204c92e98a8882d5c90a9876d8990f3b63e285',seconds_requested=seconds)\n\
+        \    args = [str(root/'upstream/target/release/careprobe'),str(rom),'--seconds',str(seconds),'--quiet','--never-sleep','--screenshot','final.png']\n\
+        \    snapshot = os.environ.get('SNAPSHOT_PATH','').strip()\n    manifest['snapshot_used'] = bool(snapshot)\n\
+        \    if snapshot:\n        path = (root/snapshot).resolve()\n        if root not in path.parents or not\
+        \ path.is_file(): raise ValueError('Snapshot must exist inside the repository.')\n        args += ['--snapshot-in',str(path)]\n\
+        \    for press in presses: args += ['--press',press]\n    with (out/'run.log').open('w') as log:\n     \
+        \   result = subprocess.run(args,cwd=out,stdout=log,stderr=subprocess.STDOUT,timeout=600)\n    manifest['process_exit_code']\
+        \ = result.returncode\n    observations = out/'observations.jsonl'\n    rows = [json.loads(line) for line\
+        \ in observations.read_text().splitlines() if line.strip()] if observations.exists() else []\n    manifest['record_count']\
+        \ = len(rows)\n    manifest['care_detector_matches'] = sum(bool(row['care_detector_matched']) for row in\
+        \ rows)\n    manifest['records_with_sound'] = sum(row['new_sound_events'] > 0 for row in rows)\n    manifest['scope']\
+        \ = 'Headless observations only. Setup and care-state meanings must be checked against frames.'\n    log_text\
+        \ = (out/'run.log').read_text(errors='replace')\n    if result.returncode or any(marker in log_text for\
+        \ marker in ['result: Crash','result: Stuck','result: BleFail']):\n        raise RuntimeError('Emulator\
+        \ failed; inspect run.log.')\nexcept Exception as error:\n    manifest['error'] = str(error)\n    (out/'manifest.json').write_text(json.dumps(manifest,indent=2))\n\
+        \    raise\nfinally:\n    (out/'manifest.json').write_text(json.dumps(manifest,indent=2))\n    summary =\
+        \ '# Care harness inputfix-v3\\n\\n```json\\n'+json.dumps(manifest,indent=2)+'\\n```\\n'\n    (out/'summary.md').write_text(summary)\n\
+        \    with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as stream: stream.write(summary)\n\nPY\n"
     - name: Upload observations only (no firmware or save files)
       if: always()
       uses: actions/upload-artifact@v4

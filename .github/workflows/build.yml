@@ -4043,7 +4043,7 @@ jobs:
             }
             func report() -> String {
                 lock.lock(); defer { lock.unlock() }
-                return (["settings-touch-v1 / settings-care-v1 / pickup-download-only-v1",
+                return (["settings-touch-v1 / settings-care-v1 / pickup-download-only-v1 / marriage-name-fix-v1",
                          "Arcade: full-cell touch-down; 0.12s late-catch window. Transport unchanged."] + events).joined(separator: "\n")
             }
         }
@@ -4296,6 +4296,7 @@ jobs:
                     do {
                         if st.away {
                             close = true
+                            let name = town.name(toy)
                             if st.pending == .marry {
                                 guard let s = st.suitor,
                                       let pkt = town.marriagePacket(toy, s, babySex: st.babySex, genes: st.genes) else {

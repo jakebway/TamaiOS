@@ -1,0 +1,114 @@
+name: TamaiOS Care Observation Harness
+'on':
+  workflow_dispatch:
+    inputs:
+      firmware:
+        description: English firmware to observe
+        type: choice
+        required: true
+        default: fw_tg18_en_v063_2020-02-13_wondergarden.bin
+        options:
+        - fw_tg18_en_v057_2019-05-13_fairy.bin
+        - fw_tg18_en_v058_2019-05-13_magic.bin
+        - fw_tg18_en_v063_2020-02-13_wondergarden.bin
+      seconds:
+        description: Emulated seconds (1–3600; fresh firmware can remain in setup)
+        required: true
+        default: '120'
+        type: string
+      snapshot:
+        description: Optional existing repository snapshot path (never uploaded in results)
+        required: false
+        default: ''
+        type: string
+      presses:
+        description: Optional button script, e.g. 4:B 8:A 10:B (not an automatic care test)
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - name: Check out repository without modifying firmware
+      uses: actions/checkout@v4
+      with:
+        lfs: true
+    - name: Install workflow parser
+      run: python3 -m pip install PyYAML==6.0.2
+    - name: Prepare pinned core and current app radio patch
+      run: "python3 - <<'PY'\nimport pathlib, subprocess, yaml\nworkflow = yaml.safe_load(pathlib.Path('.github/workflows/build.yml').read_text())\n\
+        steps = workflow['jobs']['build']['steps']\npatch_steps = [step for step in steps if step.get('name') ==\
+        \ 'Write patches/radio.patch']\nif len(patch_steps) != 1:\n    raise SystemExit('Cannot identify the current\
+        \ app radio-patch generator; refusing to substitute another patch.')\nsubprocess.run(['bash', '-euo', 'pipefail',\
+        \ '-c', patch_steps[0]['run']], check=True)\nsubprocess.run(['git', 'clone', 'https://github.com/oreo-fox/tg18-emu',\
+        \ 'upstream'], check=True)\nsubprocess.run(['git', '-C', 'upstream', 'checkout', '41204c92e98a8882d5c90a9876d8990f3b63e285'],\
+        \ check=True)\nsubprocess.run(['git', '-C', 'upstream', 'apply', '../patches/radio.patch'], check=True)\n\
+        source = pathlib.Path('upstream/core/src/bin/tg18cli.rs').read_text()\nneedle = 'let outcome = m.run_with_sleep(end);'\n\
+        if source.count(needle) != 1:\n    raise SystemExit('Pinned CLI changed; refusing an ambiguous instrumentation\
+        \ patch.')\ninstrument = 'use std::io::Write;\\nuse tg18::sound::CallDetector;\\n'\nreplacement = 'let mut\
+        \ detector = CallDetector::default();\\n    let mut seen_sound = m.sys.sound.events.len();\\n    let mut\
+        \ previous = Vec::new();\\n    let mut sequence = 0usize;\\n    let mut stream = std::io::BufWriter::new(std::fs::File::create(\"\
+        observations.jsonl\").expect(\"observations\"));\\n    let outcome = loop {\\n        let target = end.min(m.executed.saturating_add((CPU_HZ\
+        \ * 0.25) as u64));\\n        let outcome = m.run_with_sleep(target);\\n        let sound_count = m.sys.sound.events.len();\\\
+        n        let first = seen_sound.min(sound_count);\\n        let detected = detector.feed(&m.sys.sound.events[first..]);\\\
+        n        let new_sound_events = sound_count - first;\\n        seen_sound = sound_count;\\n        let raw:\
+        \ Vec<u8> = (0..256u32).map(|offset| m.sys.peek8(0xF800D864 + offset)).collect();\\n        let changed\
+        \ = raw != previous;\\n        if changed || new_sound_events > 0 || sequence == 0 {\\n            let record\
+        \ = serde_json::json!({\\n                \"emulated_seconds\": m.now(), \"pc\": format!(\"{:08X}\", m.cpu.pc()),\\\
+        n                \"outcome\": format!(\"{:?}\", outcome), \"powered_off\": m.sys.powered_off,\\n       \
+        \         \"new_sound_events\": new_sound_events, \"care_detector_matched\": detected,\\n              \
+        \  \"candidate_profile_base\": \"F800D864\", \"candidate_raw_hex\": raw.iter().map(|v| format!(\"{:02X}\"\
+        , v)).collect::<String>(),\\n                \"candidate_attention_byte\": raw[12], \"current_app_mask\"\
+        : raw[12] & 15,\\n                \"interpretation\": \"raw candidate fields only; care meanings are not\
+        \ validated\"\\n            });\\n            writeln!(stream, \"{}\", record).expect(\"observation write\"\
+        );\\n            if sequence < 120 {\\n                std::fs::create_dir_all(\"frames\").expect(\"frames\"\
+        );\\n                tg18::png::write(&format!(\"frames/{:04}.png\", sequence), 128, 128, &m.lcd_rgb(),\
+        \ 3).expect(\"frame\");\\n            }\\n            previous = raw;\\n            sequence += 1;\\n  \
+        \      }\\n        if m.executed >= end || !matches!(outcome, Outcome::Limit | Outcome::PowerOff) { break\
+        \ outcome; }\\n    };\\n    stream.flush().expect(\"flush observations\");'\npathlib.Path('upstream/core/src/bin/careprobe.rs').write_text(instrument\
+        \ + source.replace(needle, replacement, 1))\n\nPY\n"
+    - name: Build headless observation runner
+      run: cargo build --release --manifest-path upstream/Cargo.toml -p tg18-core --bin careprobe
+    - name: Observe firmware in a disposable process
+      env:
+        ROM_FILE: ${{ inputs.firmware }}
+        EMU_SECONDS: ${{ inputs.seconds }}
+        SNAPSHOT_PATH: ${{ inputs.snapshot }}
+        BUTTON_PRESSES: ${{ inputs.presses }}
+      run: "python3 - <<'PY'\nimport hashlib, json, os, pathlib, re, subprocess\nroot = pathlib.Path.cwd().resolve()\n\
+        rom = root / 'firmware' / os.environ['ROM_FILE']\nif not rom.is_file(): raise SystemExit('Firmware file\
+        \ is absent.')\nimage = rom.read_bytes()\nif len(image) != 8388608 or image[:4] != b'SPII':\n    raise SystemExit('Expected\
+        \ an 8 MiB SPII firmware image, not an LFS pointer or archive.')\nseconds = float(os.environ['EMU_SECONDS'])\n\
+        if not 1 <= seconds <= 3600: raise SystemExit('Seconds must be between 1 and 3600.')\nsnapshot = os.environ.get('SNAPSHOT_PATH',\
+        \ '').strip()\nargs = [str(root / 'upstream/target/release/careprobe'), str(rom), '--seconds', str(seconds),\
+        \ '--quiet', '--never-sleep', '--screenshot', 'final.png']\nif snapshot:\n    snap = (root / snapshot).resolve()\n\
+        \    if root not in snap.parents or not snap.is_file(): raise SystemExit('Snapshot must be an existing file\
+        \ inside this repository.')\n    args += ['--snapshot-in', str(snap)]\nfor press in os.environ.get('BUTTON_PRESSES','').split():\n\
+        \    if not re.fullmatch(r'\\d+(?:\\.\\d+)?:[ABC](?:\\+[ABC])*', press): raise SystemExit('Press syntax:\
+        \ 4:B 8:A 10:B')\n    args += ['--press', press]\noutput = root / 'harness-results'\noutput.mkdir(exist_ok=True)\n\
+        manifest = {'rom': rom.name, 'sha256': hashlib.sha256(image).hexdigest(), 'core_commit':'41204c92e98a8882d5c90a9876d8990f3b63e285',\
+        \ 'seconds_requested':seconds, 'snapshot_used':bool(snapshot), 'presses':os.environ.get('BUTTON_PRESSES',''),\
+        \ 'scope':'Headless firmware observations, not an iOS banner test. Fresh firmware may remain in setup.',\
+        \ 'candidate_mapping':'F800D864 is a hypothesis to observe, not a validated care map.'}\n(output/'manifest.json').write_text(json.dumps(manifest,indent=2))\n\
+        with (output/'run.log').open('w') as log:\n    result = subprocess.run(args,cwd=output,stdout=log,stderr=subprocess.STDOUT,timeout=600)\n\
+        manifest['process_exit_code'] = result.returncode\nrecords = []\ntrace = output/'observations.jsonl'\nif\
+        \ trace.exists():\n    records = [json.loads(line) for line in trace.read_text().splitlines() if line.strip()]\n\
+        manifest['record_count'] = len(records)\nmanifest['care_detector_matches'] = sum(bool(row['care_detector_matched'])\
+        \ for row in records)\nmanifest['records_with_sound'] = sum(row['new_sound_events'] > 0 for row in records)\n\
+        (output/'manifest.json').write_text(json.dumps(manifest,indent=2))\n(output/'summary.md').write_text('#\
+        \ Firmware observation harness\\n\\n' + json.dumps(manifest,indent=2) + '\\n\\nReview frame files against\
+        \ the raw observations. A successful boot is not validation of any care category. No ROMs or save snapshots\
+        \ are included.\\n')\nwith open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary: summary.write((output/'summary.md').read_text())\n\
+        if result.returncode: raise SystemExit(result.returncode)\n\nPY\n"
+    - name: Upload observations only (no firmware or save files)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: care-observations-${{ github.run_number }}
+        path: harness-results/
+        if-no-files-found: warn
+        retention-days: 3

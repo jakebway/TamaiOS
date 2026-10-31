@@ -1,8 +1,8 @@
 # TamaiOS — all app source and Bluetooth patch embedded directly below.
 # No previous TamaiOS commit or historical source archive is required.
 # Save as .github/workflows/build.yml; keep the three firmware/*.bin files.
-# Adds background-only care banners, permission diagnostics, test banners,
-# and per-device Daytime Mode. Standard build dependencies are fetched normally.
+# Current working app retained; adds event-based care notifications and carelog diagnostics.
+# All app source remains embedded here. Standard build dependencies are fetched normally.
 name: Build TamaiOS
 'on':
   workflow_dispatch: {}
@@ -7084,12 +7084,13 @@ jobs:
 
                     if now >= nextCarePoll {
                         nextCarePoll = now + 1
-                        let mask = withCore { tg_profile_attention($0) } ?? -1
-                        if mask >= 0 {
-                            DispatchQueue.main.async {
-                                guard let toy = self.toy else { return }
-                                CareAlerts.shared.observe(mask: Int(mask), deviceID: toy.id, name: toy.name)
-                            }
+                        let sample = careSample()
+                        let observedAt = ProcessInfo.processInfo.systemUptime
+                        let expectedID = toyID
+                        DispatchQueue.main.async {
+                            guard let toy = self.toy, toy.id == expectedID else { return }
+                            CareAlerts.shared.observe(mask: sample.mask, deviceID: toy.id, name: toy.name,
+                                                      source: .poll, observedAt: observedAt, raw: sample.raw, stage: sample.stage)
                         }
                     }
                     audio.push(audioBuf, n)
@@ -7144,15 +7145,31 @@ jobs:
                 }
             }
 
+            private func careSample() -> (mask: Int, raw: Int, stage: Int) {
+                let sample = withCore { h -> (Int, Int, Int) in
+                    let mask = Int(tg_profile_attention(h))
+                    guard mask >= 0 else { return (mask, -1, -1) }
+                    // Read raw bytes only under the existing supported-English-ROM guard.
+                    var raw: UInt8 = 0
+                    var stage: UInt8 = 0
+                    let rawOK = tg_peek(h, 0xF800_D870, &raw, 1)
+                    let stageOK = tg_peek(h, 0xF800_D8B6, &stage, 1)
+                    return (mask, rawOK == 1 ? Int(raw) : -1, stageOK == 1 ? Int(stage) : -1)
+                }
+                return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1)
+            }
+
             private func careCall() {
-                note("care call heard")
+                let sample = careSample()
+                let observedAt = ProcessInfo.processInfo.systemUptime
+                let expectedID = toyID
+                note("care call detector matched; captured mask=\(sample.mask) raw=\(sample.raw) stage=\(sample.stage)")
                 DispatchQueue.main.async {
                     self.calling = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.calling = false }
-                    guard let toy = self.toy else { return }
-                    let mask = self.withCore { tg_profile_attention($0) } ?? -1
-                    // Supported firmware uses actual attention flags, not arbitrary buzzer sounds.
-                    CareAlerts.shared.observe(mask: mask >= 0 ? Int(mask) : 16, deviceID: toy.id, name: toy.name)
+                    guard let toy = self.toy, toy.id == expectedID else { return }
+                    CareAlerts.shared.observe(mask: sample.mask, deviceID: toy.id, name: toy.name,
+                                              source: .sound, observedAt: observedAt, raw: sample.raw, stage: sample.stage)
                 }
             }
 
@@ -8026,6 +8043,9 @@ jobs:
                 case "linklog":
                     return LinkDiagnostics.shared.report()
 
+                case "carelog":
+                    return CareAlerts.shared.diagnostics()
+
                 case "diag":
                     let s = diagnostics(emu)
                     UIPasteboard.general.string = s
@@ -8314,6 +8334,7 @@ jobs:
                     "-- autorun --", run("autorun", emu: emu),
                     "-- perf --", run("perf", emu: emu),
                     "-- files --", run("files", emu: emu),
+                    "-- care notifications --", CareAlerts.shared.diagnostics(),
                     "-- core status --", run("status", emu: emu),
                     "-- core log (last 40) --", run("log 40", emu: emu),
                     "-- app log (last 40) --", run("applog 40", emu: emu),
@@ -8343,6 +8364,7 @@ jobs:
             Paste one command per line (# for comments). Changes persist.
             INFO
               diag                 everything + connection/arcade trace, copied to clipboard
+              carelog              care event decisions
               status | perf | params | files
               log [n]  applog [n]  firmware / app log
             TOY
@@ -8749,44 +8771,87 @@ jobs:
         import UIKit
         import UserNotifications
         import Combine
+        import SwiftUI
 
-        /// Local care banners. No remote push service is needed.
         final class CareAlerts: ObservableObject {
             static let shared = CareAlerts()
+            static let revision = "care-alert-events-v1"
+            typealias Source = CareEventPolicy.Source
             @Published private(set) var status = "Checking notification settings…"
+            @Published private(set) var lastError: String?
             @Published private(set) var permissionNotRequested = false
             @Published private(set) var canShowAlerts = false
             @Published private(set) var permissionTitle = "Checking permissions"
             @Published private(set) var permissionDetail = "Reading your notification preferences."
-            @Published private(set) var lastError: String?
+            @Published private(set) var permissionSymbol = "bell"
+            var permissionColor: Color { canShowAlerts ? .green : .secondary }
             private let prefix = "tamaios-care-"
-            private var sentMasks: [String: Int] = [:]
+            private var generation = 0
+            private var policy = CareEventPolicy()
             private var inFlight: Set<String> = []
-            private var lastAttempts: [String: Date] = [:]
-
+            private var lastPollAttempt: [String: Double] = [:]
+            private var lastMask: [String: Int] = [:]
+            private var samples: [String: String] = [:]
+            private var counters: [String: Int] = [:]
+            private var history: [String] = []
+            private var permissionSummary = "not checked"
+            private var pendingCount = -1
+            private var deliveredCount = -1
+            private var systemSnapshotAt: Date?
             private var enabled: Bool { Prefs.flag("callAlerts") && Prefs.flag("liveInBackground") }
-
+            private struct Event {
+                let id: String
+                let deviceID: String
+                let name: String
+                let source: Source
+                let mask: Int
+                let raw: Int
+                let stage: Int
+                let observedAt: Double
+                let generation: Int
+            }
+            private func count(_ key: String) { counters[key, default: 0] += 1 }
+            private func record(_ text: String) {
+                history.append(String(format: "%.3f", ProcessInfo.processInfo.systemUptime) + " " + text)
+                if history.count > 240 { history.removeFirst(history.count - 240) }
+            }
+            private func appState() -> String {
+                switch UIApplication.shared.applicationState {
+                case .active: return "active"
+                case .inactive: return "inactive"
+                case .background: return "background"
+                @unknown default: return "unknown"
+                }
+            }
+            private func petName(deviceID: String) -> String {
+                guard let toy = AppModel.current?.emu.toy, toy.id == deviceID else { return "Your Tama" }
+                let value = Town.shared.state(toy).petName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return value.isEmpty ? "Your Tama" : value
+            }
             func refresh() {
-                UNUserNotificationCenter.current().getNotificationSettings { settings in
+                let center = UNUserNotificationCenter.current()
+                center.getNotificationSettings { settings in
                     DispatchQueue.main.async {
                         self.permissionNotRequested = settings.authorizationStatus == .notDetermined
                         self.canShowAlerts = (settings.authorizationStatus == .authorized || settings.authorizationStatus == .ephemeral)
                             && settings.alertSetting == .enabled && settings.alertStyle != .none
-                        self.permissionTitle = self.permissionNotRequested ? "Permission needed" : (self.canShowAlerts ? "Notifications allowed" : "Alerts unavailable")
-                        self.permissionDetail = self.permissionNotRequested ? "Allow notifications to receive care alerts." : (self.canShowAlerts ? "Care banners are enabled in iPhone Settings." : "Review notification permissions and banners in iPhone Settings.")
-                        switch settings.authorizationStatus {
-                        case .notDetermined: self.status = "Permission not requested"
-                        case .denied: self.status = "Notifications blocked in iPhone Settings"
-                        case .provisional: self.status = "Quiet delivery only — enable alerts in iPhone Settings"
-                        case .authorized, .ephemeral:
-                            self.status = settings.alertSetting == .enabled && settings.alertStyle != .none
-                                ? "Visual alerts allowed by iOS" : "Banners disabled in iPhone Settings"
-                        @unknown default: self.status = "Check iPhone notification settings"
-                        }
+                        self.permissionTitle = self.permissionNotRequested ? "Permission needed" : (self.canShowAlerts ? "Notifications allowed" : "Review notification settings")
+                        self.permissionDetail = self.permissionNotRequested ? "Allow notifications to receive care alerts." : (self.canShowAlerts ? "Care banners are enabled in iPhone Settings." : "Check permissions and banners in iPhone Settings.")
+                        self.permissionSymbol = self.canShowAlerts ? "checkmark.circle.fill" : "bell.slash"
+                        self.permissionSummary = "authorization=\(settings.authorizationStatus.rawValue) alerts=\(settings.alertSetting.rawValue) style=\(settings.alertStyle.rawValue) sound=\(settings.soundSetting.rawValue)"
+                        self.status = self.permissionTitle
+                        self.systemSnapshotAt = Date()
                     }
                 }
+                center.getPendingNotificationRequests { requests in
+                    let total = requests.filter { $0.identifier.hasPrefix(self.prefix) }.count
+                    DispatchQueue.main.async { self.pendingCount = total }
+                }
+                center.getDeliveredNotifications { notifications in
+                    let total = notifications.filter { $0.request.identifier.hasPrefix(self.prefix) }.count
+                    DispatchQueue.main.async { self.deliveredCount = total }
+                }
             }
-
             func prepare() {
                 refresh()
                 guard enabled else { cancelAll(); return }
@@ -8798,117 +8863,196 @@ jobs:
                     }
                 }
             }
-
             func ask(_ done: ((Bool) -> Void)? = nil) {
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
                     DispatchQueue.main.async {
-                        if let error { self.lastError = error.localizedDescription }
+                        if let error { self.lastError = error.localizedDescription; self.record("PERMISSION error=\(error.localizedDescription)") }
                         self.refresh()
                         done?(granted)
                     }
                 }
             }
-
             func cancelAll() {
+                generation += 1
+                policy.foregroundReset()
+                lastPollAttempt.removeAll()
+                inFlight.removeAll()
+                record("CLEAR requests: foreground entry or alerts disabled; state=\(appState())")
                 let center = UNUserNotificationCenter.current()
                 center.getPendingNotificationRequests { requests in
-                    center.removePendingNotificationRequests(withIdentifiers: requests.map(\.identifier).filter { $0.hasPrefix(self.prefix) })
+                    center.removePendingNotificationRequests(withIdentifiers: requests.filter { $0.identifier.hasPrefix(self.prefix) }.map(\.identifier))
                 }
                 center.getDeliveredNotifications { notifications in
-                    center.removeDeliveredNotifications(withIdentifiers: notifications.map { $0.request.identifier }.filter { $0.hasPrefix(self.prefix) })
+                    center.removeDeliveredNotifications(withIdentifiers: notifications.filter { $0.request.identifier.hasPrefix(self.prefix) }.map { $0.request.identifier })
                 }
             }
-
-            func observe(mask: Int, deviceID: String, name: String) {
+            // Later samples returning to zero do not erase captured care-call events.
+            func observe(mask: Int, deviceID: String, name: String, source: Source = .poll,
+                         observedAt: Double = ProcessInfo.processInfo.systemUptime, raw: Int = -1, stage: Int = -1) {
                 DispatchQueue.main.async {
-                    if mask == 0 {
-                        self.sentMasks[deviceID] = nil
-                        self.lastAttempts[deviceID] = nil
-                        let identifier = self.prefix + deviceID
-                        let center = UNUserNotificationCenter.current()
-                        center.removePendingNotificationRequests(withIdentifiers: [identifier])
-                        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+                    let previous = self.lastMask[deviceID]
+                    self.lastMask[deviceID] = mask
+                    self.samples[deviceID] = "observed=\(String(format: "%.3f", observedAt)) source=\(source.rawValue) raw=\(raw) mask=\(mask) stage=\(stage) app=\(self.appState())"
+                    self.count(source == .sound ? "detector events" : "poll samples")
+                    if previous != mask { self.record("STATE device=\(deviceID) mask=\(previous.map { String($0) } ?? "unknown")->\(mask) raw=\(raw) stage=\(stage)") }
+                    self.policy.observe(mask: mask, deviceID: deviceID)
+                    if source == .poll {
+                        guard mask > 0 else { return }
+                        if self.policy.blockReason(mask: mask, deviceID: deviceID, source: .poll, now: observedAt) == "poll same episode" {
+                            self.count("poll same episode"); return
+                        }
+                        if let attempt = self.lastPollAttempt[deviceID], observedAt - attempt < 15 { return }
+                    } else {
+                        self.record("DETECTED device=\(deviceID) raw=\(raw) mask=\(mask) stage=\(stage); care reason unclassified")
+                    }
+                    guard self.enabled else {
+                        self.count("skipped: settings disabled")
+                        if source == .sound { self.record("SKIP settings disabled") }
                         return
                     }
-                    guard mask > 0, self.enabled,
-                          UIApplication.shared.applicationState == .background,
-                          self.sentMasks[deviceID] != mask,
-                          !self.inFlight.contains(deviceID) else { return }
-                    if let last = self.lastAttempts[deviceID], Date().timeIntervalSince(last) < 15 { return }
-                    self.lastAttempts[deviceID] = Date()
+                    guard UIApplication.shared.applicationState != .active else {
+                        self.count("skipped: foreground")
+                        if source == .sound { self.record("SKIP foreground; no banner expected") }
+                        return
+                    }
+                    guard !self.inFlight.contains(deviceID) else { self.count("skipped: request in progress"); return }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if let reason = self.policy.blockReason(mask: mask, deviceID: deviceID, source: source, now: now) {
+                        self.count("skipped: " + reason)
+                        if source == .sound { self.record("SKIP " + reason) }
+                        return
+                    }
+                    self.lastPollAttempt[deviceID] = now
                     self.inFlight.insert(deviceID)
-                    let center = UNUserNotificationCenter.current()
-                    center.getNotificationSettings { settings in
-                        DispatchQueue.main.async {
-                            guard self.enabled, UIApplication.shared.applicationState == .background,
-                                  AppModel.current?.emu.toy?.id == deviceID,
-                                  settings.authorizationStatus == .authorized || settings.authorizationStatus == .ephemeral else {
-                                self.inFlight.remove(deviceID)
+                    let event = Event(id: UUID().uuidString, deviceID: deviceID, name: self.petName(deviceID: deviceID),
+                                      source: source, mask: mask, raw: raw, stage: stage, observedAt: observedAt, generation: self.generation)
+                    self.attempt(event, pass: 0)
+                }
+            }
+            private func skip(_ event: Event, _ reason: String) {
+                if event.generation == generation { inFlight.remove(event.deviceID) }
+                count("skipped: " + reason)
+                record("SKIP event=\(event.id) source=\(event.source.rawValue) reason=\(reason)")
+            }
+            private func attempt(_ event: Event, pass: Int) {
+                guard event.generation == generation else { skip(event, "superseded by foreground or settings change"); return }
+                guard enabled else { skip(event, "settings disabled"); return }
+                guard AppModel.current?.emu.toy?.id == event.deviceID else { skip(event, "device changed"); return }
+                let state = UIApplication.shared.applicationState
+                if state == .inactive && pass < 6 {
+                    if pass == 0 { record("DEFER event=\(event.id) waiting for background transition") }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.attempt(event, pass: pass + 1) }
+                    return
+                }
+                guard state == .background else { skip(event, "not in background"); return }
+                UNUserNotificationCenter.current().getNotificationSettings { settings in
+                    DispatchQueue.main.async {
+                        guard event.generation == self.generation, self.enabled,
+                              UIApplication.shared.applicationState == .background,
+                              AppModel.current?.emu.toy?.id == event.deviceID else { self.skip(event, "app or device changed before scheduling"); return }
+                        let allowed = settings.authorizationStatus == .authorized || settings.authorizationStatus == .ephemeral || settings.authorizationStatus == .provisional
+                        guard allowed else { self.skip(event, "notification permission unavailable"); self.refresh(); return }
+                        let content = UNMutableNotificationContent()
+                        content.title = "\(event.name) needs you!"
+                        content.body = "Open TamaiOS to check on them."
+                        content.sound = .default
+                        content.threadIdentifier = self.prefix + event.deviceID
+                        content.categoryIdentifier = "TAMAIOS_CARE"
+                        content.userInfo = ["deviceID": event.deviceID, "careEventID": event.id, "careSource": event.source.rawValue]
+                        let request = UNNotificationRequest(identifier: self.prefix + event.deviceID + "-" + event.id, content: content, trigger: nil)
+                        self.record("REQUEST event=\(event.id) source=\(event.source.rawValue) raw=\(event.raw) mask=\(event.mask) age=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - event.observedAt))s auth=\(settings.authorizationStatus.rawValue) alerts=\(settings.alertSetting.rawValue)")
+                        UNUserNotificationCenter.current().add(request) { error in
+                            DispatchQueue.main.async {
+                                if event.generation == self.generation { self.inFlight.remove(event.deviceID) }
+                                if let error {
+                                    self.lastError = error.localizedDescription
+                                    self.count("request failed")
+                                    self.record("ERROR event=\(event.id) \(error.localizedDescription)")
+                                } else if event.generation != self.generation || !self.enabled || UIApplication.shared.applicationState != .background {
+                                    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [request.identifier])
+                                    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [request.identifier])
+                                    self.count("cleared: returned to foreground")
+                                    self.record("CLEAR event=\(event.id) app returned or settings changed")
+                                } else {
+                                    self.lastError = nil
+                                    self.policy.accepted(mask: event.mask, deviceID: event.deviceID, at: ProcessInfo.processInfo.systemUptime)
+                                    self.count("request accepted")
+                                    self.record("ACCEPTED event=\(event.id); iOS accepted request, not proof of visible banner")
+                                    AppModel.current?.emu.note("care notification request accepted (\(event.source.rawValue))")
+                                }
                                 self.refresh()
-                                return
-                            }
-                            if let emu = AppModel.current?.emu {
-                                let currentMask = emu.withCore { tg_profile_attention($0) } ?? -1
-                                if currentMask == 0 {
-                                    self.inFlight.remove(deviceID)
-                                    return
-                                }
-                            }
-                            let content = UNMutableNotificationContent()
-                            content.title = "\(name) needs you!"
-                            content.body = "Your Tama has a care call. Tap to check on it."
-                            content.sound = .default
-                            content.threadIdentifier = self.prefix + deviceID
-                            content.categoryIdentifier = "TAMAIOS_CARE"
-                            content.userInfo = ["deviceID": deviceID]
-                            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
-                            let request = UNNotificationRequest(identifier: self.prefix + deviceID, content: content, trigger: trigger)
-                            center.add(request) { error in
-                                DispatchQueue.main.async {
-                                    self.inFlight.remove(deviceID)
-                                    if let error {
-                                        self.lastError = error.localizedDescription
-                                        AppModel.current?.emu.note("care notification failed: " + error.localizedDescription)
-                                    } else {
-                                        self.sentMasks[deviceID] = mask
-                                        AppModel.current?.emu.note("care banner scheduled for " + deviceID)
-                                        if !self.enabled || UIApplication.shared.applicationState != .background {
-                                            center.removePendingNotificationRequests(withIdentifiers: [request.identifier])
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
                 }
             }
-
             func testBanner() {
                 guard enabled else { lastError = "Enable Background Mode and Care Notifications first."; return }
                 ask { granted in
                     guard granted else { self.lastError = "Allow notifications in iPhone Settings first."; return }
                     let content = UNMutableNotificationContent()
-                    content.title = "TamaiOS Care Notifications"
-                    content.body = "Test banner — care alerts are ready."
+                    content.title = "TamaiOS notification test"
+                    content.body = "Test notification. Real care calls use your Tama’s name."
                     content.sound = .default
                     let request = UNNotificationRequest(identifier: self.prefix + "test", content: content,
                         trigger: UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false))
                     UNUserNotificationCenter.current().add(request) { error in
                         DispatchQueue.main.async {
                             self.lastError = error?.localizedDescription
+                            if let error { self.record("TEST failed: \(error.localizedDescription)") }
+                            else { self.record("TEST accepted; leave app within 5 seconds") }
                             self.status = error == nil ? "Test scheduled: leave TamaiOS within 5 seconds" : "Test could not be scheduled"
                         }
                     }
                 }
             }
-
+            func diagnostics() -> String {
+                refresh()
+                var lines = [Self.revision,
+                             "settings: care=\(Prefs.flag("callAlerts")) background=\(Prefs.flag("liveInBackground")) app=\(appState())",
+                             "burst filter: \(CareEventPolicy.burstWindow)s; later detector calls stay eligible when mask is unchanged",
+                             "permission snapshot: \(permissionSummary)",
+                             "system snapshot: \(systemSnapshotAt.map { String(describing: $0) } ?? "not captured") pending=\(pendingCount) delivered=\(deliveredCount)",
+                             "Request acceptance and delivered-list entries do not prove the user saw a banner."]
+                for key in counters.keys.sorted() { lines.append("\(key): \(counters[key] ?? 0)") }
+                for key in samples.keys.sorted() { lines.append("last sample \(key): \(samples[key] ?? "")") }
+                if let lastError { lines.append("last error: \(lastError)") }
+                lines.append("-- recent care events (monotonic seconds) --")
+                lines += history
+                return lines.joined(separator: "\n")
+            }
             func openSettings() {
                 guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
                 UIApplication.shared.open(url)
             }
         }
-
         TAMAIOS_SOURCE_EOF
+        cat > 'ios/TamaiOS/Core/CareEventPolicy.swift' <<'CARE_POLICY_SOURCE_EOF'
+        import Foundation
+
+        struct CareEventPolicy {
+            enum Source: String { case poll, sound }
+            static let burstWindow = 2.5
+            private(set) var notifiedEpisodes: Set<String> = []
+            private(set) var lastScheduled: [String: Double] = [:]
+            mutating func observe(mask: Int, deviceID: String) {
+                if mask == 0 { notifiedEpisodes.remove(deviceID) }
+            }
+            func blockReason(mask: Int, deviceID: String, source: Source, now: Double) -> String? {
+                if source == .poll {
+                    if mask <= 0 { return "no positive attention state" }
+                    if notifiedEpisodes.contains(deviceID) { return "poll same episode" }
+                }
+                if let last = lastScheduled[deviceID], now - last < Self.burstWindow { return "same short burst" }
+                return nil
+            }
+            mutating func accepted(mask: Int, deviceID: String, at: Double) {
+                lastScheduled[deviceID] = at
+                if mask > 0 { notifiedEpisodes.insert(deviceID) }
+            }
+            mutating func foregroundReset() { notifiedEpisodes.removeAll() }
+        }
+        CARE_POLICY_SOURCE_EOF
     - name: Write ios/TamaiOS/Core/DaytimeClock.swift
       run: |
         set -euo pipefail
@@ -9098,6 +9242,40 @@ jobs:
         python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
         python3 tools/icon.py ios/TamaiOS/Assets.xcassets/AppIcon.appiconset/icon.png
         python3 tools/town.py ios/TamaiOS/TownBackground.png 1680
+    - name: Test care notification policy
+      run: |
+        set -euo pipefail
+        cat > "$RUNNER_TEMP/CarePolicyTests.swift" <<'CARE_TESTS_EOF'
+        import Foundation
+        @main
+        struct CarePolicyTests {
+            static func main() {
+                let id = "test-device"
+                var policy = CareEventPolicy()
+                for time in [117.0, 237.0, 357.0, 417.0, 597.0] {
+                    policy.observe(mask: 3, deviceID: id)
+                    precondition(policy.blockReason(mask: 3, deviceID: id, source: .sound, now: time) == nil)
+                    policy.accepted(mask: 3, deviceID: id, at: time)
+                }
+                precondition(policy.blockReason(mask: 3, deviceID: id, source: .sound, now: 597.1) == "same short burst")
+                precondition(policy.blockReason(mask: 3, deviceID: id, source: .poll, now: 610) == "poll same episode")
+                policy.observe(mask: 0, deviceID: id)
+                policy.observe(mask: 1, deviceID: id)
+                precondition(policy.blockReason(mask: 1, deviceID: id, source: .poll, now: 620) == nil)
+                precondition(policy.blockReason(mask: 0, deviceID: id, source: .sound, now: 620) == nil)
+                precondition(policy.blockReason(mask: 0, deviceID: id, source: .poll, now: 620) != nil)
+                policy.accepted(mask: 1, deviceID: id, at: 620)
+                precondition(policy.blockReason(mask: 1, deviceID: "another-device", source: .sound, now: 620) == nil)
+                policy.foregroundReset()
+                precondition(policy.blockReason(mask: 1, deviceID: id, source: .poll, now: 630) == nil)
+                print("Care policy tests passed: repeat calls, burst filtering, rearm, device separation.")
+            }
+        }
+        CARE_TESTS_EOF
+        xcrun --sdk macosx swiftc -parse-as-library -O \
+          ios/TamaiOS/Core/CareEventPolicy.swift "$RUNNER_TEMP/CarePolicyTests.swift" \
+          -o "$RUNNER_TEMP/care-policy-tests" 2>&1 | tee ios/care-policy-tests.log
+        "$RUNNER_TEMP/care-policy-tests" 2>&1 | tee -a ios/care-policy-tests.log
     - name: Make the Xcode project
       run: |
         brew install xcodegen
@@ -9163,4 +9341,5 @@ jobs:
         path: |-
           ios/build.log
           ios/swift-syntax.log
+          ios/care-policy-tests.log
         if-no-files-found: ignore

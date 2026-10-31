@@ -1,10 +1,9 @@
 # TamaiOS — complete inline app source, Bluetooth patch, and regression tests.
-# Download reliability revision: strict completion, paced writes, session gating,
-# durable paid-item queue, explicit unconfirmed-delivery review, and finite
-# background-transfer protection. Existing device variants, saves, Daytime Mode,
-# care banners, artwork, and sound configuration are preserved.
+# Compile correction: scoped purchase mutation and immutable character IDs.
+# Download reliability, Daytime Mode, care banners, three bundled variants,
+# saves, artwork, and sound configuration are preserved.
 # Save as .github/workflows/build.yml; keep all three firmware/*.bin files.
-# No previous TamaiOS commit is needed. Standard build dependencies are fetched.
+# No prior TamaiOS commit is required; standard build dependencies are fetched.
 name: Build TamaiOS
 'on':
   workflow_dispatch: {}
@@ -4376,11 +4375,10 @@ jobs:
                             } else {
                                 let souvenir = town.bag(toy).first(where: { !$0.needsReview })
                                 let data = souvenir.flatMap { town.bagData(toy, $0) }
-                                let pts = 0
                                 if let souvenir {
                                     try DispatchQueue.main.sync { try town.markBagAttempt(souvenir, toy: toy, attempted: true, note: "Returning home with this item; delivery may need checking.") }
                                 }
-                                try link.back(packet: Town.backPacket(data, points: pts), progress: progress)
+                                try link.back(packet: Town.backPacket(data, points: 0), progress: progress)
                                 if let souvenir { try DispatchQueue.main.sync { try town.completeBagItem(souvenir, toy: toy) } }
                                 self.main {
                                     DeviceWallet.shared.refresh(emu)
@@ -4390,7 +4388,6 @@ jobs:
                                 }
                                 var extras: [String] = []
                                 if let souvenir { extras.append(souvenir.name) }
-                                if pts > 0 { extras.append("\(pts) Gotchi Points") }
                                 msg = "Welcome home! 🏠" + (extras.isEmpty ? "" : " \(name) brought back " + extras.joined(separator: " and ") + ".")
                             }
                             emu.saveNow()
@@ -4423,13 +4420,13 @@ jobs:
                                     } else {
                                         self.main { town.markGiftAttempt(gift.id, for: toy) }
                                         progress("Sending \(gift.amount) Gotchi Points…")
+                                        try link.finishItem(Town.pointsPacket(gift.amount))
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Tamatown/TamaLink.swift (2/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Tamatown"
         cat >> 'ios/TamaiOS/Tamatown/TamaLink.swift' <<'TAMAIOS_SOURCE_EOF'
-                                        try link.finishItem(Town.pointsPacket(gift.amount))
                                         self.main { town.removeGift(gift.id, for: toy); DeviceWallet.shared.refresh(emu) }
                                         emu.saveNow()
                                         close = true
@@ -4437,7 +4434,6 @@ jobs:
                                     }
                                 } else if let it = town.bag(toy).first(where: { !$0.needsReview }), let data = town.bagData(toy, it),
                                    let pkt = Town.userItemPacket(data, points: 0) {
-                                    let pts = 0
                                     progress("Sending \(it.name)…")
                                     try TransferPacket.validate(pkt)
                                     try DispatchQueue.main.sync { try town.markBagAttempt(it, toy: toy, attempted: true, note: "Transfer started; check the device before retrying.") }
@@ -5297,9 +5293,10 @@ jobs:
                     let n = d.withUnsafeBytes { tg_mm_load_zip($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
                     var ids = [UInt16](repeating: 0, count: 512)
                     let c = ids.withUnsafeMutableBufferPointer { tg_mm_ids($0.baseAddress, 512) }
+                    let loadedIDs = Array(ids.prefix(c))
                     await MainActor.run {
                         if n > 0 {
-                            self.ids = Array(ids.prefix(c))
+                            self.ids = loadedIDs
                             self.items = Town.readItems()
                             self.imageCache = [:]
                             self.pack = .ready(Int(n))
@@ -5508,12 +5505,21 @@ jobs:
 
             func markBagAttempt(_ item: BagItem, toy: Toy, attempted: Bool, note: String?) throws {
                 var value = state(toy)
-                guard let index = value.bag?.firstIndex(where: { $0.id == item.id }) else {
+                guard var items = value.bag,
+                      let index = items.firstIndex(where: { $0.id == item.id }) else {
                     throw TransferProtocolError.malformed("the queued item no longer exists")
                 }
-                if attempted { value.bag?[index].attemptCount = (value.bag?[index].attemptCount ?? 0) + 1 }
-                value.bag?[index].attempted = attempted
-                value.bag?[index].deliveryNote = note
+
+                var updated = items[index]
+                if attempted {
+                    let previousCount = updated.attemptCount ?? 0
+                    updated.attemptCount = previousCount + 1
+                }
+                updated.attempted = attempted
+                updated.deliveryNote = note
+
+                items[index] = updated
+                value.bag = items
                 try persistDeliveryState(value, toy)
             }
 
@@ -5565,18 +5571,18 @@ jobs:
                 cacheLock.lock(); defer { cacheLock.unlock() }
                 if let c = stateCache[toy.id] { return c }
                 var s = State()
-                if let d = try? Data(contentsOf: stateURL(toy)), let x = try? JSONDecoder().decode(State.self, from: d) { s = x }
-                stateCache[toy.id] = s
-                return s
-            }
-
-            /// The Tamagotchi's name (from the device), for messages. Falls back to "your Tama".
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Tamatown/Town.swift (2/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Tamatown"
         cat >> 'ios/TamaiOS/Tamatown/Town.swift' <<'TAMAIOS_SOURCE_EOF'
+                if let d = try? Data(contentsOf: stateURL(toy)), let x = try? JSONDecoder().decode(State.self, from: d) { s = x }
+                stateCache[toy.id] = s
+                return s
+            }
+
+            /// The Tamagotchi's name (from the device), for messages. Falls back to "your Tama".
             func name(_ toy: Toy?) -> String {
                 guard let toy else { return "Your Tama" }
                 var base = ""

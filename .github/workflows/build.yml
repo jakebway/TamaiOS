@@ -1,8 +1,10 @@
-# TamaiOS — all app source and Bluetooth patch embedded directly below.
-# No previous TamaiOS commit or historical source archive is required.
-# Save as .github/workflows/build.yml; keep the three firmware/*.bin files.
-# Adds background-only care banners, permission diagnostics, test banners,
-# and per-device Daytime Mode. Standard build dependencies are fetched normally.
+# TamaiOS — complete inline app source, Bluetooth patch, and regression tests.
+# Download reliability revision: strict completion, paced writes, session gating,
+# durable paid-item queue, explicit unconfirmed-delivery review, and finite
+# background-transfer protection. Existing device variants, saves, Daytime Mode,
+# care banners, artwork, and sound configuration are preserved.
+# Save as .github/workflows/build.yml; keep all three firmware/*.bin files.
+# No previous TamaiOS commit is needed. Standard build dependencies are fetched.
 name: Build TamaiOS
 'on':
   workflow_dispatch: {}
@@ -3106,6 +3108,7 @@ jobs:
             }
 
             func play(_ toy: Toy) {
+                guard !emu.linkBusy, !TransferGate.isBusy, !AppLink.shared.busy else { emu.say("Finish the current transfer before switching devices."); return }
                 Prefs.d.set(toy.id, forKey: "currentToy")
                 emu.load(toy)
                 objectWillChange.send()
@@ -3125,6 +3128,7 @@ jobs:
             }
 
             func remove(_ toy: Toy) {
+                guard !emu.linkBusy, !TransferGate.isBusy, !AppLink.shared.busy else { emu.say("Finish the current transfer before deleting a device."); return }
                 if emu.toy?.id == toy.id { emu.unload(); emu.toy = nil }
                 ToyStore.delete(toy.id)
                 toys = ToyStore.list()
@@ -3132,7 +3136,7 @@ jobs:
             }
 
             func resetCurrentDevice() throws {
-                guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else { throw ImportError.unreadable("Finish the current operation before resetting.") }
+                guard let toy = emu.toy, !emu.loading, !emu.linkBusy, !emu.appWaiting, !TransferGate.isBusy, !AppLink.shared.busy else { throw ImportError.unreadable("Finish the current operation before resetting.") }
                 let fm = FileManager.default
                 let working = ToyStore.dir(toy.id)
                 let staging = ToyStore.root.appendingPathComponent(".reset-" + UUID().uuidString, isDirectory: true)
@@ -3585,6 +3589,7 @@ jobs:
         mkdir -p "ios/TamaiOS/Tamatown"
         cat > 'ios/TamaiOS/Tamatown/TamaDepotView.swift' <<'TAMAIOS_SOURCE_EOF'
         import SwiftUI
+        import UIKit
 
         /// TamaDepa, the department store: send food, items, accessories, wallpapers,
         /// places and games to your Tama, with your Gotchi Points.
@@ -3614,6 +3619,7 @@ jobs:
             @State private var search = ""
             @State private var picked: Entry?
             @State private var sending = false
+            @State private var reviewingItem: Town.BagItem?
             @State private var progress = ""
             @State private var result: (ok: Bool, text: String)?
             @State private var importing = false
@@ -3692,6 +3698,18 @@ jobs:
                 .onReceive(balanceTimer) { _ in wallet.refresh(emu) }
                 .onChange(of: emu.toy?.id) { _ in wallet.refresh(emu) }
                 .interactiveDismissDisabled(sending)
+                .confirmationDialog("Review purchased item", isPresented: Binding(get: { reviewingItem != nil }, set: { if !$0 { reviewingItem = nil } }), titleVisibility: .visible) {
+                    if let item = reviewingItem, let toy = emu.toy {
+                        if item.needsReview {
+                            Button("I received it — clear this request") { town.removeFromBag(toy, item); reviewingItem = nil }
+                        }
+                        Button("Retry this purchase — no additional charge") { reviewingItem = nil; retryPurchasedItem(item, toy: toy) }
+                        Button("Discard request — no refund", role: .destructive) { town.removeFromBag(toy, item); reviewingItem = nil }
+                    }
+                    Button("Keep for later", role: .cancel) { reviewingItem = nil }
+                } message: {
+                    Text("Check your Tama’s inventory first. If an earlier transfer was accepted, retrying can create a duplicate. Retrying this saved purchase does not deduct its price again.")
+                }
                 .confirmationDialog("Send Gotchi Points?", isPresented: $confirmingGift, titleVisibility: .visible) {
                     Button("Send \(Int(giftAmount) ?? 0) G as a gift") { queueOrSendGift() }
                     Button("Cancel", role: .cancel) {}
@@ -3764,7 +3782,7 @@ jobs:
                 }
             }
             private func queueOrSendGift() {
-                guard !sending, let toy = emu.toy, let amount = enteredGift else { return }
+                guard !sending, !link.busy, let toy = emu.toy, let amount = enteredGift else { return }
                 wallet.refresh(emu)
                 if let balance = wallet.balance, amount > DeviceWallet.maximum - balance {
                     result = (false, "There is room for \(DeviceWallet.maximum - balance) G. Enter a smaller gift."); return
@@ -3782,14 +3800,16 @@ jobs:
                 progress = "Sending \(gift.amount) Gotchi Points…"
                 link.openForDownload = false
                 let transport = TamaLink(emu: emu)
+                link.busy = true
                 Task {
+                    defer { link.busy = false }
                     do {
                         try await Task.detached(priority: .userInitiated) { try transport.finishItem(Town.pointsPacket(gift.amount)) }.value
                         town.removeGift(gift.id, for: toy)
                         wallet.refresh(emu)
                         emu.saveNow()
                         sending = false
-                        link.closeWith = "Sent \(gift.amount) Gotchi Points!"
+                        link.closeWith = "Points transfer completed. Check your Tama’s balance."
                     } catch {
                         sending = false
                         result = (false, "Delivery could not be confirmed. Check the device’s balance before sending again. " + error.localizedDescription)
@@ -3824,19 +3844,23 @@ jobs:
             @ViewBuilder
             private var bagCard: some View {
                 let items = emu.toy.map { town.bag($0) } ?? []
-                if !items.isEmpty, let t = emu.toy {
+                if !items.isEmpty {
                     TownCard(tint: .orange) {
-                        Label("In the bag", systemImage: "bag.fill").font(.system(.headline, design: .rounded)).foregroundStyle(.orange)
-                        ForEach(items) { it in
-                            HStack {
-                                Image(systemName: icon(it.kind)).foregroundStyle(.orange)
-                                Text(it.name).font(.system(.subheadline, design: .rounded))
-                                Spacer()
-                                Button(role: .destructive) { town.removeFromBag(t, it) } label: { Image(systemName: "xmark.circle.fill") }
-                                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                        Label("Purchased items awaiting pickup", systemImage: "bag.fill").font(.headline)
+                        ForEach(items) { item in
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Image(systemName: item.needsReview ? "exclamationmark.triangle.fill" : icon(item.kind)).foregroundStyle(.orange)
+                                    Text(item.name).font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                    Spacer()
+                                    Button("Review") { reviewingItem = item }.disabled(sending)
+                                }
+                                Text(item.needsReview ? "Delivery unconfirmed — check the device before retrying." : "Purchased and queued for Download. Do not buy it again to retry.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if let note = item.deliveryNote { Text(note).font(.caption2).foregroundStyle(.secondary) }
                             }
                         }
-                        Text(away ? "The first one goes home with your Tama (GO BACK › YES); the rest arrive one per Download." : "Delivered one at a time, automatically, when the device connects with Download.")
+                        Text("Queued items are delivered one at a time. Unconfirmed attempts wait for your review and are never retried automatically.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -3870,6 +3894,12 @@ jobs:
                         }
                         .frame(maxWidth: .infinity).padding(30)
                     } else {
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Tamatown/TamaDepotView.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Tamatown"
+        cat >> 'ios/TamaiOS/Tamatown/TamaDepotView.swift' <<'TAMAIOS_SOURCE_EOF'
                         ProgressView("Opening the store…").frame(maxWidth: .infinity).padding(40)
                     }
                 } else {
@@ -3902,12 +3932,6 @@ jobs:
                     .frame(width: it.kind == "wallpaper" ? 80 : 52, height: it.kind == "wallpaper" ? 80 : 52)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     Text(it.name).font(.system(.caption, design: .rounded).weight(.semibold))
-        TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Tamatown/TamaDepotView.swift (2/2)
-      run: |
-        set -euo pipefail
-        mkdir -p "ios/TamaiOS/Tamatown"
-        cat >> 'ios/TamaiOS/Tamatown/TamaDepotView.swift' <<'TAMAIOS_SOURCE_EOF'
                         .lineLimit(2).multilineTextAlignment(.center)
                     if let n = it.note {
                         Text(n).font(.caption2).foregroundStyle(.pink)
@@ -3928,48 +3952,89 @@ jobs:
                 entries = buildEntries()
             }
 
-            /// Send now if the toy is connected (Download), otherwise put it in the bag.
+            /// Prepare, validate, charge once, and persist the purchase before transmission.
             private func deliver(name: String, kind: String, cost: Int = 0, packet: @escaping (Int) async throws -> [UInt8]) {
-                guard !sending, let toy = emu.toy else { return }
+                guard !sending, !link.busy, let toy = emu.toy else { return }
                 picked = nil
+                if town.bag(toy).contains(where: { $0.needsReview && $0.name == name && $0.kind == kind }) {
+                    result = (false, "An earlier purchase of this item needs review. Use its Review button instead of buying it again.")
+                    return
+                }
                 let charge = max(0, cost)
-                wallet.refresh(emu)
-                guard let balance = wallet.balance, balance >= charge else {
-                    result = (false, "Not enough Gotchi Points.")
-                    return
-                }
-                guard charge == 0 || wallet.adjust(-charge, emu: emu, deviceID: toy.id) else {
-                    result = (false, "Couldn't update your Tama’s profile balance.")
-                    return
-                }
-                let now = live
-                let pts = 0
                 sending = true
-                progress = now ? "Wrapping your gift…" : "Putting it in the bag…"
+                progress = "Preparing your purchase…"
                 Task {
+                    var charged = false
+                    var savedItem: Town.BagItem?
+                    defer { sending = false }
                     do {
-                        let pkt = try await packet(pts)
-                        if !now {
-                            town.addToBag(toy, name: name, kind: kind, packet: pkt)
-                            sending = false
-                            result = (true, away ? "\(name) is in the bag. It goes home with \(town.name(toy)) when you choose GO BACK › YES." :
-                                                "\(name) is in the bag. It's delivered by itself next time the device connects with Download.")
+                        let pkt = try await packet(0)
+                        try TransferPacket.validate(pkt)
+                        guard emu.toy?.id == toy.id else { throw TamaLink.LinkError.notRunning }
+                        wallet.refresh(emu)
+                        guard let balance = wallet.balance, balance >= charge else {
+                            throw TransferProtocolError.malformed("not enough Gotchi Points")
+                        }
+                        guard charge == 0 || wallet.adjust(-charge, emu: emu, deviceID: toy.id) else {
+                            throw TransferProtocolError.malformed("couldn't update the profile balance")
+                        }
+                        charged = charge > 0
+                        let item = try town.addToBag(toy, name: name, kind: kind, packet: pkt, price: charge)
+                        savedItem = item
+                        emu.note("purchase queued id=\(item.id) name=\(name) cost=\(charge) " + TransferPacket.summary(pkt))
+                        guard live && emu.appWaiting && (UIApplication.shared.applicationState == .active || Prefs.flag("liveInBackground")) else {
+                            result = (true, "Purchased and saved for pickup. Choose Connection › App › Download on the device.")
                             return
                         }
-                        let tl = TamaLink(emu: emu)
-                        link.openForDownload = false
-                        progress = "Sending your gift…"
-                        try await Task.detached(priority: .userInitiated) { try tl.finishItem(pkt) }.value
-                        emu.note("gift sent: \(name) points=\(pts)")
-                        wallet.refresh(emu)
-                        sending = false
-                        link.closeWith = "\(town.name(toy)) got \(name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁"
+                        try await transmitPurchasedItem(item, toy: toy, packet: pkt)
                     } catch {
-                        if charge > 0 { _ = wallet.adjust(charge, emu: emu, deviceID: toy.id) }
-                        emu.note("gift failed: \(error.localizedDescription)")
-                        sending = false
-                        result = (false, error.localizedDescription)
+                        if charged && savedItem == nil {
+                            if !wallet.adjust(charge, emu: emu, deviceID: toy.id) {
+                                emu.note("purchase refund could not be applied; check balance")
+                            }
+                        }
+                        emu.note("purchase / download not confirmed: " + error.localizedDescription)
+                        result = (false, error.localizedDescription + (savedItem != nil ? " Your paid purchase is retained in the pickup bag. Use Review; do not buy it again." : ""))
                     }
+                }
+            }
+
+            private func transmitPurchasedItem(_ item: Town.BagItem, toy: Toy, packet: [UInt8]) async throws {
+                try TransferPacket.validate(packet)
+                let transport = TamaLink(emu: emu)
+                try town.markBagAttempt(item, toy: toy, attempted: true, note: "Transfer started; check the device before retrying.")
+                link.openForDownload = false
+                link.busy = true
+                progress = "Sending \(item.name)…"
+                defer { link.busy = false }
+                do {
+                    try await Task.detached(priority: .userInitiated) { try transport.finishItem(packet) }.value
+                    try town.completeBagItem(item, toy: toy)
+                    wallet.refresh(emu)
+                    emu.saveNow()
+                    emu.note("download transport complete id=\(item.id) name=\(item.name); check device inventory")
+                    link.closeWith = "Transfer completed for \(item.name). Check the device’s gift screen or inventory."
+                } catch {
+                    try? town.markBagAttempt(item, toy: toy, attempted: transport.transmissionStarted, note: error.localizedDescription)
+                    throw error
+                }
+            }
+
+            private func retryPurchasedItem(_ item: Town.BagItem, toy: Toy) {
+                guard !sending, !link.busy, let data = town.bagData(toy, item), let pkt = Town.userItemPacket(data, points: 0) else { return }
+                do {
+                    try TransferPacket.validate(pkt)
+                    try town.markBagAttempt(item, toy: toy, attempted: false, note: "Retry authorized; no additional purchase charge.")
+                } catch { result = (false, error.localizedDescription); return }
+                guard live && emu.appWaiting && (UIApplication.shared.applicationState == .active || Prefs.flag("liveInBackground")) else {
+                    result = (true, "The same paid purchase is queued again. Connect with Download; you will not be charged again.")
+                    return
+                }
+                sending = true
+                Task {
+                    defer { sending = false }
+                    do { try await transmitPurchasedItem(item, toy: toy, packet: pkt) }
+                    catch { result = (false, error.localizedDescription + " Your purchase remains in the pickup bag.") }
                 }
             }
 
@@ -3981,6 +4046,7 @@ jobs:
                     result = (false, "Not enough Gotchi Points. This item costs \(cost) G.")
                     return
                 }
+                emu.note("catalog selection id=\(it.id) name=\(it.name) kind=\(it.kind) cost=\(cost)")
                 switch it.source {
                 case .web(let w):
                     deliver(name: it.name, kind: it.kind, cost: cost) { pts in try await WebMeets.itemPacket(w, points: pts) }
@@ -4027,6 +4093,7 @@ jobs:
             let emu: Emulator
             /// The device's answer to the last hello (it carries its mode and the Tama's name).
             var hello: [UInt8] = []
+            private(set) var transmissionStarted = false
             init(emu: Emulator) { self.emu = emu }
 
             var ready: Bool { (emu.withCore { tg_radio_ready($0) } ?? 0) != 0 }
@@ -4041,6 +4108,7 @@ jobs:
                 // The emulated module takes the next chunk as soon as the device has read
                 // the last one, so no artificial Bluetooth delays are needed.
                 for _ in 0..<4000 {
+                    try TransferGate.checkCancellation()
                     guard let r = emu.withCore({ h in d.withUnsafeBufferPointer { tg_radio_write(h, $0.baseAddress, $0.count) } }) else {
                         throw LinkError.notRunning
                     }
@@ -4069,56 +4137,57 @@ jobs:
                 }
             }
 
-            /// Send one packet.
+            /// Respect the 20-byte / 15 ms cadence used by the physical app protocol.
             func send(_ pkt: [UInt8]) throws {
+                try TransferPacket.validate(pkt)
+                emu.note("transfer TX " + TransferPacket.summary(pkt))
                 Thread.sleep(forTimeInterval: 0.02)
                 try write([0xF0, 0x8D])
+                transmissionStarted = true
                 var i = 0
                 while i < pkt.count {
                     let j = min(i + 20, pkt.count)
                     try write(Array(pkt[i..<j]))
                     i = j
+                    Thread.sleep(forTimeInterval: 0.015)
                 }
                 try write([0xF0, 0xCD])
             }
 
-            /// Wait for the toy's answer to a packet; returns the data it sent back.
-            func answer(firstTimeout: Double = 4, idleTimeout: Double = 4) throws -> [UInt8] {
-                var gotAny = false
-                var buffer: [UInt8] = []
-                var expected = -1
-                var acked = false
-                let start = Date()
-                var last = Date()
+            /// No acknowledgement-only timeout is ever promoted to success.
+            func answer(firstTimeout: Double = 4, idleTimeout: Double = 4,
+                        requiresPayload: Bool = false, requiresFinalAck: Bool = false) throws -> [UInt8] {
+                var reply = TransferReply(requiresPayload: requiresPayload, requiresFinalAck: requiresFinalAck)
+                let started = ProcessInfo.processInfo.systemUptime
+                var last = started
+                var received = false
                 while true {
-                    if let n = read() {
-                        gotAny = true
-                        last = Date()
-                        let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
-                        if expected >= 0 && buffer.count < expected && tag != 0x4DF0 {
-                            buffer += n                                  // data chunk
-                        } else if tag == 0x0CF0 {                        // received / finished
-                            acked = true
-                            let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
-                            if status == 0x0200 { return buffer }
-                            try write([0xF0, 0x8E, 0x0D])                // "send me your data"
-                        } else if tag == 0x0DF0 {                        // data follows
-                            expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
-                            buffer.removeAll(keepingCapacity: true)
-                        } else if tag == 0x4DF0 || tag == 0x5CF0 {      // data done
-                            return buffer
-                        } else if expected >= 0 {
-                            buffer += n
+                    try TransferGate.checkCancellation()
+                    if ProcessInfo.processInfo.systemUptime - started > 45 {
+                        emu.note("transfer absolute deadline " + reply.summary)
+                        throw TransferProtocolError.incomplete(reply.summary)
+                    }
+                    if let frame = read() {
+                        received = true
+                        last = ProcessInfo.processInfo.systemUptime
+                        let preview = frame.prefix(12).map { String(format: "%02X", $0) }.joined(separator: " ")
+                        emu.note("transfer RX bytes=\(frame.count) head=\(preview)")
+                        switch try reply.consume(frame) {
+                        case .requestData: try write([0xF0, 0x8E, 0x0D])
+                        case .completed:
+                            emu.note("transfer response complete " + reply.summary)
+                            return reply.payload
+                        case .waiting: break
                         }
-                        continue
+                    } else {
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if (!received && now - started > firstTimeout) ||
+                           (received && now - last > idleTimeout) || now - started > 45 {
+                            emu.note("transfer timeout " + reply.summary)
+                            throw TransferProtocolError.incomplete(reply.summary)
+                        }
+                        Thread.sleep(forTimeInterval: 0.002)
                     }
-                    let now = Date()
-                    if !gotAny && now.timeIntervalSince(start) > firstTimeout { throw LinkError.noAnswer }
-                    if gotAny && now.timeIntervalSince(last) > idleTimeout {
-                        if acked { return buffer }
-                        throw LinkError.noAnswer
-                    }
-                    Thread.sleep(forTimeInterval: 0.002)
                 }
             }
 
@@ -4138,6 +4207,9 @@ jobs:
             /// Hello (op, cmd 0), then the op's own packet; returns what the toy sends back.
             private func exchange(op: UInt8, then second: [UInt8]?, progress: (String) -> Void, firstTimeout: Double = 4) throws -> [UInt8] {
                 guard emu.isLoaded else { throw LinkError.notRunning }
+                try TransferGate.acquire()
+                let background = TransferBackground(emu: emu)
+                defer { TransferGate.release(); background.end() }
                 drain(0.05)
                 connect(true)
                 defer {
@@ -4146,7 +4218,7 @@ jobs:
                 }
                 progress("Saying hello…")
                 try send(TamaLink.packet(op: op, cmd: 0))
-                _ = try answer(firstTimeout: firstTimeout)
+                _ = try answer(firstTimeout: firstTimeout, requiresPayload: true)
                 drain(0.05)
                 guard let second else { return [] }
                 try send(second)
@@ -4176,11 +4248,14 @@ jobs:
             /// Connect and say hello. Returns the toy's mode; stays connected.
             func probe() throws -> UInt8 {
                 guard emu.isLoaded else { throw LinkError.notRunning }
+                try TransferGate.acquire()
+                let background = TransferBackground(emu: emu)
+                defer { TransferGate.release(); background.end() }
                 drain(0.05)
                 connect(true)
                 do {
                     try send(TamaLink.packet(op: 0x17, cmd: 0))
-                    let a = try answer()
+                    let a = try answer(requiresPayload: true)
                     drain(0.05)
                     guard a.count > 0x4C else { throw LinkError.noAnswer }
                     hello = a
@@ -4194,28 +4269,59 @@ jobs:
 
             /// After probe() in Visit mode: the toy comes to town. Returns its visit data.
             func finishVisit() throws -> [UInt8] {
-                defer { close() }
+                try TransferGate.acquire()
+                let background = TransferBackground(emu: emu)
+                defer { close(); TransferGate.release(); background.end() }
                 emu.linkBusy = true
                 try send(TamaLink.packet(op: 0x14, cmd: 0x34))
                 Thread.sleep(forTimeInterval: 0.05)
-                let d = try answer(firstTimeout: 8, idleTimeout: 4)
+                let d = try answer(firstTimeout: 8, idleTimeout: 4, requiresPayload: true)
                 guard d.count >= 512 else { throw LinkError.noAnswer }
                 return d
             }
 
-            /// After probe() in Download mode: deliver one item packet.
+            /// A positive transport-finished acknowledgement is required for Download.
             func finishItem(_ pkt: [UInt8]) throws {
-                defer { close() }
+                transmissionStarted = false
+                try TransferPacket.validate(pkt)
+                guard pkt[0x4C] == 0x17, pkt[0x5E] == 0x3A else {
+                    throw TransferProtocolError.malformed("not an item / points Download packet")
+                }
+                try TransferGate.acquire()
+                let background = TransferBackground(emu: emu)
+                defer { close(); TransferGate.release(); background.end() }
+                guard emu.isLoaded, ready else { throw TransferProtocolError.notReady }
                 emu.linkBusy = true
+                drain(0.1)
+                guard ready else { throw TransferProtocolError.notReady }
                 try send(pkt)
-                _ = try answer(firstTimeout: 6, idleTimeout: 3)
+                _ = try answer(firstTimeout: 8, idleTimeout: 5, requiresFinalAck: true)
+                // Let the firmware process the terminal acknowledgement before disconnecting.
+                drain(0.25)
+                emu.note("download transport confirmed; inventory acceptance not independently verified")
+            }
+
+            func cancelDownload() throws {
+                try TransferGate.acquire()
+                let background = TransferBackground(emu: emu)
+                defer { close(); TransferGate.release(); background.end() }
+                guard ready else { return }
+                emu.linkBusy = true
+                try send(TamaLink.packet(op: 0x15, cmd: 0x36))
+                _ = try? answer(firstTimeout: 2, idleTimeout: 2)
             }
 
             func close() {
                 emu.linkBusy = true
                 drain(0.05)
                 connect(false)
+                // Allow the guest to leave Download before a new connection is offered.
+                let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+                while ready && ProcessInfo.processInfo.systemUptime < deadline {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
             }
+
         }
 
         /// Runs the app side of every connection by itself, like the phone app did:
@@ -4236,7 +4342,7 @@ jobs:
             private func main(_ f: @escaping () -> Void) { DispatchQueue.main.sync(execute: f) }
 
             func start(emu: Emulator, onDownload: @escaping () -> Void) {
-                guard !running, emu.appWaiting, let toy = emu.toy else { return }
+                guard !running, !busy, !openForDownload, !TransferGate.isBusy, emu.appWaiting, let toy = emu.toy else { return }
                 let town = Town.shared
                 let st = town.state(toy)
                 running = true
@@ -4268,12 +4374,15 @@ jobs:
                                 emu.note("married \(s.name)")
                                 msg = ""
                             } else {
-                                let souvenir = town.bag(toy).first
+                                let souvenir = town.bag(toy).first(where: { !$0.needsReview })
                                 let data = souvenir.flatMap { town.bagData(toy, $0) }
                                 let pts = 0
+                                if let souvenir {
+                                    try DispatchQueue.main.sync { try town.markBagAttempt(souvenir, toy: toy, attempted: true, note: "Returning home with this item; delivery may need checking.") }
+                                }
                                 try link.back(packet: Town.backPacket(data, points: pts), progress: progress)
+                                if let souvenir { try DispatchQueue.main.sync { try town.completeBagItem(souvenir, toy: toy) } }
                                 self.main {
-                                    if let souvenir { town.removeFromBag(toy, souvenir) }
                                     DeviceWallet.shared.refresh(emu)
                                     var y = town.state(toy)
                                     y.away = false; y.pending = .none; y.suitor = nil
@@ -4314,24 +4423,37 @@ jobs:
                                     } else {
                                         self.main { town.markGiftAttempt(gift.id, for: toy) }
                                         progress("Sending \(gift.amount) Gotchi Points…")
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Tamatown/TamaLink.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Tamatown"
+        cat >> 'ios/TamaiOS/Tamatown/TamaLink.swift' <<'TAMAIOS_SOURCE_EOF'
                                         try link.finishItem(Town.pointsPacket(gift.amount))
                                         self.main { town.removeGift(gift.id, for: toy); DeviceWallet.shared.refresh(emu) }
                                         emu.saveNow()
                                         close = true
                                         msg = "Sent \(gift.amount) Gotchi Points! Watch the device."
                                     }
-                                } else if let it = town.bag(toy).first, let data = town.bagData(toy, it),
+                                } else if let it = town.bag(toy).first(where: { !$0.needsReview }), let data = town.bagData(toy, it),
                                    let pkt = Town.userItemPacket(data, points: 0) {
                                     let pts = 0
-                                    progress("Delivering \(it.name)…")
-                                    try link.finishItem(pkt)
-                                    self.main {
-                                        town.removeFromBag(toy, it)
-                                        DeviceWallet.shared.refresh(emu)
+                                    progress("Sending \(it.name)…")
+                                    try TransferPacket.validate(pkt)
+                                    try DispatchQueue.main.sync { try town.markBagAttempt(it, toy: toy, attempted: true, note: "Transfer started; check the device before retrying.") }
+                                    do {
+                                        try link.finishItem(pkt)
+                                        try DispatchQueue.main.sync { try town.completeBagItem(it, toy: toy) }
+                                    } catch {
+                                        try? DispatchQueue.main.sync {
+                                            try town.markBagAttempt(it, toy: toy, attempted: link.transmissionStarted, note: error.localizedDescription)
+                                        }
+                                        throw error
                                     }
+                                    self.main { DeviceWallet.shared.refresh(emu) }
                                     emu.saveNow()
                                     close = true
-                                    msg = "Delivered \(it.name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁 Watch the device."
+                                    msg = "Transfer completed for \(it.name). Check the device’s gift screen or inventory."
                                 } else {
                                     download = true
                                 }
@@ -4342,7 +4464,7 @@ jobs:
                     } catch {
                         close = false
                         emu.note("app connect failed: \(error.localizedDescription)")
-                        msg = "Couldn't finish talking to your Tama. On the device choose Connection › App again and it'll pick up where it left off."
+                        msg = "Transfer not confirmed. Check your Tama before retrying. Saved purchases remain in the pickup bag; use Review instead of buying the item again. " + error.localizedDescription
                     }
                     DispatchQueue.main.async {
                         self.running = false
@@ -4367,14 +4489,8 @@ jobs:
                 DispatchQueue.global(qos: .userInitiated).async {
                     // Just hanging up leaves the device on CONNECTING for ~20 s. A command it
                     // doesn't expect in Download mode ends the session at once; then skip the
-        TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Tamatown/TamaLink.swift (2/2)
-      run: |
-        set -euo pipefail
-        mkdir -p "ios/TamaiOS/Tamatown"
-        cat >> 'ios/TamaiOS/Tamatown/TamaLink.swift' <<'TAMAIOS_SOURCE_EOF'
                     // short FAIL message so it's straight back in its room.
-                    try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
+                    try? link.cancelDownload()
                     emu.fastForward(4)
                 }
             }
@@ -4542,6 +4658,7 @@ jobs:
             /// Done / Home. If your Tama is in town this means "go home": the device is
             /// answered (GO BACK? › YES) before the sheet closes, so you never see I'M OUT.
             private func leave() {
+                guard !link.busy, !TransferGate.isBusy else { emu.say("Finishing your transfer. Please wait."); return }
                 guard let t = emu.toy, Town.shared.state(t).away, !link.busy, !emu.appWaiting else { dismiss(); return }
                 headingHome = true
                 emu.holdForApp = false
@@ -4834,13 +4951,13 @@ jobs:
                 }
             }
 
-            /// TamaiOS's own town picture (drawn at build time by tools/town.py).
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Tamatown/TamatownView.swift (2/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Tamatown"
         cat >> 'ios/TamaiOS/Tamatown/TamatownView.swift' <<'TAMAIOS_SOURCE_EOF'
+            /// TamaiOS's own town picture (drawn at build time by tools/town.py).
             static let builtIn: UIImage? = UIImage(named: "TownBackground")
 
             /// The town picture: tap the left for Tama ♥ Party, the middle for
@@ -5349,11 +5466,7 @@ jobs:
                 defer { tg_free(p, n) }
                 return Array(UnsafeBufferPointer(start: p, count: n))
             }
-            struct BagItem: Codable, Identifiable, Equatable {
-                var id = UUID()
-                var name: String
-                var kind: String
-            }
+            typealias BagItem = PendingPurchase
 
             // MARK: the bag (souvenirs) and the pocket (Gotchi Points for the toy)
 
@@ -5365,24 +5478,56 @@ jobs:
 
             func bag(_ toy: Toy) -> [BagItem] { state(toy).bag ?? [] }
 
-            /// Keep a bought item (its delivery packet) until the toy can receive it.
-            func addToBag(_ toy: Toy, name: String, kind: String, packet: [UInt8]) {
-                let it = BagItem(name: name, kind: kind)
-                try? Data(packet).write(to: bagDir(toy).appendingPathComponent(it.id.uuidString + ".bin"), options: .atomic)
-                var x = state(toy)
-                x.bag = (x.bag ?? []) + [it]
-                save(x, toy)
+            /// Commit metadata before reporting a purchase as safely queued.
+            private func persistDeliveryState(_ value: State, _ toy: Toy) throws {
+                let data = try JSONEncoder().encode(value)
+                try data.write(to: stateURL(toy), options: .atomic)
+                cacheLock.lock(); stateCache[toy.id] = value; cacheLock.unlock()
+                objectWillChange.send()
             }
 
-            func bagData(_ toy: Toy, _ it: BagItem) -> Data? {
-                try? Data(contentsOf: bagDir(toy).appendingPathComponent(it.id.uuidString + ".bin"))
+            @discardableResult
+            func addToBag(_ toy: Toy, name: String, kind: String, packet: [UInt8], price: Int = 0) throws -> BagItem {
+                let item = BagItem(name: name, kind: kind, purchasePrice: price)
+                let url = bagDir(toy).appendingPathComponent(item.id.uuidString + ".bin")
+                try Data(packet).write(to: url, options: .atomic)
+                do {
+                    var value = state(toy)
+                    value.bag = (value.bag ?? []) + [item]
+                    try persistDeliveryState(value, toy)
+                    return item
+                } catch {
+                    try? FileManager.default.removeItem(at: url)
+                    throw error
+                }
             }
 
-            func removeFromBag(_ toy: Toy, _ it: BagItem) {
-                try? FileManager.default.removeItem(at: bagDir(toy).appendingPathComponent(it.id.uuidString + ".bin"))
-                var x = state(toy)
-                x.bag = (x.bag ?? []).filter { $0.id != it.id }
-                save(x, toy)
+            func bagData(_ toy: Toy, _ item: BagItem) -> Data? {
+                try? Data(contentsOf: bagDir(toy).appendingPathComponent(item.id.uuidString + ".bin"))
+            }
+
+            func markBagAttempt(_ item: BagItem, toy: Toy, attempted: Bool, note: String?) throws {
+                var value = state(toy)
+                guard let index = value.bag?.firstIndex(where: { $0.id == item.id }) else {
+                    throw TransferProtocolError.malformed("the queued item no longer exists")
+                }
+                if attempted { value.bag?[index].attemptCount = (value.bag?[index].attemptCount ?? 0) + 1 }
+                value.bag?[index].attempted = attempted
+                value.bag?[index].deliveryNote = note
+                try persistDeliveryState(value, toy)
+            }
+
+            /// Remove the queue record only after metadata has been saved successfully.
+            func completeBagItem(_ item: BagItem, toy: Toy) throws {
+                var value = state(toy)
+                value.bag = (value.bag ?? []).filter { $0.id != item.id }
+                try persistDeliveryState(value, toy)
+                try? FileManager.default.removeItem(at: bagDir(toy).appendingPathComponent(item.id.uuidString + ".bin"))
+            }
+
+            func removeFromBag(_ toy: Toy, _ item: BagItem) {
+                do { try completeBagItem(item, toy: toy) }
+                catch { AppModel.current?.emu.say("Couldn't update the pickup bag. " + error.localizedDescription) }
             }
 
             /// Gotchi Points won in the Arcade, waiting to go to the toy.
@@ -5426,6 +5571,12 @@ jobs:
             }
 
             /// The Tamagotchi's name (from the device), for messages. Falls back to "your Tama".
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Tamatown/Town.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Tamatown"
+        cat >> 'ios/TamaiOS/Tamatown/Town.swift' <<'TAMAIOS_SOURCE_EOF'
             func name(_ toy: Toy?) -> String {
                 guard let toy else { return "Your Tama" }
                 var base = ""
@@ -5456,12 +5607,6 @@ jobs:
 
             /// Store what the device sent when it came to town.
             func saveVisit(_ data: [UInt8], _ toy: Toy) {
-        TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Tamatown/Town.swift (2/2)
-      run: |
-        set -euo pipefail
-        mkdir -p "ios/TamaiOS/Tamatown"
-        cat >> 'ios/TamaiOS/Tamatown/Town.swift' <<'TAMAIOS_SOURCE_EOF'
                 try? Data(data).write(to: visitURL(toy), options: .atomic)
                 cacheLock.lock(); visitCache[toy.id] = nil; cacheLock.unlock()
             }
@@ -6191,7 +6336,7 @@ jobs:
                 }
                 .background(Color.clear.sheet(isPresented: $model.openPickup) {
                     NavigationStack {
-                        TamaDepotView().toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.openPickup = false } } }
+                        TamaDepotView().toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { if AppLink.shared.busy || TransferGate.isBusy { emu.say("Finishing your transfer. Please wait.") } else { model.openPickup = false } } } }
                     }.environmentObject(emu)
                 })
                 .onChange(of: model.openTown) { open in
@@ -6323,13 +6468,13 @@ jobs:
                         Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 40)).foregroundStyle(.orange)
                         Text(s.title).font(.system(.title3, design: .rounded).weight(.bold))
                         Text("Restarting is like taking the batteries out — your pet and its progress are kept.")
-                            .font(.system(.callout, design: .rounded)).multilineTextAlignment(.center).foregroundStyle(.secondary)
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Device/DeviceView.swift (2/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Device"
         cat >> 'ios/TamaiOS/Device/DeviceView.swift' <<'TAMAIOS_SOURCE_EOF'
+                            .font(.system(.callout, design: .rounded)).multilineTextAlignment(.center).foregroundStyle(.secondary)
                         BigButton(title: "Restart device", icon: "arrow.clockwise", theme: theme) { emu.restart() }
                         Button("Reload last autosave") { emu.reload() }
                         Button("Open Console") { showSettings = true }
@@ -6888,7 +7033,7 @@ jobs:
                     if !inputs.isEmpty { lastInput = now }
                     // Keep the toy on iPhone time even when it never sleeps: if it is more
                     // than a minute off, re-set it while nobody is pressing buttons.
-                    if let w = wallNow, now >= nextClockFix, now - lastInput > 15, !radioReady, tg_is_asleep(h) == 0,
+                    if let w = wallNow, now >= nextClockFix, now - lastInput > 15, !radioReady, !linkBusy, !TransferGate.isBusy, tg_is_asleep(h) == 0,
                        abs(tg_clock_drift(h)) > 60 {
                         nextClockFix = now + 15
                         let off = tg_clock_drift(h)
@@ -6910,8 +7055,8 @@ jobs:
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Core"
         cat >> 'ios/TamaiOS/Core/Emulator.swift' <<'TAMAIOS_SOURCE_EOF'
-                    // during a Bluetooth transfer the device runs 3x faster, so it's over sooner
-                    code = tg_tick(h, linkBusy ? min(dt * 3, 0.1) : dt)
+                    // Transfers use real-time guest pacing to keep protocol deadlines consistent.
+                    code = tg_tick(h, dt)
                     stats.lastTickMs = (CACurrentMediaTime() - t0) * 1000
                     stats.ticks += 1
                     flags = tg_take_flags(h)
@@ -7098,6 +7243,7 @@ jobs:
             /// Set the toy to iPhone time now. Returns whether it worked.
             @discardableResult
             func syncClock() -> Bool {
+                guard !linkBusy, !TransferGate.isBusy else { say("Wait for the transfer to finish before changing the clock."); return false }
                 if let id = toy?.id { DaytimeClock.disable(id) }
                 objectWillChange.send()
                 let now = rtcNow()
@@ -7107,12 +7253,14 @@ jobs:
             }
 
             func sleepNow() {
+                guard !linkBusy, !TransferGate.isBusy else { say("Wait for the transfer to finish before putting the device to sleep."); return }
                 let ok = withCore { tg_force_sleep($0) } ?? 0
                 say(ok == 1 ? "Your device is asleep. Press any button to wake it." : "It can't go to sleep right now.")
                 saveNow()
             }
 
             func restart() {
+                guard !linkBusy, !TransferGate.isBusy else { say("Wait for the transfer to finish before restarting."); return }
                 withCore { tg_restart($0) }
                 DispatchQueue.main.async { self.stopped = nil }
                 say("Restarted, like taking the batteries out. Your pet is kept.")
@@ -7124,6 +7272,12 @@ jobs:
                 visible = false
                 backgroundAt = Date()
                 guard handle != nil else { return }
+                if TransferGate.isBusy || linkBusy {
+                    saveNow()
+                    note("background: finishing transfer before applying pause setting")
+                    pauseAfterTransferIfNeeded()
+                    return
+                }
                 if Prefs.flag("liveInBackground") {
                     // keep living (the audio session keeps us running); save in case iOS ends us
                     saveNow()
@@ -7136,6 +7290,21 @@ jobs:
                     }
                     audio.stop()
                     note("background: asleep and saved")
+                }
+            }
+
+            private func pauseAfterTransferIfNeeded() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    guard !self.visible else { return }
+                    if TransferGate.isBusy || self.linkBusy { self.pauseAfterTransferIfNeeded(); return }
+                    guard !Prefs.flag("liveInBackground") else { return }
+                    self.paused = true
+                    self.withCore { h in
+                        tg_force_sleep(h)
+                        self.saveLocked(h, snapshot: true)
+                    }
+                    self.audio.stop()
+                    self.note("background: transfer finished, paused and saved")
                 }
             }
 
@@ -8851,6 +9020,271 @@ jobs:
         \ {\n+                    let sel = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66], self.gpio[0x67]])\
         \ & 0x1000 == 0;\n+                    self.radio.as_mut().unwrap().select(sel);\n+                }\n      \
         \       }\n             Some(_) => {}\n             None => self.mmio_write(addr, size, val),\nTAMAIOS_SOURCE_EOF\n"
+    - name: Write ios/TamaiOS/Tamatown/TransferProtocol.swift
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Tamatown"
+        cat > 'ios/TamaiOS/Tamatown/TransferProtocol.swift' <<'TAMAIOS_SOURCE_EOF'
+        import Foundation
+
+        /// Validates transport packets and parses complete, length-delimited replies.
+        /// A transport acknowledgement is not proof of inventory installation.
+        enum TransferProtocolError: LocalizedError {
+            case malformed(String), incomplete(String), busy, notReady
+            var errorDescription: String? {
+                switch self {
+                case .malformed(let why): return "Invalid download data: " + why
+                case .incomplete(let why): return "Delivery unconfirmed: " + why + " Check the device before retrying."
+                case .busy: return "Another device transfer is still finishing. Please wait."
+                case .notReady: return "This Download connection has ended. Choose Connection › App › Download again."
+                }
+            }
+        }
+
+        enum TransferPacket {
+            static func validate(_ bytes: [UInt8]) throws {
+                guard (258...65535).contains(bytes.count), Array(bytes.prefix(6)) == Array("TAMAGO".utf8) else {
+                    throw TransferProtocolError.malformed("missing TAMAGO header or unsupported packet size")
+                }
+                let declared = UInt32(bytes[0x48]) | UInt32(bytes[0x49]) << 8 | UInt32(bytes[0x4A]) << 16 | UInt32(bytes[0x4B]) << 24
+                guard declared == UInt32(bytes.count) else { throw TransferProtocolError.malformed("packet length does not match its header") }
+                let stored = UInt16(bytes[bytes.count - 2]) | UInt16(bytes[bytes.count - 1]) << 8
+                let computed = bytes.dropLast(2).reduce(UInt16(0)) { $0 &+ UInt16($1) }
+                guard stored == computed else { throw TransferProtocolError.malformed("packet checksum mismatch") }
+            }
+            static func summary(_ bytes: [UInt8]) -> String {
+                guard bytes.count >= 0x5F else { return "bytes=\(bytes.count)" }
+                var hash: UInt64 = 14695981039346656037
+                for byte in bytes { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
+                return String(format: "bytes=%d op=%02X cmd=%02X hash=%016llX", bytes.count, Int(bytes[0x4C]), Int(bytes[0x5E]), hash)
+            }
+        }
+
+        struct TransferReply {
+            enum Event { case waiting, requestData, completed }
+            let requiresPayload: Bool
+            let requiresFinalAck: Bool
+            private(set) var payload: [UInt8] = []
+            private(set) var expected: Int?
+            private(set) var finalAck = false
+            private(set) var dataEnded = false
+            private var requested = false
+
+            init(requiresPayload: Bool = false, requiresFinalAck: Bool = false) {
+                self.requiresPayload = requiresPayload
+                self.requiresFinalAck = requiresFinalAck
+            }
+            var summary: String {
+                "expected=\(expected.map(String.init) ?? "none") received=\(payload.count) finalAck=\(finalAck) dataEnded=\(dataEnded)"
+            }
+            mutating func consume(_ frame: [UInt8]) throws -> Event {
+                guard !frame.isEmpty else { return .waiting }
+                // While payload bytes remain, control-looking bytes are still payload.
+                if let expected, payload.count < expected {
+                    guard payload.count + frame.count <= expected else { throw TransferProtocolError.malformed("reply exceeds its declared length") }
+                    payload += frame
+                    return .waiting
+                }
+                let tag: UInt16 = frame.count >= 2 ? UInt16(frame[0]) | UInt16(frame[1]) << 8 : 0
+                switch tag {
+                case 0x0CF0:
+                    guard frame.count == 4 else { throw TransferProtocolError.malformed("truncated acknowledgement") }
+                    let status = UInt16(frame[2]) | UInt16(frame[3]) << 8
+                    if status == 0x0200 {
+                        finalAck = true
+                        if requiresPayload && (expected == nil || !dataEnded) {
+                            throw TransferProtocolError.incomplete("finished acknowledgement arrived without a complete data response")
+                        }
+                        return .completed
+                    }
+                    if !requested { requested = true; return .requestData }
+                    return .waiting
+                case 0x0DF0:
+                    guard frame.count == 4, expected == nil else { throw TransferProtocolError.malformed("invalid or repeated reply header") }
+                    let size = Int(UInt16(frame[2]) | UInt16(frame[3]) << 8)
+                    guard size <= 65535 else { throw TransferProtocolError.malformed("reply is too large") }
+                    expected = size
+                    payload.reserveCapacity(size)
+                    return .waiting
+                case 0x4DF0, 0x5CF0:
+                    guard frame.count == 2, let expected, payload.count == expected else {
+                        throw TransferProtocolError.incomplete("reply ended without its declared payload")
+                    }
+                    dataEnded = true
+                    return requiresFinalAck ? .waiting : .completed
+                default:
+                    throw TransferProtocolError.malformed("unexpected response frame")
+                }
+            }
+        }
+
+        /// Process-wide gate: probe, item, marriage, return, and cancellation cannot overlap.
+        enum TransferGate {
+            private static let lock = NSLock()
+            private static var held = false
+            private static var cancelled = false
+            static var isBusy: Bool { lock.lock(); defer { lock.unlock() }; return held }
+            static func acquire() throws {
+                lock.lock(); defer { lock.unlock() }
+                guard !held else { throw TransferProtocolError.busy }
+                held = true
+                cancelled = false
+            }
+            static func cancel() { lock.lock(); if held { cancelled = true }; lock.unlock() }
+            static func checkCancellation() throws {
+                lock.lock(); let stopped = cancelled; lock.unlock()
+                if stopped { throw TransferProtocolError.incomplete("iOS ended the background transfer window") }
+            }
+            static func release() { lock.lock(); held = false; lock.unlock() }
+        }
+
+        /// Backward-compatible persisted purchase. Retrying this record never creates a new charge.
+        struct PendingPurchase: Codable, Identifiable, Equatable {
+            var id = UUID()
+            var name: String
+            var kind: String
+            var attempted: Bool? = nil
+            var deliveryNote: String? = nil
+            var purchasePrice: Int? = nil
+            var attemptCount: Int? = nil
+            var needsReview: Bool { attempted ?? false }
+        }
+        TAMAIOS_SOURCE_EOF
+    - name: Write tools/transfer-tests/main.swift
+      run: |
+        set -euo pipefail
+        mkdir -p "tools/transfer-tests"
+        cat > 'tools/transfer-tests/main.swift' <<'TAMAIOS_SOURCE_EOF'
+        import Foundation
+
+        var checks = 0
+        func expect(_ value: Bool, _ name: String) {
+            checks += 1
+            if !value { fatalError("FAILED: " + name) }
+        }
+        func mustThrow(_ name: String, _ body: () throws -> Void) {
+            checks += 1
+            do { try body(); fatalError("FAILED, expected error: " + name) } catch {}
+        }
+        func completed(_ event: TransferReply.Event) -> Bool { if case .completed = event { return true }; return false }
+        func packet(_ size: Int = 258) -> [UInt8] {
+            var bytes = [UInt8](repeating: 0, count: size)
+            bytes.replaceSubrange(0..<6, with: "TAMAGO".utf8)
+            for i in 0..<4 { bytes[0x48 + i] = UInt8((size >> (8 * i)) & 255) }
+            bytes[0x4C] = 0x17; bytes[0x5E] = 0x3A
+            let sum = bytes.dropLast(2).reduce(UInt16(0)) { $0 &+ UInt16($1) }
+            bytes[size - 2] = UInt8(sum & 255); bytes[size - 1] = UInt8(sum >> 8)
+            return bytes
+        }
+
+        do {
+            try TransferPacket.validate(packet())
+            checks += 1
+            var corrupt = packet(); corrupt[100] ^= 1
+            mustThrow("corrupt checksum") { try TransferPacket.validate(corrupt) }
+            var badLength = packet(); badLength[0x48] = 0
+            mustThrow("wrong declared size") { try TransferPacket.validate(badLength) }
+            mustThrow("short packet") { try TransferPacket.validate([1, 2, 3]) }
+            mustThrow("oversize packet") { try TransferPacket.validate(packet(65536)) }
+
+            var ackOnly = TransferReply()
+            expect(completed(try ackOnly.consume([0xF0, 0x0C, 0, 2])), "explicit finished acknowledgement")
+            var progress = TransferReply()
+            let progressEvent = try progress.consume([0xF0, 0x0C, 0x20, 0])
+            expect(!completed(progressEvent), "progress acknowledgement is not success")
+            if case .requestData = progressEvent { checks += 1 } else { fatalError("expected data request") }
+            expect(!completed(try progress.consume([0xF0, 0x0C, 0x40, 0])), "duplicate progress is not success")
+
+            var data = TransferReply(requiresPayload: true)
+            _ = try data.consume([0xF0, 0x0C, 1, 0])
+            _ = try data.consume([0xF0, 0x0D, 4, 0])
+            _ = try data.consume([10, 20])
+            _ = try data.consume([30, 40])
+            expect(completed(try data.consume([0xF0, 0x4D])), "complete data and terminator")
+            expect(data.payload == [10, 20, 30, 40], "payload reconstruction")
+
+            var collision = TransferReply(requiresPayload: true)
+            _ = try collision.consume([0xF0, 0x0D, 2, 0])
+            expect(!completed(try collision.consume([0xF0, 0x4D])), "control-looking payload is data")
+            expect(completed(try collision.consume([0xF0, 0x4D])), "real terminator after full payload")
+            expect(collision.payload == [0xF0, 0x4D], "payload bytes preserved")
+
+            var needsAck = TransferReply(requiresFinalAck: true)
+            _ = try needsAck.consume([0xF0, 0x0D, 2, 0])
+            _ = try needsAck.consume([1, 2])
+            expect(!completed(try needsAck.consume([0xF0, 0x4D])), "data end alone does not confirm a Download")
+            expect(completed(try needsAck.consume([0xF0, 0x0C, 0, 2])), "Download final acknowledgement")
+
+            var noHeader = TransferReply()
+            mustThrow("terminator without length") { _ = try noHeader.consume([0xF0, 0x4D]) }
+            var shortAck = TransferReply()
+            mustThrow("short ack") { _ = try shortAck.consume([0xF0, 0x0C, 0]) }
+            var noData = TransferReply(requiresPayload: true)
+            mustThrow("hello cannot be ack-only") { _ = try noData.consume([0xF0, 0x0C, 0, 2]) }
+            var oversizedData = TransferReply()
+            _ = try oversizedData.consume([0xF0, 0x0D, 1, 0])
+            mustThrow("payload exceeds declared size") { _ = try oversizedData.consume([1, 2]) }
+            var unknown = TransferReply()
+            mustThrow("unexpected frame") { _ = try unknown.consume([0xAA, 0xBB]) }
+
+            let oldJSON = "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"name\":\"LIMOUSINE\",\"kind\":\"item\"}"
+            let legacy = try JSONDecoder().decode(PendingPurchase.self, from: Data(oldJSON.utf8))
+            expect(!legacy.needsReview, "old bag entries stay queued")
+            var attempted = legacy
+            attempted.attempted = true
+            attempted.purchasePrice = 600
+            attempted.attemptCount = 1
+            let restored = try JSONDecoder().decode(PendingPurchase.self, from: JSONEncoder().encode(attempted))
+            expect(restored.needsReview, "unconfirmed state survives restart")
+            expect(restored.purchasePrice == 600 && restored.id == legacy.id, "purchase identity and price are preserved")
+            var retry = restored
+            retry.attempted = false
+            expect(retry.id == restored.id && retry.purchasePrice == restored.purchasePrice, "retry reuses the same purchase")
+            expect([restored, legacy].first(where: { !$0.needsReview })?.id == legacy.id, "automatic delivery skips uncertain attempts")
+
+            try TransferGate.acquire()
+            mustThrow("concurrent transfer blocked") { try TransferGate.acquire() }
+            TransferGate.cancel()
+            mustThrow("background cancellation stops a transfer") { try TransferGate.checkCancellation() }
+            TransferGate.release()
+            expect(!TransferGate.isBusy, "gate released")
+            try TransferGate.acquire(); try TransferGate.checkCancellation(); TransferGate.release()
+            checks += 1
+            print("Passed \(checks) transfer regression checks")
+        } catch { fatalError("Unexpected test error: \(error)") }
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Tamatown/TransferBackground.swift
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Tamatown"
+        cat > 'ios/TamaiOS/Tamatown/TransferBackground.swift' <<'TAMAIOS_SOURCE_EOF'
+        import Foundation
+        import UIKit
+
+        /// A finite iOS background-task allowance, used only to finish an in-flight transfer.
+        final class TransferBackground {
+            private var identifier: UIBackgroundTaskIdentifier = .invalid
+            init(emu: Emulator) {
+                let begin = {
+                    self.identifier = UIApplication.shared.beginBackgroundTask(withName: "Complete TamaiOS transfer") { [weak self, weak emu] in
+                        TransferGate.cancel()
+                        emu?.note("background transfer allowance expired; delivery may be unconfirmed")
+                        emu?.saveNow()
+                        self?.end()
+                    }
+                }
+                if Thread.isMainThread { begin() } else { DispatchQueue.main.sync(execute: begin) }
+            }
+            func end() {
+                DispatchQueue.main.async {
+                    guard self.identifier != .invalid else { return }
+                    let value = self.identifier
+                    self.identifier = .invalid
+                    UIApplication.shared.endBackgroundTask(value)
+                }
+            }
+        }
+        TAMAIOS_SOURCE_EOF
     - name: Bundle Fairy, Magic, and Wonder Garden
       run: |
         set -euo pipefail
@@ -8874,6 +9308,15 @@ jobs:
         legacy = Path("ios/TamaiOS/Firmware.bin")
         if legacy.exists(): legacy.unlink()
         BUNDLE_FIRMWARE
+    - name: Run transfer and purchase regression tests
+      run: |
+        set -euo pipefail
+        mkdir -p ios
+        xcrun swiftc -swift-version 5 \
+          ios/TamaiOS/Tamatown/TransferProtocol.swift \
+          tools/transfer-tests/main.swift \
+          -o "$RUNNER_TEMP/tamaios-transfer-tests" 2>&1 | tee ios/transfer-tests.log
+        "$RUNNER_TEMP/tamaios-transfer-tests" 2>&1 | tee -a ios/transfer-tests.log
     - name: Get the emulator core (tg18-emu by oreo-fox, MIT licence) + Bluetooth patch
       run: |
         git clone https://github.com/oreo-fox/tg18-emu upstream
@@ -8958,4 +9401,5 @@ jobs:
         path: |-
           ios/build.log
           ios/swift-syntax.log
+          ios/transfer-tests.log
         if-no-files-found: ignore

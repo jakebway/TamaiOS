@@ -3263,6 +3263,7 @@ jobs:
         mkdir -p "ios/TamaiOS/Tamatown"
         cat > 'ios/TamaiOS/Tamatown/ArcadeView.swift' <<'TAMAIOS_SOURCE_EOF'
         import SwiftUI
+        import UIKit
 
         /// The Arcade: "Tama Pop" — Tamas peek out of the bushes; tap them before they
         /// hide. Every catch is 50 Gotchi Points for your Tama.
@@ -3282,6 +3283,7 @@ jobs:
             @State private var holes: [Suitor?] = Array(repeating: nil, count: 9)
             @State private var lastShown: [Suitor?] = Array(repeating: nil, count: 9)
             @State private var shownAt: [Double] = Array(repeating: 0, count: 9)
+            @State private var catchableUntil: [Double] = Array(repeating: -1, count: 9)
             @State private var bursts: [Int: Double] = [:]      // hole -> time of the "+50"
             @State private var clock: Double = 0
             @State private var ticks = 0
@@ -3311,6 +3313,7 @@ jobs:
                 .onReceive(timer) { _ in tick() }
                 .onDisappear {
                     touchingHoles.removeAll()
+                    catchableUntil = Array(repeating: -1, count: 9)
                     if phase != .done { phase = .ready }
                 }
             }
@@ -3417,14 +3420,11 @@ jobs:
                 .frame(width: size, height: size, alignment: .bottom)   // bush sits on the cell's floor
                 .clipped()
                 .contentShape(Rectangle())
-                .highPriorityGesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { _ in
-                            guard touchingHoles.insert(i).inserted else { return }
-                            tap(i)
-                        }
-                        .onEnded { _ in touchingHoles.remove(i) }
-                )
+                .overlay {
+                    ArcadeTouchTarget { tap(i) }
+                        .allowsHitTesting(phase == .playing)
+                        .accessibilityHidden(true)
+                }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Tama hole \(i + 1)")
                 .accessibilityAddTraits(.isButton)
@@ -3473,6 +3473,7 @@ jobs:
                 touchingHoles.removeAll()
                 wallet.refresh(emu)
                 guard wallet.balance != nil else { emu.say("Your Tama’s profile is not ready yet."); return }
+                catchableUntil = Array(repeating: -1, count: 9)
                 credited = 0
                 score = 0
                 holes = Array(repeating: nil, count: 9)
@@ -3503,10 +3504,11 @@ jobs:
                     if timeLeft <= 0 { finish(); return }
                     let stay = 0.45 + 0.55 * (timeLeft / length)
                     for i in 0..<9 where holes[i] != nil && clock - shownAt[i] > stay {
+                        catchableUntil[i] = clock + 0.12
                         withAnimation(.easeIn(duration: 0.12)) { holes[i] = nil }
                     }
                     if holes.compactMap({ $0 }).count < 4 && Double.random(in: 0...1) < 0.35 {
-                        let free = (0..<9).filter { holes[$0] == nil && bursts[$0] == nil }
+                        let free = (0..<9).filter { holes[$0] == nil && bursts[$0] == nil && clock > catchableUntil[$0] }
                         if let i = free.randomElement(), let t = randomTama() {
                             shownAt[i] = clock
                             lastShown[i] = t
@@ -3527,7 +3529,8 @@ jobs:
             }
 
             private func tap(_ i: Int) {
-                guard phase == .playing, holes[i] != nil else { return }
+                guard phase == .playing, holes[i] != nil || clock <= catchableUntil[i] else { return }
+                catchableUntil[i] = -1
                 score += 1
                 bursts[i] = clock
                 if haptics { Haptics.tap() }
@@ -3535,6 +3538,23 @@ jobs:
             }
         }
 
+
+        struct ArcadeTouchTarget: UIViewRepresentable {
+            var hit: () -> Void
+            func makeUIView(context: Context) -> ArcadeTouchView {
+                let view = ArcadeTouchView()
+                view.backgroundColor = .clear
+                view.isMultipleTouchEnabled = true
+                view.hit = hit
+                return view
+            }
+            func updateUIView(_ view: ArcadeTouchView, context: Context) { view.hit = hit }
+        }
+
+        final class ArcadeTouchView: UIView {
+            var hit: (() -> Void)?
+            override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { hit?() }
+        }
 
         /// A round, leafy bush: a cluster of outlined puffs with highlights and a few
         /// berries. Equatable, so SwiftUI draws it once instead of on every game tick.
@@ -3836,7 +3856,7 @@ jobs:
                                     .buttonStyle(.plain).foregroundStyle(.secondary)
                             }
                         }
-                        Text(away ? "The first one goes home with your Tama (GO BACK › YES); the rest arrive one per Download." : "Delivered one at a time, automatically, when the device connects with Download.")
+                        Text("In-store pickup: connect with Download to collect items. Returning from Visit does not deliver items.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -3952,8 +3972,7 @@ jobs:
                         if !now {
                             town.addToBag(toy, name: name, kind: kind, packet: pkt)
                             sending = false
-                            result = (true, away ? "\(name) is in the bag. It goes home with \(town.name(toy)) when you choose GO BACK › YES." :
-                                                "\(name) is in the bag. It's delivered by itself next time the device connects with Download.")
+                            result = (true, "\(name) is ready for pickup. Connect with Download to collect it.")
                             return
                         }
                         let tl = TamaLink(emu: emu)
@@ -4016,20 +4035,16 @@ jobs:
             static let shared = LinkDiagnostics()
             private let lock = NSLock()
             private var events: [String] = []
-            func record(_ session: String, _ message: String) {
-                let stamp = ProcessInfo.processInfo.systemUptime
-                let line = String(format: "%.3f", stamp) + " [" + session + "] " + message
-                lock.lock()
+            func record(_ message: String) {
+                let line = String(format: "%.3f", ProcessInfo.processInfo.systemUptime) + " " + message
+                lock.lock(); defer { lock.unlock() }
                 events.append(line)
                 if events.count > 800 { events.removeFirst(events.count - 800) }
-                lock.unlock()
             }
             func report() -> String {
-                lock.lock()
-                defer { lock.unlock() }
-                return (["link diagnostics v1 / baseline transport unchanged",
-                         "Times: monotonic seconds; bounded to 800 events.",
-                         "Payload previews omitted; packet fingerprints are non-cryptographic."] + events).joined(separator: "\n")
+                lock.lock(); defer { lock.unlock() }
+                return (["settings-touch-v1 / settings-care-v1 / pickup-download-only-v1",
+                         "Arcade: full-cell touch-down; 0.12s late-catch window. Transport unchanged."] + events).joined(separator: "\n")
             }
         }
 
@@ -4046,14 +4061,7 @@ jobs:
             }
 
             private let diagnosticID = String(UUID().uuidString.prefix(8))
-            private var txBytes = 0
-            private var txChunks = 0
-            private var rxBytes = 0
-            private var rxChunks = 0
-            private var writeRetries = 0
-            private func trace(_ message: String) {
-                LinkDiagnostics.shared.record(diagnosticID, message)
-            }
+            private func trace(_ text: String) { LinkDiagnostics.shared.record("[\(diagnosticID)] \(text)") }
             let emu: Emulator
             /// The device's answer to the last hello (it carries its mode and the Tama's name).
             var hello: [UInt8] = []
@@ -4062,7 +4070,7 @@ jobs:
             var ready: Bool { (emu.withCore { tg_radio_ready($0) } ?? 0) != 0 }
 
             func connect(_ on: Bool) {
-                trace("connect=\(on) radioReady=\(ready)")
+                trace("connect=\(on) ready=\(ready)")
                 if on { emu.linkBusy = true }
                 emu.withCore { tg_radio_connect($0, on ? 1 : 0) }
                 if !on { emu.radioStale = true; emu.holdLatch = false; emu.linkBusy = false }
@@ -4071,23 +4079,13 @@ jobs:
             private func write(_ d: [UInt8]) throws {
                 // The emulated module takes the next chunk as soon as the device has read
                 // the last one, so no artificial Bluetooth delays are needed.
-                let writeStart = ProcessInfo.processInfo.systemUptime
-                for attempt in 0..<4000 {
+                for _ in 0..<4000 {
                     guard let r = emu.withCore({ h in d.withUnsafeBufferPointer { tg_radio_write(h, $0.baseAddress, $0.count) } }) else {
                         throw LinkError.notRunning
                     }
-                    if r == 1 {
-                        txChunks += 1
-                        txBytes += d.count
-                        writeRetries += attempt
-                        if attempt >= 20 {
-                            trace("write accepted bytes=\(d.count) retries=\(attempt) wait=\(ProcessInfo.processInfo.systemUptime - writeStart)")
-                        }
-                        return
-                    }
+                    if r == 1 { return }
                     Thread.sleep(forTimeInterval: 0.001)
                 }
-                trace("WRITE FAILED bytes=\(d.count) wait=\(ProcessInfo.processInfo.systemUptime - writeStart)")
                 throw LinkError.writeFailed
             }
 
@@ -4106,18 +4104,14 @@ jobs:
             func drain(_ seconds: Double) {
                 let end = Date().addingTimeInterval(seconds)
                 while Date() < end {
-                    if let discarded = read() {
-                        trace("drain discarded bytes=\(discarded.count) prefix=\(discarded.prefix(4).map { String(format: "%02X", $0) }.joined(separator: " "))")
-                    } else { Thread.sleep(forTimeInterval: 0.002) }
+                    if read() == nil { Thread.sleep(forTimeInterval: 0.002) }
                 }
             }
 
             /// Send one packet.
             func send(_ pkt: [UInt8]) throws {
-                let fingerprint = pkt.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
-                let op = pkt.count > 0x4c ? Int(pkt[0x4c]) : -1
-                let cmd = pkt.count > 0x5e ? Int(pkt[0x5e]) : -1
-                trace("SEND bytes=\(pkt.count) op=\(op) cmd=\(cmd) fnv32=\(String(format: "%08X", fingerprint))")
+                let hash = pkt.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
+                trace("SEND bytes=\(pkt.count) op=\(pkt.count > 0x4c ? Int(pkt[0x4c]) : -1) cmd=\(pkt.count > 0x5e ? Int(pkt[0x5e]) : -1) fnv32=\(String(format: "%08X", hash))")
                 Thread.sleep(forTimeInterval: 0.02)
                 try write([0xF0, 0x8D])
                 var i = 0
@@ -4127,12 +4121,10 @@ jobs:
                     i = j
                 }
                 try write([0xF0, 0xCD])
-                trace("SEND ended cumulativeBytes=\(txBytes) chunks=\(txChunks) retries=\(writeRetries)")
             }
 
             /// Wait for the toy's answer to a packet; returns the data it sent back.
             func answer(firstTimeout: Double = 4, idleTimeout: Double = 4) throws -> [UInt8] {
-                trace("ANSWER waiting first=\(firstTimeout)s idle=\(idleTimeout)s")
                 var gotAny = false
                 var buffer: [UInt8] = []
                 var expected = -1
@@ -4141,28 +4133,23 @@ jobs:
                 var last = Date()
                 while true {
                     if let n = read() {
-                        rxBytes += n.count
-                        rxChunks += 1
+                        if expected < 0 || buffer.count + n.count >= expected || (n.count >= 2 && n[0] == 0xF0) {
+                            trace("RX bytes=\(n.count) collected=\(buffer.count) expected=\(expected) prefix=\(n.prefix(4).map { String(format: "%02X", $0) }.joined(separator: " "))")
+                        }
                         gotAny = true
                         last = Date()
                         let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
                         if expected >= 0 && buffer.count < expected && tag != 0x4DF0 {
                             buffer += n                                  // data chunk
                         } else if tag == 0x0CF0 {                        // received / finished
-                            trace("ACK bytes=\(n.count) prefix=\(n.prefix(4).map { String(format: "%02X", $0) }.joined(separator: " "))")
                             acked = true
                             let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
-                            if status == 0x0200 {
-                                trace("TERMINAL 0200 received=\(buffer.count) expected=\(expected)")
-                                return buffer
-                            }
+                            if status == 0x0200 { return buffer }
                             try write([0xF0, 0x8E, 0x0D])                // "send me your data"
                         } else if tag == 0x0DF0 {                        // data follows
                             expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
-                            trace("DATA declared bytes=\(expected)")
                             buffer.removeAll(keepingCapacity: true)
                         } else if tag == 0x4DF0 || tag == 0x5CF0 {      // data done
-                            trace("END tag=\(String(format: "%04X", tag)) received=\(buffer.count) expected=\(expected) lengthMatch=\(expected == buffer.count)")
                             return buffer
                         } else if expected >= 0 {
                             buffer += n
@@ -4170,12 +4157,9 @@ jobs:
                         continue
                     }
                     let now = Date()
-                    if !gotAny && now.timeIntervalSince(start) > firstTimeout {
-                        trace("FIRST TIMEOUT radioReady=\(ready)")
-                        throw LinkError.noAnswer
-                    }
+                    if !gotAny && now.timeIntervalSince(start) > firstTimeout { throw LinkError.noAnswer }
                     if gotAny && now.timeIntervalSince(last) > idleTimeout {
-                        trace("IDLE TIMEOUT acked=\(acked) received=\(buffer.count) expected=\(expected); legacy ack fallback=\(acked)")
+                        trace("IDLE TIMEOUT acked=\(acked) received=\(buffer.count) expected=\(expected)")
                         if acked { return buffer }
                         throw LinkError.noAnswer
                     }
@@ -4245,7 +4229,6 @@ jobs:
                     drain(0.05)
                     guard a.count > 0x4C else { throw LinkError.noAnswer }
                     hello = a
-                    trace("PROBE mode=\(String(format: "%02X", a[0x4C])) helloBytes=\(a.count)")
                     emu.linkBusy = false      // stay connected; the toy waits (held) until we continue
                     return a[0x4C]
                 } catch {
@@ -4274,7 +4257,6 @@ jobs:
             }
 
             func close() {
-                trace("CLOSE txBytes=\(txBytes) txChunks=\(txChunks) rxBytes=\(rxBytes) rxChunks=\(rxChunks) writeRetries=\(writeRetries)")
                 emu.linkBusy = true
                 drain(0.05)
                 connect(false)
@@ -4284,7 +4266,7 @@ jobs:
         /// Runs the app side of every connection by itself, like the phone app did:
         /// - Visit: your Tama comes to town (date, shop, play).
         /// - GO BACK › YES: your Tama comes home — with a wedding if you proposed,
-        ///   otherwise with its souvenir and the Gotchi Points you won.
+        ///   otherwise without store items; pickups remain queued for Download.
         /// - Download: delivers what's waiting in the bag, or opens TamaDepot.
         final class AppLink: ObservableObject {
             static let shared = AppLink()
@@ -4314,7 +4296,6 @@ jobs:
                     do {
                         if st.away {
                             close = true
-                            let name = town.name(toy)
                             if st.pending == .marry {
                                 guard let s = st.suitor,
                                       let pkt = town.marriagePacket(toy, s, babySex: st.babySex, genes: st.genes) else {
@@ -4331,21 +4312,15 @@ jobs:
                                 emu.note("married \(s.name)")
                                 msg = ""
                             } else {
-                                let souvenir = town.bag(toy).first
-                                let data = souvenir.flatMap { town.bagData(toy, $0) }
-                                let pts = 0
-                                try link.back(packet: Town.backPacket(data, points: pts), progress: progress)
+                                try link.back(packet: Town.backPacket(nil, points: 0), progress: progress)
                                 self.main {
-                                    if let souvenir { town.removeFromBag(toy, souvenir) }
                                     DeviceWallet.shared.refresh(emu)
                                     var y = town.state(toy)
                                     y.away = false; y.pending = .none; y.suitor = nil
                                     town.save(y, toy)
                                 }
-                                var extras: [String] = []
-                                if let souvenir { extras.append(souvenir.name) }
-                                if pts > 0 { extras.append("\(pts) Gotchi Points") }
-                                msg = "Welcome home! 🏠" + (extras.isEmpty ? "" : " \(name) brought back " + extras.joined(separator: " and ") + ".")
+                                emu.note("ordinary GO BACK: no item attached; pickup bag preserved")
+                                msg = "Welcome home! 🏠"
                             }
                             emu.saveNow()
                         } else {
@@ -8261,7 +8236,6 @@ jobs:
             Paste one command per line (# for comments). Changes persist.
             INFO
               diag                 everything + connection trace, copied to clipboard
-              linklog              recent connection events (read-only)
               status | perf | params | files
               log [n]  applog [n]  firmware / app log
             TOY
@@ -8291,6 +8265,15 @@ jobs:
         import SwiftUI
         import UniformTypeIdentifiers
 
+        struct SettingsRowButtonStyle: ButtonStyle {
+            func makeBody(configuration: Configuration) -> some View {
+                configuration.label
+                    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .opacity(configuration.isPressed ? 0.55 : 1)
+            }
+        }
+
         struct SettingsView: View {
             @EnvironmentObject var model: AppModel
             @EnvironmentObject var emu: Emulator
@@ -8308,6 +8291,7 @@ jobs:
             @ObservedObject private var careAlerts = CareAlerts.shared
             @State private var name = ""
             @State private var confirmRestart = false
+            @State private var showNotificationTest = false
             @State private var showReset = false
             enum SettingsSheet: Identifiable {
                 case share(URL), picker
@@ -8353,22 +8337,50 @@ jobs:
 
                         Section {
                             Toggle("Background Mode", isOn: $live)
-                            Toggle("Care Notifications", isOn: $callAlerts)
-                                .onChange(of: callAlerts) { on in if on { Notifier.ask() } else { careAlerts.cancelAll() } }
                             Toggle("Prevent Auto-Lock", isOn: $keepAwake)
-                            Toggle("Always-On Display", isOn: $neverSleep)
-                        } header: { Text("Power & Background") } footer: {
-                            Text("Background Mode keeps your Tama running in real time after you leave the app, like the real device, and lets Care Notifications reach you. It uses a little battery. When it's off, your Tama pauses while the app is closed and its clock catches up when you return.")
+                            Toggle("Keep Tama Screen On", isOn: $neverSleep)
+                        } header: { Text("Power & Display") } footer: {
+                            Text("Background Mode lets your Tama keep running when you leave TamaiOS. When off, your Tama pauses and its clock catches up when you return.")
                         }
-
-                        Section("Care Notification Banners") {
-                            Text(careAlerts.status).font(.subheadline)
-                            if let error = careAlerts.lastError { Text(error).font(.caption).foregroundStyle(.orange) }
-                            Button("Enable Notification Permission") { careAlerts.ask() }
-                            Button("Open iPhone Notification Settings") { careAlerts.openSettings() }
-                            Button("Test Banner in 5 Seconds") { careAlerts.testBanner() }.disabled(!live || !callAlerts)
-                            Text("For the test, leave TamaiOS within 5 seconds. No banner appears while you are in the app. Enable Allow Notifications and Banners in iPhone Settings. Focus and Scheduled Summary can delay alerts.")
-                                .font(.caption).foregroundStyle(.secondary)
+                        Section {
+                            Toggle(isOn: $callAlerts) { Label("Care Notifications", systemImage: "bell.badge") }
+                                .onChange(of: callAlerts) { on in
+                                    if on { careAlerts.prepare() } else { careAlerts.cancelAll() }
+                                }
+                            if callAlerts {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: !live ? "pause.circle.fill" : (careAlerts.canShowAlerts ? "checkmark.circle.fill" : "bell.slash"))
+                                        .foregroundStyle(live && careAlerts.canShowAlerts ? Color.green : Color.secondary)
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(!live ? "Paused" : careAlerts.permissionTitle).font(.subheadline.weight(.medium))
+                                        Text(!live ? "Turn on Background Mode to receive care alerts." : careAlerts.permissionDetail)
+                                            .font(.footnote).foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }.padding(.vertical, 4)
+                                if careAlerts.permissionNotRequested {
+                                    Button("Allow Notifications") { careAlerts.ask() }
+                                } else {
+                                    Button { careAlerts.openSettings() } label: {
+                                        HStack {
+                                            Text("Notification Settings")
+                                            Spacer()
+                                            Image(systemName: "arrow.up.right").font(.footnote)
+                                        }
+                                    }
+                                }
+                                if live && careAlerts.canShowAlerts {
+                                    Button { careAlerts.testBanner(); showNotificationTest = true } label: {
+                                        Label("Send Test Notification", systemImage: "paperplane")
+                                    }
+                                }
+                                if let error = careAlerts.lastError {
+                                    Label(error, systemImage: "exclamationmark.circle").font(.footnote).foregroundStyle(.orange)
+                                }
+                            }
+                        } header: { Text("Notifications") } footer: {
+                            Text(callAlerts ? "Care alerts appear when you’re away from TamaiOS. To test, send a notification and leave the app within 5 seconds." : "Get a notification when your Tama needs care while you’re away.")
                         }
                         Section {
                             Button { makeBackup() } label: { Label("Back Up", systemImage: "square.and.arrow.up") }
@@ -8411,10 +8423,18 @@ jobs:
                         }
                     }
                     .sheet(isPresented: $showReset) { ResetDeviceView().environmentObject(model).environmentObject(emu) }
+                    .buttonStyle(SettingsRowButtonStyle())
+                    .environment(\.defaultMinListRowHeight, 52)
                     .navigationTitle("Settings")
                     .navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { if let t = emu.toy { rename(t) }; dismiss() } } }
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button { if let t = emu.toy { rename(t) }; dismiss() } label: { Text("Done").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) } } }
                     .onAppear { name = emu.toy?.name ?? ""; careAlerts.prepare() }
+                    .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in careAlerts.refresh() }
+                    .alert("Test Notification", isPresented: $showNotificationTest) {
+                        Button("OK", role: .cancel) { }
+                    } message: {
+                        Text("Leave TamaiOS within 5 seconds to see the test. Focus or Scheduled Summary may delay it.")
+                    }
                     .onChange(of: soundOn) { _ in emu.applySettings() }
                     .onChange(of: volume) { _ in emu.applySettings() }
                     .onChange(of: neverSleep) { _ in emu.applySettings() }
@@ -8627,6 +8647,10 @@ jobs:
         final class CareAlerts: ObservableObject {
             static let shared = CareAlerts()
             @Published private(set) var status = "Checking notification settings…"
+            @Published private(set) var permissionNotRequested = false
+            @Published private(set) var canShowAlerts = false
+            @Published private(set) var permissionTitle = "Checking permissions"
+            @Published private(set) var permissionDetail = "Reading your notification preferences."
             @Published private(set) var lastError: String?
             private let prefix = "tamaios-care-"
             private var sentMasks: [String: Int] = [:]
@@ -8638,6 +8662,11 @@ jobs:
             func refresh() {
                 UNUserNotificationCenter.current().getNotificationSettings { settings in
                     DispatchQueue.main.async {
+                        self.permissionNotRequested = settings.authorizationStatus == .notDetermined
+                        self.canShowAlerts = (settings.authorizationStatus == .authorized || settings.authorizationStatus == .ephemeral)
+                            && settings.alertSetting == .enabled && settings.alertStyle != .none
+                        self.permissionTitle = self.permissionNotRequested ? "Permission needed" : (self.canShowAlerts ? "Notifications allowed" : "Alerts unavailable")
+                        self.permissionDetail = self.permissionNotRequested ? "Allow notifications to receive care alerts." : (self.canShowAlerts ? "Care banners are enabled in iPhone Settings." : "Review notification permissions and banners in iPhone Settings.")
                         switch settings.authorizationStatus {
                         case .notDetermined: self.status = "Permission not requested"
                         case .denied: self.status = "Notifications blocked in iPhone Settings"

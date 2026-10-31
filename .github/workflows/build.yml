@@ -3284,6 +3284,14 @@ jobs:
             @State private var lastShown: [Suitor?] = Array(repeating: nil, count: 9)
             @State private var shownAt: [Double] = Array(repeating: 0, count: 9)
             @State private var catchableUntil: [Double] = Array(repeating: -1, count: 9)
+            private struct Sprite {
+                let suitor: Suitor
+                let image: CGImage
+            }
+            @State private var spritePool: [Sprite] = []
+            @State private var lastImages: [CGImage?] = Array(repeating: nil, count: 9)
+            @State private var lastCallback: Double = 0
+            @State private var countdownRemaining: Double = 3
             @State private var bursts: [Int: Double] = [:]      // hole -> time of the "+50"
             @State private var clock: Double = 0
             @State private var ticks = 0
@@ -3306,7 +3314,7 @@ jobs:
                     .padding(16)
                 }
                 .background(LinearGradient(colors: [Color.purple.opacity(0.12), Color(.systemBackground)], startPoint: .top, endPoint: .center).ignoresSafeArea())
-                .scrollDisabled(phase == .playing)
+                .scrollDisabled(phase == .playing || phase == .countdown)
                 .onAppear { wallet.refresh(emu) }
                 .navigationTitle("Arcade")
                 .navigationBarTitleDisplayMode(.inline)
@@ -3314,7 +3322,7 @@ jobs:
                 .onDisappear {
                     touchingHoles.removeAll()
                     catchableUntil = Array(repeating: -1, count: 9)
-                    if phase != .done { phase = .ready }
+                    if phase != .done { ArcadeDiagnostics.shared.end("left arcade", score: score); phase = .ready }
                 }
             }
 
@@ -3364,7 +3372,7 @@ jobs:
                 // the cell is size tall and the bush covers its bottom 42%: a hidden Tama sits
                 // just below the bush top, a popped one stands on it with its whole head showing
                 let lift: CGFloat = up ? -size * 0.40 : size * 0.16
-                let img = lastShown[i].flatMap { town.image($0) }
+                let img = lastImages[i]
                 return CharacterPicture(image: img)
                     .frame(width: size * 0.56, height: size * 0.56)
                     .offset(y: lift)
@@ -3469,50 +3477,81 @@ jobs:
 
             // MARK: game
 
+            private func prepareSprites() {
+                guard spritePool.isEmpty else { return }
+                let started = ProcessInfo.processInfo.systemUptime
+                var candidates = Array(town.suitors.prefix(12))
+                if candidates.isEmpty, let fallback = town.randomSuitor(mix: false) { candidates = [fallback] }
+                var prepared: [Sprite] = []
+                for candidate in candidates {
+                    if let image = town.image(candidate) { prepared.append(Sprite(suitor: candidate, image: image)) }
+                }
+                spritePool = prepared
+                ArcadeDiagnostics.shared.prepared(count: prepared.count, seconds: ProcessInfo.processInfo.systemUptime - started)
+            }
+
             private func begin() {
+                guard phase == .ready || phase == .done else { return }
                 touchingHoles.removeAll()
+                // Core reads and sprite composition happen before the countdown, never during play.
                 wallet.refresh(emu)
                 guard wallet.balance != nil else { emu.say("Your Tama’s profile is not ready yet."); return }
+                prepareSprites()
+                guard !spritePool.isEmpty else { emu.say("Tamatown characters are still loading. Try again shortly."); return }
                 catchableUntil = Array(repeating: -1, count: 9)
                 credited = 0
                 score = 0
                 holes = Array(repeating: nil, count: 9)
                 bursts = [:]
                 count = 3
+                countdownRemaining = 3
                 ticks = 0
+                clock = 0
+                lastCallback = ProcessInfo.processInfo.systemUptime
+                ArcadeDiagnostics.shared.start()
                 withAnimation(.spring()) { phase = .countdown }
             }
 
-            private func randomTama() -> Suitor? {
-                // the same Tamas you can meet at Tama ♥ Party, plus the odd stranger
-                if let s = town.suitors.randomElement(), Double.random(in: 0...1) < 0.7 { return s }
-                return town.randomSuitor(mix: false) ?? town.suitors.randomElement()
-            }
-
             private func tick() {
-                if ticks % 10 == 0 { wallet.refresh(emu) }
-                clock += 0.05
+                guard phase == .countdown || phase == .playing else { return }
+                let started = ProcessInfo.processInfo.systemUptime
+                guard UIApplication.shared.applicationState == .active else {
+                    lastCallback = started
+                    return
+                }
+                let gap = max(0, started - lastCallback)
+                lastCallback = started
+                // Count real elapsed time under normal load. A long stall pauses excess game time.
+                let dt = min(gap, 0.10)
+                ArcadeDiagnostics.shared.callback(gap: gap, discarded: max(0, gap - dt))
+                defer { if phase != .done { ArcadeDiagnostics.shared.work(seconds: ProcessInfo.processInfo.systemUptime - started) } }
+                clock += dt
                 ticks += 1
                 if !bursts.isEmpty { bursts = bursts.filter { clock - $0.value < 0.7 } }
                 switch phase {
                 case .countdown:
-                    if ticks % 20 == 0 {
-                        if count > 1 { withAnimation(.spring()) { count -= 1 } } else { timeLeft = length; withAnimation { phase = .playing } }
-                    }
+                    countdownRemaining -= dt
+                    let next = max(1, Int(countdownRemaining.rounded(.up)))
+                    if countdownRemaining <= 0 {
+                        timeLeft = length
+                        phase = .playing
+                    } else if count != next { withAnimation(.spring()) { count = next } }
                 case .playing:
-                    timeLeft -= 0.05
+                    timeLeft = max(0, timeLeft - dt)
                     if timeLeft <= 0 { finish(); return }
                     let stay = 0.45 + 0.55 * (timeLeft / length)
                     for i in 0..<9 where holes[i] != nil && clock - shownAt[i] > stay {
                         catchableUntil[i] = clock + 0.12
                         withAnimation(.easeIn(duration: 0.12)) { holes[i] = nil }
                     }
-                    if holes.compactMap({ $0 }).count < 4 && Double.random(in: 0...1) < 0.35 {
+                    let spawnChance = 1 - pow(0.65, dt / 0.05)
+                    if holes.compactMap({ $0 }).count < 4 && Double.random(in: 0...1) < spawnChance {
                         let free = (0..<9).filter { holes[$0] == nil && bursts[$0] == nil && clock > catchableUntil[$0] }
-                        if let i = free.randomElement(), let t = randomTama() {
+                        if let i = free.randomElement(), let sprite = spritePool.randomElement() {
                             shownAt[i] = clock
-                            lastShown[i] = t
-                            withAnimation(.spring(response: 0.18, dampingFraction: 0.6)) { holes[i] = t }
+                            lastImages[i] = sprite.image
+                            lastShown[i] = sprite.suitor
+                            withAnimation(.spring(response: 0.18, dampingFraction: 0.6)) { holes[i] = sprite.suitor }
                         }
                     }
                 default: break
@@ -3522,10 +3561,14 @@ jobs:
             private func finish() {
                 guard phase == .playing else { return }
                 touchingHoles.removeAll()
-                withAnimation { holes = Array(repeating: nil, count: 9) }
+                catchableUntil = Array(repeating: -1, count: 9)
+                withAnimation { holes = Array(repeating: nil, count: 9); phase = .done }
+                ArcadeDiagnostics.shared.end("completed", score: score)
+                // One award after gameplay; no emulator locks are acquired by the gameplay timer.
+                let start = ProcessInfo.processInfo.systemUptime
                 credited = wallet.credit(score * 50, emu: emu)
+                ArcadeDiagnostics.shared.reward(seconds: ProcessInfo.processInfo.systemUptime - start, amount: credited)
                 best = max(best, score)
-                withAnimation(.spring()) { phase = .done }
             }
 
             private func tap(_ i: Int) {
@@ -3539,6 +3582,66 @@ jobs:
         }
 
 
+        final class ArcadeDiagnostics {
+            static let shared = ArcadeDiagnostics()
+            private let lock = NSLock()
+            private var state = "not played"
+            private var sprites = 0
+            private var prepareSeconds = 0.0
+            private var callbacks = 0
+            private var over100 = 0
+            private var over250 = 0
+            private var maxGap = 0.0
+            private var maxWork = 0.0
+            private var pausedSeconds = 0.0
+            private var started = 0.0
+            private var duration = 0.0
+            private var catches = 0
+            private var rewardSeconds = 0.0
+            private var credited = 0
+            func prepared(count: Int, seconds: Double) {
+                lock.lock(); defer { lock.unlock() }
+                sprites = count; prepareSeconds = seconds
+            }
+            func start() {
+                lock.lock(); defer { lock.unlock() }
+                state = "active (countdown or round)"
+                callbacks = 0; over100 = 0; over250 = 0; maxGap = 0; maxWork = 0
+                pausedSeconds = 0; catches = 0; rewardSeconds = 0; credited = 0; duration = 0
+                started = ProcessInfo.processInfo.systemUptime
+            }
+            func callback(gap: Double, discarded: Double) {
+                lock.lock(); defer { lock.unlock() }
+                callbacks += 1; maxGap = max(maxGap, gap); pausedSeconds += discarded
+                if gap > 0.1 { over100 += 1 }
+                if gap > 0.25 { over250 += 1 }
+            }
+            func work(seconds: Double) {
+                lock.lock(); defer { lock.unlock() }
+                maxWork = max(maxWork, seconds)
+            }
+            func end(_ reason: String, score: Int) {
+                lock.lock(); defer { lock.unlock() }
+                guard state.hasPrefix("active") else { return }
+                state = reason; catches = score; duration = ProcessInfo.processInfo.systemUptime - started
+            }
+            func reward(seconds: Double, amount: Int) {
+                lock.lock(); defer { lock.unlock() }
+                rewardSeconds = seconds; credited = amount
+            }
+            func report() -> String {
+                lock.lock(); defer { lock.unlock() }
+                return ["arcade-performance-v1", "state: \(state)",
+                        "cached sprites: \(sprites); preparation ms: \(Int(prepareSeconds * 1000))",
+                        "callbacks: \(callbacks); gaps >100ms: \(over100); >250ms: \(over250)",
+                        "max callback gap ms: \(Int(maxGap * 1000)); max callback work ms: \(Int(maxWork * 1000))",
+                        "excess stall time paused: \(String(format: "%.2f", pausedSeconds)) s",
+                        "round wall duration (includes countdown): \(String(format: "%.2f", duration)) s",
+                        "catches: \(catches); credited: \(credited) G; reward ms: \(Int(rewardSeconds * 1000))",
+                        "Timer metrics are not rendered-frame FPS. No profile polling or sprite composition during play."].joined(separator: "\n")
+            }
+        }
+
         struct ArcadeTouchTarget: UIViewRepresentable {
             var hit: () -> Void
             func makeUIView(context: Context) -> ArcadeTouchView {
@@ -3550,7 +3653,6 @@ jobs:
             }
             func updateUIView(_ view: ArcadeTouchView, context: Context) { view.hit = hit }
         }
-
         final class ArcadeTouchView: UIView {
             var hit: (() -> Void)?
             override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { hit?() }
@@ -4043,8 +4145,8 @@ jobs:
             }
             func report() -> String {
                 lock.lock(); defer { lock.unlock() }
-                return (["settings-touch-v1 / settings-care-v1 / pickup-download-only-v1 / marriage-name-fix-v1",
-                         "Arcade: full-cell touch-down; 0.12s late-catch window. Transport unchanged."] + events).joined(separator: "\n")
+                return (["arcade-performance-v1 / settings-touch-v1 / settings-care-v1 / pickup-download-only-v1 / marriage-name-fix-v1",
+                         "Arcade: cached sprites, no in-round wallet polling, bounded elapsed time. Transport unchanged."] + events).joined(separator: "\n")
             }
         }
 
@@ -7918,6 +8020,9 @@ jobs:
                 case "applog":
                     return emu.appLog.suffix(Int(args.first ?? "") ?? 60).joined(separator: "\n")
 
+                case "arcadeperf":
+                    return ArcadeDiagnostics.shared.report()
+
                 case "linklog":
                     return LinkDiagnostics.shared.report()
 
@@ -8213,6 +8318,7 @@ jobs:
                     "-- core log (last 40) --", run("log 40", emu: emu),
                     "-- app log (last 40) --", run("applog 40", emu: emu),
                     "-- town state --", run("town", emu: emu),
+                    "-- arcade performance --", ArcadeDiagnostics.shared.report(),
                     "-- connection trace --", LinkDiagnostics.shared.report(),
                 ]
         TAMAIOS_SOURCE_EOF
@@ -8236,7 +8342,7 @@ jobs:
             static let help = """
             Paste one command per line (# for comments). Changes persist.
             INFO
-              diag                 everything + connection trace, copied to clipboard
+              diag                 everything + connection/arcade trace, copied to clipboard
               status | perf | params | files
               log [n]  applog [n]  firmware / app log
             TOY

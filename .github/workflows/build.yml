@@ -1,8 +1,8 @@
-# TamaiOS — complete inline app source, Bluetooth patch, and regression tests.
-# Control-frame compatibility correction: accept complete mandatory headers
-# in extended acknowledgements, including the observed Wonder Garden 8-byte ACK.
-# Explicit completion checks, safe paid-item retries, and all prior features remain.
-# Includes the purchase-array compile correction and immutable character-ID cleanup.
+# TamaiOS — complete inline app source, Bluetooth patch, tests, and RX fixture.
+# Receive-framing correction: preserve extended ACK headers and accept the
+# captured final 20-byte notification's zero-only padding beyond the 512-byte
+# response length. Still requires an explicit terminal frame/acknowledgement.
+# Includes the purchase-array compile correction. All unrelated source is preserved.
 # Save as .github/workflows/build.yml; keep all three firmware/*.bin files.
 # No previous TamaiOS commit is needed; standard build dependencies are fetched.
 name: Build TamaiOS
@@ -4172,7 +4172,17 @@ jobs:
                         last = ProcessInfo.processInfo.systemUptime
                         let preview = frame.prefix(20).map { String(format: "%02X", $0) }.joined(separator: " ")
                         emu.note("transfer RX bytes=\(frame.count) head=\(preview)")
-                        switch try reply.consume(frame) {
+                        let paddingBefore = reply.transportPadding.count
+                        let event: TransferReply.Event
+                        do { event = try reply.consume(frame) }
+                        catch {
+                            emu.note("transfer parse failure " + reply.summary)
+                            throw error
+                        }
+                        if reply.transportPadding.count > paddingBefore {
+                            emu.note("accepted zero-filled final-chunk padding " + reply.summary)
+                        }
+                        switch event {
                         case .requestData: try write([0xF0, 0x8E, 0x0D])
                         case .completed:
                             emu.note("transfer response complete " + reply.summary)
@@ -4416,18 +4426,18 @@ jobs:
                                 if let gift = town.state(toy).pointGifts?.first(where: { !$0.attempted }) {
                                     let balance = emu.withCore { tg_profile_points($0) } ?? -1
                                     if balance < 0 || gift.amount > DeviceWallet.maximum - Int(balance) {
-                                        link.close()
-                                        msg = "Gift remains queued until the profile is ready and has room below 65,535 G."
-                                    } else {
-                                        self.main { town.markGiftAttempt(gift.id, for: toy) }
-                                        progress("Sending \(gift.amount) Gotchi Points…")
-                                        try link.finishItem(Town.pointsPacket(gift.amount))
         TAMAIOS_SOURCE_EOF
     - name: Write ios/TamaiOS/Tamatown/TamaLink.swift (2/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Tamatown"
         cat >> 'ios/TamaiOS/Tamatown/TamaLink.swift' <<'TAMAIOS_SOURCE_EOF'
+                                        link.close()
+                                        msg = "Gift remains queued until the profile is ready and has room below 65,535 G."
+                                    } else {
+                                        self.main { town.markGiftAttempt(gift.id, for: toy) }
+                                        progress("Sending \(gift.amount) Gotchi Points…")
+                                        try link.finishItem(Town.pointsPacket(gift.amount))
                                         self.main { town.removeGift(gift.id, for: toy); DeviceWallet.shared.refresh(emu) }
                                         emu.saveNow()
                                         close = true
@@ -5510,7 +5520,6 @@ jobs:
                       let index = items.firstIndex(where: { $0.id == item.id }) else {
                     throw TransferProtocolError.malformed("the queued item no longer exists")
                 }
-
                 var updated = items[index]
                 if attempted {
                     let previousCount = updated.attemptCount ?? 0
@@ -5518,7 +5527,6 @@ jobs:
                 }
                 updated.attempted = attempted
                 updated.deliveryNote = note
-
                 items[index] = updated
                 value.bag = items
                 try persistDeliveryState(value, toy)
@@ -9076,6 +9084,7 @@ jobs:
             private(set) var finalAck = false
             private(set) var dataEnded = false
             private(set) var controlExtension: [UInt8] = []
+            private(set) var transportPadding: [UInt8] = []
             private var requested = false
 
             init(requiresPayload: Bool = false, requiresFinalAck: Bool = false) {
@@ -9083,16 +9092,27 @@ jobs:
                 self.requiresFinalAck = requiresFinalAck
             }
             var summary: String {
-                "expected=\(expected.map(String.init) ?? "none") received=\(payload.count) finalAck=\(finalAck) dataEnded=\(dataEnded) extensionBytes=\(controlExtension.count)"
+                "expected=\(expected.map(String.init) ?? "none") received=\(payload.count) finalAck=\(finalAck) dataEnded=\(dataEnded) extensionBytes=\(controlExtension.count) paddingBytes=\(transportPadding.count)"
             }
-            // Control notifications may contain bytes beyond their mandatory header.
-            // Keep those bytes available for diagnostics without guessing their meaning.
             mutating func consume(_ frame: [UInt8]) throws -> Event {
                 guard !frame.isEmpty else { return .waiting }
                 // While payload bytes remain, control-looking bytes are still payload.
                 if let expected, payload.count < expected {
-                    guard payload.count + frame.count <= expected else { throw TransferProtocolError.malformed("reply exceeds its declared length") }
-                    payload += frame
+                    let remaining = expected - payload.count
+                    if frame.count <= remaining {
+                        payload += frame
+                    } else {
+                        // Wonder Garden sends a fixed 20-byte final data notification.
+                        // Only its zero-filled bytes beyond the transport length are padding.
+                        let padding = Array(frame.dropFirst(remaining))
+                        guard frame.count == 20, padding.count < 20,
+                              padding.allSatisfy({ $0 == 0 }) else {
+                            throw TransferProtocolError.malformed("non-padding bytes exceed the declared reply length")
+                        }
+                        payload += frame.prefix(remaining)
+                        transportPadding += padding
+                    }
+                    // The final data chunk alone never completes a transfer.
                     return .waiting
                 }
                 let tag: UInt16 = frame.count >= 2 ? UInt16(frame[0]) | UInt16(frame[1]) << 8 : 0
@@ -9200,25 +9220,47 @@ jobs:
             mustThrow("short packet") { try TransferPacket.validate([1, 2, 3]) }
             mustThrow("oversize packet") { try TransferPacket.validate(packet(65536)) }
 
-            // Wonder Garden trace from build 39: an 8-byte progress acknowledgement.
-            var extendedAck = TransferReply(requiresPayload: true)
-            let observed = try extendedAck.consume([0xF0, 0x0C, 0x02, 0x01, 0x06, 0x06, 0x06, 0x00])
-            if case .requestData = observed { checks += 1 } else { fatalError("extended acknowledgement must request data") }
-            expect(!completed(observed), "258-byte progress acknowledgement is not terminal success")
-            expect(extendedAck.controlExtension == [6, 6, 6, 0], "preserve observed acknowledgement extension")
-            expect(extendedAck.payload.isEmpty, "ack extension never becomes data")
-            _ = try extendedAck.consume([0xF0, 0x0D, 2, 0, 6, 6, 6, 0])
-            _ = try extendedAck.consume([0xAA, 0xBB])
-            expect(completed(try extendedAck.consume([0xF0, 0x4D, 6, 6, 6, 0])), "extended data terminator after complete payload")
-            expect(extendedAck.payload == [0xAA, 0xBB], "reply payload excludes control extensions")
-
-            var extendedFinal = TransferReply(requiresFinalAck: true)
-            expect(completed(try extendedFinal.consume([0xF0, 0x0C, 0, 2, 6, 6, 6, 0])), "extended finished acknowledgement")
-            expect(extendedFinal.finalAck, "extended terminal acknowledgement recorded")
-            var extendedWithoutData = TransferReply(requiresPayload: true)
-            mustThrow("extended final ack still cannot replace hello payload") {
-                _ = try extendedWithoutData.consume([0xF0, 0x0C, 0, 2, 6, 6, 6, 0])
+            struct CapturedReply: Decodable {
+                let ack: [UInt8]
+                let header: [UInt8]
+                let chunks: [[UInt8]]
+                let expectedTransportLength: Int
+                let expectedPaddingLength: Int
             }
+            let fixtureURL = URL(fileURLWithPath: "tools/transfer-tests/wondergarden-build40.json")
+            let fixture = try JSONDecoder().decode(CapturedReply.self, from: Data(contentsOf: fixtureURL))
+            var capturedReply = TransferReply(requiresPayload: true)
+            let capturedAck = try capturedReply.consume(fixture.ack)
+            if case .requestData = capturedAck { checks += 1 } else { fatalError("captured ACK should request data") }
+            expect(capturedReply.controlExtension == [6, 6, 6, 0], "preserve captured 8-byte ACK extension")
+            _ = try capturedReply.consume(fixture.header)
+            for chunk in fixture.chunks {
+                expect(!completed(try capturedReply.consume(chunk)), "captured payload alone cannot complete the response")
+            }
+            expect(capturedReply.payload.count == fixture.expectedTransportLength, "captured transport payload is exactly 512 bytes")
+            expect(capturedReply.transportPadding.count == fixture.expectedPaddingLength, "captured final notification has eight padding bytes")
+            expect(capturedReply.transportPadding.allSatisfy { $0 == 0 }, "only zero transport padding is accepted")
+            expect(Array(capturedReply.payload.prefix(6)) == Array("TAMAGO".utf8), "captured response preserves TAMAGO header")
+            // Synthetic terminal-frame tests: these frames were NOT present in the truncated diagnostics.
+            expect(completed(try capturedReply.consume([0xF0, 0x4D])), "explicit terminal frame completes captured prefix")
+
+            var paddedDownload = TransferReply(requiresFinalAck: true)
+            _ = try paddedDownload.consume(fixture.ack)
+            _ = try paddedDownload.consume(fixture.header)
+            for chunk in fixture.chunks { _ = try paddedDownload.consume(chunk) }
+            expect(!completed(try paddedDownload.consume([0xF0, 0x4D, 6, 6, 6, 0])), "Download still waits for a terminal acknowledgement")
+            expect(completed(try paddedDownload.consume([0xF0, 0x0C, 0, 2, 6, 6, 6, 0])), "extended terminal acknowledgement accepted")
+
+            var corruptedTail = TransferReply()
+            _ = try corruptedTail.consume([0xF0, 0x0D, 12, 0])
+            var nonzeroTail = [UInt8](repeating: 0, count: 20)
+            nonzeroTail[19] = 1
+            mustThrow("nonzero bytes beyond transport size are not silently discarded") { _ = try corruptedTail.consume(nonzeroTail) }
+            var extendedHeader = TransferReply(requiresPayload: true)
+            _ = try extendedHeader.consume([0xF0, 0x0D, 2, 0, 6, 6, 6, 0])
+            _ = try extendedHeader.consume([0xF0, 0x4D])
+            expect(extendedHeader.payload == [0xF0, 0x4D], "control-looking payload bytes remain payload")
+            expect(completed(try extendedHeader.consume([0xF0, 0x4D, 6, 6, 6, 0])), "extended terminator accepted after full payload")
 
             var ackOnly = TransferReply()
             expect(completed(try ackOnly.consume([0xF0, 0x0C, 0, 2])), "explicit finished acknowledgement")
@@ -9316,6 +9358,47 @@ jobs:
                     UIApplication.shared.endBackgroundTask(value)
                 }
             }
+        }
+        TAMAIOS_SOURCE_EOF
+    - name: Write tools/transfer-tests/wondergarden-build40.json
+      run: |
+        set -euo pipefail
+        mkdir -p "tools/transfer-tests"
+        cat > 'tools/transfer-tests/wondergarden-build40.json' <<'TAMAIOS_SOURCE_EOF'
+        {
+          "description": "Captured response prefix from Wonder Garden build 40 diagnostics, 2026-10-30 23:25:59 America/Chicago. The terminal frame was not captured because the previous parser aborted.",
+          "ack": [240, 12, 2, 1, 6, 6, 6, 0],
+          "header": [240, 13, 0, 2],
+          "chunks": [
+            [84,65,77,65,71,79,0,0,8,231,8,228,8,235,8,235,8,238,8,92],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,2,1,0,0,20,63,0,0],
+            [0,0,160,165,123,242,96,147,114,83,0,0,0,0,1,1,8,233,8,224],
+            [8,234,8,228,8,223,0,0,0,0,0,0,0,0,101,11,4,0,0,0],
+            [0,30,1,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,2,15],
+            [0,0,70,171,0,0,0,0,0,0,0,0,3,0,3,0,3,0,3,0],
+            [255,0,4,4,4,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,74,6,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,2,8,0,1,6,66,20,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],
+            [0,0,0,0,0,0,0,0,64,1,0,0,0,0,0,0,0,0,0,0],
+            [64,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],
+            [64,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+          ],
+          "expectedTransportLength": 512,
+          "expectedPaddingLength": 8
         }
         TAMAIOS_SOURCE_EOF
     - name: Bundle Fairy, Magic, and Wonder Garden

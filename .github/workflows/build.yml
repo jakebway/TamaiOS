@@ -1,8 +1,9 @@
-# TamaiOS — all app source and Bluetooth patch embedded directly below.
-# No previous TamaiOS commit or historical source archive is required.
-# Save as .github/workflows/build.yml; keep the three firmware/*.bin files.
-# Current working app retained; separate bathroom candidate and care-call notifications.
-# All app source remains embedded here. Standard build dependencies are fetched normally.
+# TamaiOS: complete embedded-source build. Save as .github/workflows/build.yml.
+# Retain the existing firmware files. No secondary app-build workflow is required.
+# Adds an experimental event-triggered disposable-clone profile name reader (local Vision OCR).
+# No probe input, display, audio, transport, save, or restored state is attached to the live toy.
+# Includes past-tense bathroom text, hatch-once, foreground-only playback, screen-on default, and simple Copy output.
+# Source snapshot API: oreo-fox/tg18-emu core/src/snapshot.rs at 41204c92e98a8882d5c90a9876d8990f3b63e285.
 name: Build TamaiOS
 'on':
   workflow_dispatch: {}
@@ -43,7 +44,7 @@ jobs:
 
         debug = false
         TAMAIOS_SOURCE_EOF
-    - name: Write ffi/src/lib.rs (1/3)
+    - name: Write ffi/src/lib.rs (1/5)
       run: |
         set -euo pipefail
         mkdir -p "ffi/src"
@@ -410,6 +411,12 @@ jobs:
                     return Some((e, moved));
                 }
             }
+        TAMAIOS_SOURCE_EOF
+    - name: Write ffi/src/lib.rs (2/5)
+      run: |
+        set -euo pipefail
+        mkdir -p "ffi/src"
+        cat >> 'ffi/src/lib.rs' <<'TAMAIOS_SOURCE_EOF'
             let m = Machine::new(image.clone(), &image, rtc_now);
             let mut e = new_emu(m, image);
             e.boot_note = "New toy".into();
@@ -562,12 +569,6 @@ jobs:
             e.flags |= F_SYNCED;
         }
 
-        TAMAIOS_SOURCE_EOF
-    - name: Write ffi/src/lib.rs (2/3)
-      run: |
-        set -euo pipefail
-        mkdir -p "ffi/src"
-        cat >> 'ffi/src/lib.rs' <<'TAMAIOS_SOURCE_EOF'
         /// How far the toy's clock is from the phone's, in seconds (0 if unknown).
         #[no_mangle]
         pub extern "C" fn tg_clock_drift(e: *mut Emu) -> f64 {
@@ -784,6 +785,12 @@ jobs:
 
         /// Put the toy to sleep now (it saves itself, like the real one).
         #[no_mangle]
+        TAMAIOS_SOURCE_EOF
+    - name: Write ffi/src/lib.rs (3/5)
+      run: |
+        set -euo pipefail
+        mkdir -p "ffi/src"
+        cat >> 'ffi/src/lib.rs' <<'TAMAIOS_SOURCE_EOF'
         pub extern "C" fn tg_force_sleep(e: *mut Emu) -> i32 {
             with(e, |e| {
                 let r = force_sleep(e, 10.0);
@@ -1070,12 +1077,6 @@ jobs:
                     let csize = u32le(d, off + 20)?;
                     let nlen = u16le(d, off + 28)?;
                     let xlen = u16le(d, off + 30)?;
-        TAMAIOS_SOURCE_EOF
-    - name: Write ffi/src/lib.rs (3/3)
-      run: |
-        set -euo pipefail
-        mkdir -p "ffi/src"
-        cat >> 'ffi/src/lib.rs' <<'TAMAIOS_SOURCE_EOF'
                     let clen = u16le(d, off + 32)?;
                     let local = u32le(d, off + 42)?;
                     let name = String::from_utf8_lossy(d.get(off + 46..off + 46 + nlen)?).to_string();
@@ -1105,6 +1106,12 @@ jobs:
         pub extern "C" fn tg_mm_load_zip(p: *const u8, n: usize) -> i32 {
             let d = match unsafe { bytes(p, n) } {
                 Some(d) => d,
+        TAMAIOS_SOURCE_EOF
+    - name: Write ffi/src/lib.rs (4/5)
+      run: |
+        set -euo pipefail
+        mkdir -p "ffi/src"
+        cat >> 'ffi/src/lib.rs' <<'TAMAIOS_SOURCE_EOF'
                 None => return 0,
             };
             catch_unwind(|| {
@@ -1360,6 +1367,130 @@ jobs:
             }
         }
 
+
+        // Disposable name-probe machines. Never attached to phone transport, display, audio, or save paths.
+        pub struct NameProbeSeed { snapshot: Snapshot, image: Arc<Vec<u8>>, owner: String, identity: String }
+        pub struct NameProbe { m: Machine, identity: String }
+        fn name_identity(m: &Machine, base: u32) -> String {
+            let o = base.wrapping_sub(0xF800_0000) as usize;
+            let stage = m.sys.sram[o + 0x52];
+            let character = u32::from_le_bytes(m.sys.sram[o+0x60..o+0x64].try_into().unwrap());
+            let signature: String = m.sys.sram[o+0x4C..o+0x50].iter().map(|v| format!("{:02X}", v)).collect();
+            format!("{}.{}.{}", signature, stage, character)
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_seed_capture(e: *mut Emu) -> *mut NameProbeSeed {
+            if e.is_null() { return std::ptr::null_mut(); }
+            catch_unwind(AssertUnwindSafe(|| {
+                let e = unsafe { &mut *e };
+                let Some(base) = profile_base(e) else { return std::ptr::null_mut(); };
+                if e.stopped.is_some() { return std::ptr::null_mut(); }
+                let o = base.wrapping_sub(0xF800_0000) as usize;
+                let owner: String = mm::decode_name(&e.m.sys.sram[o+0x7A..o+0x8A]).chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+                let seed = NameProbeSeed { snapshot: Snapshot::capture(&e.m), image: e.image.clone(), owner,
+                    identity: name_identity(&e.m, base) };
+                Box::into_raw(Box::new(seed))
+            })).unwrap_or(std::ptr::null_mut())
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_seed_destroy(p: *mut NameProbeSeed) {
+            if !p.is_null() { unsafe { drop(Box::from_raw(p)); } }
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_seed_text(p: *const NameProbeSeed, kind: i32, out: *mut *mut u8, n: *mut usize) {
+            if p.is_null() { give_string(String::new(), out, n); return; }
+            let seed = unsafe { &*p };
+            give_string(if kind == 0 { seed.owner.clone() } else { seed.identity.clone() }, out, n)
+        }
+        #[no_mangle]
+        TAMAIOS_SOURCE_EOF
+    - name: Write ffi/src/lib.rs (5/5)
+      run: |
+        set -euo pipefail
+        mkdir -p "ffi/src"
+        cat >> 'ffi/src/lib.rs' <<'TAMAIOS_SOURCE_EOF'
+        pub extern "C" fn tg_name_probe_from_seed(p: *const NameProbeSeed) -> *mut NameProbe {
+            if p.is_null() { return std::ptr::null_mut(); }
+            catch_unwind(AssertUnwindSafe(|| {
+                let seed = unsafe { &*p };
+                let mut m = Machine::new(seed.image.clone(), &seed.image, 0.0);
+                // Snapshot includes the live RAM/flash image; restore copies it into independently owned buffers.
+                if seed.snapshot.restore(&mut m).is_err() { return std::ptr::null_mut(); }
+                m.sys.live_keys = [false; 3]; m.sys.hold_until = [0.0; 3]; m.sys.key_script.clear();
+                m.sys.radio = None; m.stop_on_bluetooth = true; m.bluetooth_used = false;
+                m.never_sleep = true; m.idle_skip = true; m.sys.turbo = 1.0; m.print_log = false;
+                m.log.clear(); m.sys.sound.events.clear();
+                Box::into_raw(Box::new(NameProbe { m, identity: seed.identity.clone() }))
+            })).unwrap_or(std::ptr::null_mut())
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_probe_destroy(p: *mut NameProbe) {
+            if !p.is_null() { unsafe { drop(Box::from_raw(p)); } }
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_probe_step(p: *mut NameProbe, seconds: f64) -> i32 {
+            if p.is_null() || !seconds.is_finite() { return 0; }
+            catch_unwind(AssertUnwindSafe(|| {
+                let probe = unsafe { &mut *p };
+                let m = &mut probe.m;
+                let end = m.executed.saturating_add((seconds.clamp(0.001, 0.05) * CPU_HZ) as u64);
+                if m.sys.powered_off { let now = m.now(); m.press(now, Key::B); m.power_cycle(end); }
+                let result = m.run_with_sleep(end);
+                m.log.clear(); m.sys.sound.events.clear();
+                matches!(result, Outcome::Limit | Outcome::PowerOff) as i32
+            })).unwrap_or(0)
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_probe_press(p: *mut NameProbe, key: i32) {
+            if p.is_null() { return; }
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                if let Some(k) = key_of(key) { let probe = unsafe { &mut *p };
+                let m = &mut probe.m; let now = m.now(); m.press(now, k); }
+            }));
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_probe_rgb(p: *mut NameProbe, out: *mut u8, n: usize) -> i32 {
+            if p.is_null() || out.is_null() || n < 128 * 128 * 3 { return 0; }
+            catch_unwind(AssertUnwindSafe(|| {
+                let probe = unsafe { &*p };
+                if name_identity(&probe.m, 0xF800_D864) != probe.identity { return 0; }
+                let pixels = probe.m.lcd_rgb();
+                if pixels.len() != 128 * 128 * 3 { return 0; }
+                unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), out, pixels.len()); }
+                1
+            })).unwrap_or(0)
+        }
+        #[no_mangle]
+        pub extern "C" fn tg_name_identity_matches(e: *mut Emu, stage: i32, character: u32, signature: u32) -> i32 {
+            if e.is_null() { return 0; }
+            catch_unwind(AssertUnwindSafe(|| {
+                let e = unsafe { &mut *e };
+                let Some(base) = profile_base(e) else { return 0; };
+                let o = base.wrapping_sub(0xF800_0000) as usize;
+                let current_character = u32::from_le_bytes(e.m.sys.sram[o+0x60..o+0x64].try_into().unwrap());
+                let current_signature = u32::from_be_bytes(e.m.sys.sram[o+0x4C..o+0x50].try_into().unwrap());
+                (i32::from(e.m.sys.sram[o+0x52]) == stage && current_character == character && current_signature == signature) as i32
+            })).unwrap_or(0)
+        }
+        #[cfg(test)]
+        mod name_probe_isolation_tests {
+            use super::*;
+            #[test]
+            fn disposable_copy_does_not_share_mutable_game_memory_or_keys() {
+                let mut image = vec![0u8; FLASH_SIZE]; image[..4].copy_from_slice(b"SPII");
+                let image = Arc::new(image);
+                let live = Machine::new(image.clone(), &image, 0.0);
+                let seed = NameProbeSeed { snapshot: Snapshot::capture(&live), image, owner: "JAKE".into(), identity: "test".into() };
+                let p = tg_name_probe_from_seed(&seed);
+                assert!(!p.is_null());
+                let probe = unsafe { &mut *p };
+                let old_sram = live.sys.sram[0]; let old_ram = live.sys.ram[0]; let old_keys = live.sys.key_script.len();
+                probe.m.sys.sram[0] = old_sram ^ 0xFF; probe.m.sys.ram[0] = old_ram ^ 0xFF;
+                let now = probe.m.now(); probe.m.press(now, Key::A);
+                assert_eq!(live.sys.sram[0], old_sram); assert_eq!(live.sys.ram[0], old_ram); assert_eq!(live.sys.key_script.len(), old_keys);
+                tg_name_probe_destroy(p);
+            }
+        }
         TAMAIOS_SOURCE_EOF
     - name: Write ffi/src/mm.rs (1/3)
       run: |
@@ -2997,6 +3128,19 @@ jobs:
         int32_t tg_profile_points(Emu *e);
         int32_t tg_profile_adjust_points(Emu *e, int32_t delta);
         int32_t tg_profile_attention(Emu *e);
+
+
+        typedef struct NameProbeSeed NameProbeSeed;
+        typedef struct NameProbe NameProbe;
+        NameProbeSeed *tg_name_seed_capture(Emu *e);
+        void tg_name_seed_destroy(NameProbeSeed *p);
+        void tg_name_seed_text(const NameProbeSeed *p, int32_t kind, uint8_t **out, size_t *n);
+        NameProbe *tg_name_probe_from_seed(const NameProbeSeed *p);
+        void tg_name_probe_destroy(NameProbe *p);
+        int32_t tg_name_probe_step(NameProbe *p, double seconds);
+        void tg_name_probe_press(NameProbe *p, int32_t key);
+        int32_t tg_name_probe_rgb(NameProbe *p, uint8_t *out, size_t n);
+        int32_t tg_name_identity_matches(Emu *e, int32_t stage, uint32_t character, uint32_t signature);
 
         #endif
         TAMAIOS_SOURCE_EOF
@@ -6531,6 +6675,7 @@ jobs:
         mkdir -p "ios/TamaiOS/Core"
         cat > 'ios/TamaiOS/Core/Audio.swift' <<'TAMAIOS_SOURCE_EOF'
         import AVFoundation
+        import UIKit
         import os
 
         /// Plays the toy's buzzer. The emulator thread pushes 44.1 kHz samples into a
@@ -6546,6 +6691,7 @@ jobs:
             private let lock: UnsafeMutablePointer<os_unfair_lock>
             private var priming = true
             var muted = false
+            private var foregroundAudible = false
             var minFill = 0.05
             var maxFill = 0.12
             private(set) var underruns = 0
@@ -6557,6 +6703,11 @@ jobs:
                 ring.initialize(repeating: 0, count: cap)
                 lock = .allocate(capacity: 1)
                 lock.initialize(to: os_unfair_lock())
+                foregroundAudible = UIApplication.shared.applicationState == .active
+                NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in self?.setForegroundAudible(false) }
+                NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in self?.setForegroundAudible(false) }
+                NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in self?.setForegroundAudible(true) }
+
                 let fmt = AVAudioFormat(standardFormatWithSampleRate: AudioOut.rate, channels: 1)!
                 node = AVAudioSourceNode(format: fmt) { [unowned self] _, _, frames, abl -> OSStatus in
                     let bufs = UnsafeMutableAudioBufferListPointer(abl)
@@ -6577,13 +6728,23 @@ jobs:
                 }
             }
 
+            private func setForegroundAudible(_ active: Bool) {
+                os_unfair_lock_lock(lock)
+                foregroundAudible = active; head = 0; count = 0; priming = true
+                os_unfair_lock_unlock(lock)
+            }
+            var foregroundPlaybackAllowed: Bool {
+                os_unfair_lock_lock(lock); defer { os_unfair_lock_unlock(lock) }
+                return foregroundAudible && !muted
+            }
+
             private func pull(_ out: UnsafeMutablePointer<Float>, _ n: Int) {
                 os_unfair_lock_lock(lock)
                 if priming && Double(count) >= minFill * AudioOut.rate { priming = false }
                 var i = 0
                 if !priming {
                     while i < n && count > 0 {
-                        out[i] = muted ? 0 : ring[head]
+                        out[i] = ForegroundPlaybackPolicy.allowed(soundEnabled: !muted, foreground: foregroundAudible) ? ring[head] : 0
                         head = (head + 1) % cap
                         count -= 1
                         i += 1
@@ -6654,7 +6815,7 @@ jobs:
             }
         }
         TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Core/Emulator.swift (1/2)
+    - name: Write ios/TamaiOS/Core/Emulator.swift (1/3)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Core"
@@ -6669,7 +6830,7 @@ jobs:
             static func register() {
                 d.register(defaults: [
                     "soundOn": true, "volume": 0.6, "haptics": true, "liveInBackground": true,
-                    "callAlerts": true, "keepAwake": true, "neverSleep": false, "showHints": true,
+                    "callAlerts": true, "keepAwake": true, "neverSleep": true, "showHints": true,
                     "p.tick_ms": 4.0, "p.sleep_tick_ms": 20.0, "p.audio_min_ms": 30.0, "p.audio_max_ms": 80.0,
                     "p.gap_s": 2.0, "p.autosave_s": 180.0, "p.fps": 60.0, "p.call_gap_s": 600.0,
                 ])
@@ -6946,6 +7107,12 @@ jobs:
                 var last = CACurrentMediaTime()
                 var lp = LoopPrefs.read()
                 var nextPrefs = last + 1
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/Emulator.swift (2/3)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat >> 'ios/TamaiOS/Core/Emulator.swift' <<'TAMAIOS_SOURCE_EOF'
                 var nextAutosave = last + lp.autosave
                 var nextWall = last
                 var lastInput = last
@@ -7045,12 +7212,6 @@ jobs:
                         dt = 0
                     }
                     let t0 = CACurrentMediaTime()
-        TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Core/Emulator.swift (2/2)
-      run: |
-        set -euo pipefail
-        mkdir -p "ios/TamaiOS/Core"
-        cat >> 'ios/TamaiOS/Core/Emulator.swift' <<'TAMAIOS_SOURCE_EOF'
                     // during a Bluetooth transfer the device runs 3x faster, so it's over sooner
                     code = tg_tick(h, linkBusy ? min(dt * 3, 0.1) : dt)
                     stats.lastTickMs = (CACurrentMediaTime() - t0) * 1000
@@ -7084,14 +7245,13 @@ jobs:
 
                     if now >= nextCarePoll {
                         nextCarePoll = now + 1
-                        let sample = careSample()
-                        let bathroomRaw = bathroomSample()
-                        let observedAt = ProcessInfo.processInfo.systemUptime
-                        let expectedID = toyID
+                        let sample = careSample(), bathroomRaw = bathroomSample()
+                        let observedAt = ProcessInfo.processInfo.systemUptime, expectedID = toyID
                         DispatchQueue.main.async {
                             guard let toy = self.toy, toy.id == expectedID else { return }
                             CareAlerts.shared.observe(mask: sample.mask, deviceID: toy.id, name: toy.name,
-                                                      source: .poll, observedAt: observedAt, raw: sample.raw, stage: sample.stage)
+                                source: .poll, observedAt: observedAt, raw: sample.raw, stage: sample.stage,
+                                character: sample.character, signature: sample.signature)
                             CareAlerts.shared.observeBathroom(raw: bathroomRaw, deviceID: toy.id, observedAt: observedAt)
                         }
                     }
@@ -7147,20 +7307,27 @@ jobs:
                 }
             }
 
-            private func careSample() -> (mask: Int, raw: Int, stage: Int) {
-                let sample = withCore { h -> (Int, Int, Int) in
+            private func careSample() -> (mask: Int, raw: Int, stage: Int, character: Int, signature: String) {
+                let sample = withCore { h -> (Int, Int, Int, Int, String) in
                     let mask = Int(tg_profile_attention(h))
-                    guard mask >= 0 else { return (mask, -1, -1) }
-                    // Read raw bytes only under the existing supported-English-ROM guard.
-                    var raw: UInt8 = 0
-                    var stage: UInt8 = 0
-                    let rawOK = tg_peek(h, 0xF800_D870, &raw, 1)
-                    let stageOK = tg_peek(h, 0xF800_D8B6, &stage, 1)
-                    return (mask, rawOK == 1 ? Int(raw) : -1, stageOK == 1 ? Int(stage) : -1)
+                    guard mask >= 0 else { return (mask, -1, -1, -1, "") }
+                    var raw: UInt8 = 0, stage: UInt8 = 0
+                    var character = [UInt8](repeating: 0, count: 4), signature = [UInt8](repeating: 0, count: 4)
+                    let rawOK = tg_peek(h, 0xF800_D870, &raw, 1), stageOK = tg_peek(h, 0xF800_D8B6, &stage, 1)
+                    let charOK = character.withUnsafeMutableBufferPointer { tg_peek(h, 0xF800_D8C4, $0.baseAddress, 4) }
+                    let sigOK = signature.withUnsafeMutableBufferPointer { tg_peek(h, 0xF800_D8B0, $0.baseAddress, 4) }
+                    let id = Int(UInt32(character[0]) | UInt32(character[1]) << 8 | UInt32(character[2]) << 16 | UInt32(character[3]) << 24)
+                    return (mask, rawOK == 1 ? Int(raw) : -1, stageOK == 1 ? Int(stage) : -1,
+                            charOK == 1 ? id : -1, sigOK == 1 ? signature.map { String(format: "%02X", $0) }.joined() : "")
                 }
-                return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1)
+                return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1, sample?.3 ?? -1, sample?.4 ?? "")
             }
-
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/Emulator.swift (3/3)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat >> 'ios/TamaiOS/Core/Emulator.swift' <<'TAMAIOS_SOURCE_EOF'
             private func bathroomSample() -> Int {
                 guard toyID == BathroomEventPolicy.supportedDeviceID else { return -1 }
                 return withCore { h -> Int in
@@ -7169,18 +7336,16 @@ jobs:
                     return tg_peek(h, 0xF800_D888, &raw, 1) == 1 ? Int(raw) : -1
                 } ?? -1
             }
-
             private func careCall() {
-                let sample = careSample()
-                let observedAt = ProcessInfo.processInfo.systemUptime
-                let expectedID = toyID
+                let sample = careSample(), observedAt = ProcessInfo.processInfo.systemUptime, expectedID = toyID
                 note("care call detector matched; captured mask=\(sample.mask) raw=\(sample.raw) stage=\(sample.stage)")
                 DispatchQueue.main.async {
                     self.calling = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.calling = false }
                     guard let toy = self.toy, toy.id == expectedID else { return }
                     CareAlerts.shared.observe(mask: sample.mask, deviceID: toy.id, name: toy.name,
-                                              source: .sound, observedAt: observedAt, raw: sample.raw, stage: sample.stage)
+                        source: .sound, observedAt: observedAt, raw: sample.raw, stage: sample.stage,
+                        character: sample.character, signature: sample.signature)
                 }
             }
 
@@ -8056,7 +8221,11 @@ jobs:
 
                 case "carelog":
                     return CareAlerts.shared.diagnostics()
-
+                case "namelog":
+                    return LiveTamaName.shared.diagnostics()
+                case "namecheck":
+                    LiveTamaName.shared.requestCheck()
+                    return "Scheduled a disposable-copy name check; no live menu presses. Run namelog after it finishes."
                 case "diag":
                     let s = diagnostics(emu)
                     UIPasteboard.general.string = s
@@ -8231,6 +8400,12 @@ jobs:
                     if sub == "off" { emu.withCore { tg_radio_enable($0, 0) }; return "Bluetooth module removed (app connections blocked)" }
                     if sub == "on" { emu.withCore { tg_radio_enable($0, 1) }; return "Bluetooth module on" }
                     let r = emu.withCore { tg_radio_ready($0) } ?? 0
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Screens/Console.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Screens"
+        cat >> 'ios/TamaiOS/Screens/Console.swift' <<'TAMAIOS_SOURCE_EOF'
                     return "waiting for app: \(r == 1)  (radio log | on | off)"
 
                 case "town":
@@ -8346,6 +8521,7 @@ jobs:
                     "-- perf --", run("perf", emu: emu),
                     "-- files --", run("files", emu: emu),
                     "-- care notifications --", CareAlerts.shared.diagnostics(),
+                    "-- playback policy --", "foreground-audio-v1: playback allowed=\(emu.audio.foregroundPlaybackAllowed); core sound/detection unchanged",
                     "-- core status --", run("status", emu: emu),
                     "-- core log (last 40) --", run("log 40", emu: emu),
                     "-- app log (last 40) --", run("applog 40", emu: emu),
@@ -8353,12 +8529,6 @@ jobs:
                     "-- arcade performance --", ArcadeDiagnostics.shared.report(),
                     "-- connection trace --", LinkDiagnostics.shared.report(),
                 ]
-        TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Screens/Console.swift (2/2)
-      run: |
-        set -euo pipefail
-        mkdir -p "ios/TamaiOS/Screens"
-        cat >> 'ios/TamaiOS/Screens/Console.swift' <<'TAMAIOS_SOURCE_EOF'
                 lines.append("== end ==")
                 return lines.joined(separator: "\n")
             }
@@ -8375,7 +8545,7 @@ jobs:
             Paste one command per line (# for comments). Changes persist.
             INFO
               diag                 everything + connection/arcade trace, copied to clipboard
-              carelog              care event decisions
+              carelog | namelog | namecheck   notification and disposable-reader diagnostics
               status | perf | params | files
               log [n]  applog [n]  firmware / app log
             TOY
@@ -8425,10 +8595,11 @@ jobs:
             @AppStorage("liveInBackground") private var live = true
             @AppStorage("callAlerts") private var callAlerts = true
             @AppStorage("keepAwake") private var keepAwake = true
-            @AppStorage("neverSleep") private var neverSleep = false
+            @AppStorage("neverSleep") private var neverSleep = true
             @AppStorage("showHints") private var showHints = true
 
             @ObservedObject private var careAlerts = CareAlerts.shared
+            @ObservedObject private var liveName = LiveTamaName.shared
             @State private var name = ""
             @State private var confirmRestart = false
             @State private var showNotificationTest = false
@@ -8475,6 +8646,19 @@ jobs:
                             Toggle("Button Hints", isOn: $showHints)
                         }
 
+                        Section {
+                            LabeledContent("Current Tama", value: liveName.name)
+                            Text(liveName.source).font(.caption).foregroundStyle(.secondary)
+                            Text(liveName.probeStatus).font(.caption).foregroundStyle(.secondary)
+                            TextField("Notification name override (optional)", text: Binding(
+                                get: { liveName.overrideName }, set: { liveName.setOverride($0) }))
+                                .textInputAutocapitalization(.words).autocorrectionDisabled()
+                                .disabled(liveName.identity == nil)
+                            Button("Check name on a disposable copy") { liveName.requestCheck() }
+                                .disabled(liveName.identity == nil)
+                        } header: { Text("Tama Notification Name") } footer: {
+                            Text("After a hatch or growth change, a private emulator copy tries the profile page and reads the displayed name twice. It never presses buttons on your live Tama or writes back its game state. Reading can fail; a scoped override remains available.")
+                        }
                         Section {
                             Toggle("Background Mode", isOn: $live)
                             Toggle("Prevent Auto-Lock", isOn: $keepAwake)
@@ -8569,6 +8753,12 @@ jobs:
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button { if let t = emu.toy { rename(t) }; dismiss() } label: { Text("Done").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) } } }
                     .onAppear { name = emu.toy?.name ?? ""; careAlerts.prepare() }
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Screens/SettingsView.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Screens"
+        cat >> 'ios/TamaiOS/Screens/SettingsView.swift' <<'TAMAIOS_SOURCE_EOF'
                     .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in careAlerts.refresh() }
                     .alert("Test Notification", isPresented: $showNotificationTest) {
                         Button("OK", role: .cancel) { }
@@ -8670,6 +8860,8 @@ jobs:
             @EnvironmentObject var emu: Emulator
             @ObservedObject var console = Console.shared
             @State private var input = ""
+            @State private var copied = false
+            @State private var copyToken = UUID()
             @FocusState private var focused: Bool
 
             var body: some View {
@@ -8715,13 +8907,17 @@ jobs:
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
-                        Button { if let s = UIPasteboard.general.string { input = s; run() } } label: {
-                            Label("Paste & run", systemImage: "doc.on.clipboard")
-                        }
+                        Button(copied ? "Copied" : "Copy output") {
+                            UIPasteboard.general.string = console.output
+                            let token = UUID(); copyToken = token; copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { if copyToken == token { copied = false } }
+                        }.accessibilityLabel("Copy all console output")
                         Menu {
-                            Button { UIPasteboard.general.string = console.output } label: { Label("Copy output", systemImage: "doc.on.doc") }
-                            Button(role: .destructive) { console.output = "" } label: { Label("Clear", systemImage: "trash") }
-                        } label: { Image(systemName: "ellipsis.circle") }
+                            Button {
+                                if let text = UIPasteboard.general.string { input = text; focused = true }
+                            } label: { Label("Paste commands", systemImage: "doc.on.clipboard") }
+                            Button("Clear output", role: .destructive) { console.output = "" }
+                        } label: { Label("More", systemImage: "ellipsis.circle") }
                     }
                 }
             }
@@ -8756,12 +8952,6 @@ jobs:
                             }.disabled(confirmation != "RESET" || resetting)
                         }
                     }
-        TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Screens/SettingsView.swift (2/2)
-      run: |
-        set -euo pipefail
-        mkdir -p "ios/TamaiOS/Screens"
-        cat >> 'ios/TamaiOS/Screens/SettingsView.swift' <<'TAMAIOS_SOURCE_EOF'
                     .navigationTitle("Reset Device").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(resetting) } }
                     .interactiveDismissDisabled(resetting)
@@ -8773,7 +8963,7 @@ jobs:
         }
 
         TAMAIOS_SOURCE_EOF
-    - name: Write ios/TamaiOS/Core/CareAlerts.swift
+    - name: Write ios/TamaiOS/Core/CareAlerts.swift (1/2)
       run: |
         set -euo pipefail
         mkdir -p "ios/TamaiOS/Core"
@@ -8786,7 +8976,7 @@ jobs:
 
         final class CareAlerts: ObservableObject {
             static let shared = CareAlerts()
-            static let revision = "care-alert-events-v1 / bathroom-candidate-v1"
+            static let revision = "care-alert-events-v1 / bathroom-candidate-v1 / hatch-events-v1 / notification-names-v1 / hidden-profile-name-v1"
             typealias Source = CareEventPolicy.Source
             @Published private(set) var status = "Checking notification settings…"
             @Published private(set) var lastError: String?
@@ -8800,11 +8990,15 @@ jobs:
             private var generation = 0
             private var policy = CareEventPolicy()
             private var bathroomPolicy = BathroomEventPolicy()
-            private var bathroomRaw: [String: Int] = [:]
-            private var bathroomRequests: [String: String] = [:]
+            private var hatchPolicy = HatchEventPolicy(lastStages: Prefs.d.dictionary(forKey: "care.hatch.lastStages.v1") as? [String: Int] ?? [:])
+            private var hatchTokens: [String: String] = [:]
+            private var hatchAcceptedAt: [String: Double] = [:]
+            private var hatchMasks: [String: Int] = [:]
             private var inFlight: Set<String> = []
             private var lastPollAttempt: [String: Double] = [:]
             private var lastMask: [String: Int] = [:]
+            private var bathroomRaw: [String: Int] = [:]
+            private var bathroomRequests: [String: String] = [:]
             private var samples: [String: String] = [:]
             private var counters: [String: Int] = [:]
             private var history: [String] = []
@@ -8824,9 +9018,7 @@ jobs:
                 let observedAt: Double
                 let generation: Int
                 let bathroomEpisode: Int
-                var policyKey: String {
-                    CareEventPolicy.deliveryKey(deviceID: deviceID, source: source, bathroomEpisode: bathroomEpisode)
-                }
+                var key: String { source == .bathroom ? deviceID + ".bathroom." + String(bathroomEpisode) : deviceID }
             }
             private func count(_ key: String) { counters[key, default: 0] += 1 }
             private func record(_ text: String) {
@@ -8841,11 +9033,6 @@ jobs:
                 @unknown default: return "unknown"
                 }
             }
-            private func petName(deviceID: String) -> String {
-                guard let toy = AppModel.current?.emu.toy, toy.id == deviceID else { return "Your Tama" }
-                let value = Town.shared.state(toy).petName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                return value.isEmpty ? "Your Tama" : value
-            }
             func refresh() {
                 let center = UNUserNotificationCenter.current()
                 center.getNotificationSettings { settings in
@@ -8857,8 +9044,7 @@ jobs:
                         self.permissionDetail = self.permissionNotRequested ? "Allow notifications to receive care alerts." : (self.canShowAlerts ? "Care banners are enabled in iPhone Settings." : "Check permissions and banners in iPhone Settings.")
                         self.permissionSymbol = self.canShowAlerts ? "checkmark.circle.fill" : "bell.slash"
                         self.permissionSummary = "authorization=\(settings.authorizationStatus.rawValue) alerts=\(settings.alertSetting.rawValue) style=\(settings.alertStyle.rawValue) sound=\(settings.soundSetting.rawValue)"
-                        self.status = self.permissionTitle
-                        self.systemSnapshotAt = Date()
+                        self.status = self.permissionTitle; self.systemSnapshotAt = Date()
                     }
                 }
                 center.getPendingNotificationRequests { requests in
@@ -8885,16 +9071,12 @@ jobs:
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
                     DispatchQueue.main.async {
                         if let error { self.lastError = error.localizedDescription; self.record("PERMISSION error=\(error.localizedDescription)") }
-                        self.refresh()
-                        done?(granted)
+                        self.refresh(); done?(granted)
                     }
                 }
             }
             func cancelAll() {
-                generation += 1
-                policy.foregroundReset()
-                lastPollAttempt.removeAll()
-                inFlight.removeAll()
+                generation += 1; policy.foregroundReset(); lastPollAttempt.removeAll(); inFlight.removeAll()
                 record("CLEAR requests: foreground entry or alerts disabled; state=\(appState())")
                 let center = UNUserNotificationCenter.current()
                 center.getPendingNotificationRequests { requests in
@@ -8904,15 +9086,16 @@ jobs:
                     center.removeDeliveredNotifications(withIdentifiers: notifications.filter { $0.request.identifier.hasPrefix(self.prefix) }.map { $0.request.identifier })
                 }
             }
-            // Later samples returning to zero do not erase captured care-call events.
             func observe(mask: Int, deviceID: String, name: String, source: Source = .poll,
-                         observedAt: Double = ProcessInfo.processInfo.systemUptime, raw: Int = -1, stage: Int = -1) {
+                         observedAt: Double = ProcessInfo.processInfo.systemUptime, raw: Int = -1, stage: Int = -1,
+                         character: Int = -1, signature: String = "") {
                 DispatchQueue.main.async {
-                    let previous = self.lastMask[deviceID]
-                    self.lastMask[deviceID] = mask
-                    self.samples[deviceID] = "observed=\(String(format: "%.3f", observedAt)) source=\(source.rawValue) raw=\(raw) mask=\(mask) stage=\(stage) app=\(self.appState())"
+                    LiveTamaName.shared.observe(deviceID: deviceID, stage: stage, character: character, signature: signature)
+                    self.observeHatch(stage: stage, mask: mask, raw: raw, deviceID: deviceID, observedAt: observedAt)
+                    let previous = self.lastMask[deviceID]; self.lastMask[deviceID] = mask
+                    self.samples[deviceID] = "observed=\(String(format: "%.3f", observedAt)) source=\(source.rawValue) raw=\(raw) mask=\(mask) stage=\(stage) character=\(character) app=\(self.appState())"
                     self.count(source == .sound ? "detector events" : "poll samples")
-                    if previous != mask { self.record("STATE device=\(deviceID) mask=\(previous.map { String($0) } ?? "unknown")->\(mask) raw=\(raw) stage=\(stage)") }
+                    if previous != mask { self.record("STATE mask=\(previous.map { String($0) } ?? "unknown")->\(mask) raw=\(raw) stage=\(stage)") }
                     self.policy.observe(mask: mask, deviceID: deviceID)
                     if source == .poll {
                         guard mask > 0 else { return }
@@ -8920,141 +9103,145 @@ jobs:
                             self.count("poll same episode"); return
                         }
                         if let attempt = self.lastPollAttempt[deviceID], observedAt - attempt < 15 { return }
-                    } else {
-                        self.record("DETECTED device=\(deviceID) raw=\(raw) mask=\(mask) stage=\(stage); care reason unclassified")
+                    } else { self.record("DETECTED raw=\(raw) mask=\(mask) stage=\(stage); care reason unclassified") }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if self.hatchPolicy.shouldMergeCare(deviceID: deviceID, now: now) {
+                        if mask > 0 {
+                            self.hatchMasks[deviceID] = mask
+                            if let accepted = self.hatchAcceptedAt[deviceID] { self.policy.accepted(mask: mask, deviceID: deviceID, at: accepted) }
+                        }
+                        self.count("care merged into hatch"); self.record("MERGE care source=\(source.rawValue) into hatch"); return
                     }
-                    guard self.enabled else {
-                        self.count("skipped: settings disabled")
-                        if source == .sound { self.record("SKIP settings disabled") }
-                        return
-                    }
+                    guard self.enabled else { self.count("skipped: settings disabled"); return }
                     guard UIApplication.shared.applicationState != .active else {
                         self.count("skipped: foreground")
-                        if source == .sound { self.record("SKIP foreground; no banner expected") }
-                        return
+                        if source == .sound { self.record("SKIP foreground; no banner expected") }; return
                     }
                     guard !self.inFlight.contains(deviceID) else { self.count("skipped: request in progress"); return }
-                    let now = ProcessInfo.processInfo.systemUptime
                     if let reason = self.policy.blockReason(mask: mask, deviceID: deviceID, source: source, now: now) {
                         self.count("skipped: " + reason)
-                        if source == .sound { self.record("SKIP " + reason) }
-                        return
+                        if source == .sound { self.record("SKIP " + reason) }; return
                     }
                     self.lastPollAttempt[deviceID] = now
-                    self.inFlight.insert(deviceID)
-                    let event = Event(id: UUID().uuidString, deviceID: deviceID, name: self.petName(deviceID: deviceID),
-                                      source: source, mask: mask, raw: raw, stage: stage, observedAt: observedAt, generation: self.generation, bathroomEpisode: 0)
-                    self.attempt(event, pass: 0)
+                    let event = Event(id: UUID().uuidString, deviceID: deviceID, name: LiveTamaName.shared.name,
+                                      source: source, mask: mask, raw: raw, stage: stage, observedAt: observedAt,
+                                      generation: self.generation, bathroomEpisode: 0)
+                    self.inFlight.insert(event.key); self.attempt(event, pass: 0)
                 }
             }
-            // Independent candidate detector: never modifies the care attention episode or its burst timer.
+            private func observeHatch(stage: Int, mask: Int, raw: Int, deviceID: String, observedAt: Double) {
+                guard deviceID == HatchEventPolicy.supportedDeviceID, (0...255).contains(stage) else { return }
+                let previous = hatchPolicy.lastStages[deviceID]
+                let hatched = hatchPolicy.observe(stage: stage, deviceID: deviceID, now: ProcessInfo.processInfo.systemUptime)
+                if previous != stage {
+                    Prefs.d.set(hatchPolicy.lastStages, forKey: "care.hatch.lastStages.v1")
+                    record("LIFE STAGE \(previous.map { String($0) } ?? "unknown")->\(stage)")
+                    if stage == 0 {
+                        hatchTokens.removeValue(forKey: deviceID); hatchAcceptedAt.removeValue(forKey: deviceID); hatchMasks.removeValue(forKey: deviceID)
+                        record("HATCH ARMED next observed 0->1")
+                    }
+                }
+                guard hatched else { return }
+                count("hatch transitions")
+                let token = UUID().uuidString
+                hatchTokens[deviceID] = token; hatchMasks[deviceID] = max(0, mask)
+                record("HATCH DETECTED 0->1; consumed once; merge immediate care for 2.5s")
+                guard enabled else { count("hatch skipped: settings disabled"); return }
+                guard UIApplication.shared.applicationState != .active else { count("hatch skipped: foreground"); record("HATCH SKIP foreground; no later replay"); return }
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/CareAlerts.swift (2/2)
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat >> 'ios/TamaiOS/Core/CareAlerts.swift' <<'TAMAIOS_SOURCE_EOF'
+                let event = Event(id: token, deviceID: deviceID, name: LiveTamaName.shared.name, source: .hatch,
+                                  mask: mask, raw: raw, stage: stage, observedAt: observedAt, generation: generation, bathroomEpisode: 0)
+                guard !inFlight.contains(event.key) else { count("hatch skipped: care request in progress"); return }
+                inFlight.insert(event.key); attempt(event, pass: 0)
+            }
             func observeBathroom(raw: Int, deviceID: String, observedAt: Double) {
                 DispatchQueue.main.async {
                     guard deviceID == BathroomEventPolicy.supportedDeviceID else { return }
                     self.count("bathroom samples")
-                    let previous = self.bathroomRaw[deviceID]
-                    self.bathroomRaw[deviceID] = raw
-                    self.samples[deviceID + ".bathroom"] = "observed=\(String(format: "%.3f", observedAt)) address=F800D888 raw=\(raw) candidate=true app=\(self.appState())"
-                    if previous != raw {
-                        self.record("BATHROOM RAW device=\(deviceID) \(previous.map { String($0) } ?? "unknown")->\(raw); candidate mapping, not firmware-verified")
-                    }
+                    let previous = self.bathroomRaw[deviceID]; self.bathroomRaw[deviceID] = raw
+                    self.samples[deviceID + ".bathroom"] = "observed=\(String(format: "%.3f", observedAt)) address=F800D888 raw=\(raw) app=\(self.appState())"
+                    if previous != raw { self.record("BATHROOM RAW \(previous.map { String($0) } ?? "unknown")->\(raw); candidate mapping") }
                     guard let transition = self.bathroomPolicy.observe(raw: raw, deviceID: deviceID) else { return }
                     self.record("BATHROOM CONFIRMED \(transition == .appeared ? "present" : "clean") after two matching samples")
                     if transition == .cleared {
-                        if let identifier = self.bathroomRequests.removeValue(forKey: deviceID) {
-                            let center = UNUserNotificationCenter.current()
-                            center.removePendingNotificationRequests(withIdentifiers: [identifier])
-                            center.removeDeliveredNotifications(withIdentifiers: [identifier])
-                            self.record("BATHROOM CLEAR matching bathroom notification only")
-                        }
-                        return
+                        if let identifier = self.bathroomRequests.removeValue(forKey: deviceID) { self.removeRequest(identifier) }; return
                     }
                     self.count("bathroom candidate episodes")
-                    guard self.enabled else {
-                        self.count("bathroom skipped: settings disabled")
-                        self.record("BATHROOM SKIP settings disabled; episode observed, not queued")
-                        return
-                    }
+                    guard self.enabled else { self.count("bathroom skipped: settings disabled"); return }
                     guard UIApplication.shared.applicationState != .active else {
-                        self.count("bathroom skipped: foreground")
-                        self.record("BATHROOM SKIP foreground; same episode will not repeat on leaving app")
-                        return
+                        self.count("bathroom skipped: foreground"); self.record("BATHROOM SKIP foreground; no later replay"); return
                     }
-                    let episode = self.bathroomPolicy.episodes[deviceID] ?? 0
-                    let event = Event(id: UUID().uuidString, deviceID: deviceID, name: self.petName(deviceID: deviceID),
+                    let event = Event(id: UUID().uuidString, deviceID: deviceID, name: LiveTamaName.shared.name,
                                       source: .bathroom, mask: 0, raw: raw, stage: -1, observedAt: observedAt,
-                                      generation: self.generation, bathroomEpisode: episode)
-                    guard !self.inFlight.contains(event.policyKey) else { return }
-                    self.inFlight.insert(event.policyKey)
-                    self.attempt(event, pass: 0)
+                                      generation: self.generation, bathroomEpisode: self.bathroomPolicy.episodes[deviceID] ?? 0)
+                    guard !self.inFlight.contains(event.key) else { return }
+                    self.inFlight.insert(event.key); self.attempt(event, pass: 0)
                 }
             }
-
+            private func isCurrent(_ event: Event) -> Bool {
+                if event.source == .bathroom { return bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.bathroomEpisode) }
+                if event.source == .hatch { return hatchTokens[event.deviceID] == event.id }
+                return true
+            }
+            private func removeRequest(_ identifier: String) {
+                let center = UNUserNotificationCenter.current()
+                center.removePendingNotificationRequests(withIdentifiers: [identifier]); center.removeDeliveredNotifications(withIdentifiers: [identifier])
+            }
             private func skip(_ event: Event, _ reason: String) {
-                if event.generation == generation { inFlight.remove(event.policyKey) }
-                count("skipped: " + reason)
-                record("SKIP event=\(event.id) source=\(event.source.rawValue) reason=\(reason)")
+                if event.generation == generation { inFlight.remove(event.key) }
+                count("skipped: " + reason); record("SKIP event=\(event.id) source=\(event.source.rawValue) reason=\(reason)")
             }
             private func attempt(_ event: Event, pass: Int) {
-                guard event.generation == generation else { skip(event, "superseded by foreground or settings change"); return }
-                guard event.source != .bathroom || bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.bathroomEpisode) else {
-                    skip(event, "bathroom candidate cleared or superseded"); return
+                guard event.generation == generation, enabled, isCurrent(event), AppModel.current?.emu.toy?.id == event.deviceID else {
+                    skip(event, "superseded, disabled, or device changed"); return
                 }
-                guard enabled else { skip(event, "settings disabled"); return }
-                guard AppModel.current?.emu.toy?.id == event.deviceID else { skip(event, "device changed"); return }
                 let state = UIApplication.shared.applicationState
                 if state == .inactive && pass < 6 {
                     if pass == 0 { record("DEFER event=\(event.id) waiting for background transition") }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.attempt(event, pass: pass + 1) }
-                    return
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.attempt(event, pass: pass + 1) }; return
                 }
                 guard state == .background else { skip(event, "not in background"); return }
                 UNUserNotificationCenter.current().getNotificationSettings { settings in
                     DispatchQueue.main.async {
-                        guard event.generation == self.generation, self.enabled,
-                              UIApplication.shared.applicationState == .background,
-                              AppModel.current?.emu.toy?.id == event.deviceID else { self.skip(event, "app or device changed before scheduling"); return }
-                        guard event.source != .bathroom || self.bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.bathroomEpisode) else {
-                            self.skip(event, "bathroom candidate cleared before scheduling"); return
+                        guard event.generation == self.generation, self.enabled, self.isCurrent(event),
+                              UIApplication.shared.applicationState == .background, AppModel.current?.emu.toy?.id == event.deviceID else {
+                            self.skip(event, "state changed before scheduling"); return
                         }
                         let allowed = settings.authorizationStatus == .authorized || settings.authorizationStatus == .ephemeral || settings.authorizationStatus == .provisional
                         guard allowed else { self.skip(event, "notification permission unavailable"); self.refresh(); return }
                         let content = UNMutableNotificationContent()
-                        content.title = event.source == .bathroom ? "\(event.name) is going to the bathroom" : "\(event.name) needs you!"
-                        content.body = event.source == .bathroom ? "Open TamaiOS to help them clean up." : "Open TamaiOS to check on them."
-                        content.sound = .default
-                        content.threadIdentifier = self.prefix + event.deviceID
-                        content.categoryIdentifier = event.source == .bathroom ? "TAMAIOS_BATHROOM" : "TAMAIOS_CARE"
+                        switch event.source {
+                        case .bathroom: content.title = "\(event.name) went to the bathroom"; content.body = "Open TamaiOS to help them clean up."
+                        case .hatch: content.title = "\(event.name) is hatching!"; content.body = "Open TamaiOS to meet your new Tama."
+                        default: content.title = "\(event.name) needs you!"; content.body = "Open TamaiOS to check on them."
+                        }
+                        content.sound = .default; content.threadIdentifier = self.prefix + event.deviceID
+                        content.categoryIdentifier = event.source == .bathroom ? "TAMAIOS_BATHROOM" : (event.source == .hatch ? "TAMAIOS_HATCH" : "TAMAIOS_CARE")
                         content.userInfo = ["deviceID": event.deviceID, "careEventID": event.id, "careSource": event.source.rawValue]
                         let request = UNNotificationRequest(identifier: self.prefix + event.deviceID + "-" + event.id, content: content, trigger: nil)
-                        self.record("REQUEST event=\(event.id) source=\(event.source.rawValue) raw=\(event.raw) mask=\(event.mask) age=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - event.observedAt))s auth=\(settings.authorizationStatus.rawValue) alerts=\(settings.alertSetting.rawValue)")
+                        self.record("REQUEST event=\(event.id) source=\(event.source.rawValue) name=\(event.name) raw=\(event.raw) mask=\(event.mask)")
                         if event.source == .bathroom { self.bathroomRequests[event.deviceID] = request.identifier }
                         UNUserNotificationCenter.current().add(request) { error in
                             DispatchQueue.main.async {
-                                if event.generation == self.generation { self.inFlight.remove(event.policyKey) }
+                                if event.generation == self.generation { self.inFlight.remove(event.key) }
                                 if let error {
-                                    self.lastError = error.localizedDescription
-                                    self.count("request failed")
-                                    self.record("ERROR event=\(event.id) \(error.localizedDescription)")
-                                } else if event.source == .bathroom && !self.bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.bathroomEpisode) {
-                                    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [request.identifier])
-                                    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [request.identifier])
-                                    self.count("cleared: bathroom no longer present")
-                                    self.record("CLEAR event=\(event.id) bathroom candidate cleared or superseded")
-                                } else if event.generation != self.generation || !self.enabled || UIApplication.shared.applicationState != .background {
-                                    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [request.identifier])
-                                    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [request.identifier])
-                                    self.count("cleared: returned to foreground")
-                                    self.record("CLEAR event=\(event.id) app returned or settings changed")
+                                    self.lastError = error.localizedDescription; self.count("request failed"); self.record("ERROR event=\(event.id) \(error.localizedDescription)")
+                                } else if event.generation != self.generation || !self.enabled || !self.isCurrent(event) || UIApplication.shared.applicationState != .background || AppModel.current?.emu.toy?.id != event.deviceID {
+                                    self.removeRequest(request.identifier); self.count("cleared: state changed"); self.record("CLEAR event=\(event.id) state changed")
                                 } else {
                                     self.lastError = nil
-                                    if event.source != .bathroom {
-                                        self.policy.accepted(mask: event.mask, deviceID: event.deviceID, at: ProcessInfo.processInfo.systemUptime)
-                                    } else {
-                                        self.count("bathroom request accepted")
-                                    }
-                                    self.count("request accepted")
-                                    self.record("ACCEPTED event=\(event.id); iOS accepted request, not proof of visible banner")
+                                    if event.source == .hatch {
+                                        let now = ProcessInfo.processInfo.systemUptime; self.hatchAcceptedAt[event.deviceID] = now
+                                        self.policy.accepted(mask: self.hatchMasks[event.deviceID] ?? event.mask, deviceID: event.deviceID, at: now)
+                                        self.count("hatch request accepted")
+                                    } else if event.source == .bathroom { self.count("bathroom request accepted") }
+                                    else { self.policy.accepted(mask: event.mask, deviceID: event.deviceID, at: ProcessInfo.processInfo.systemUptime) }
+                                    self.count("request accepted"); self.record("ACCEPTED event=\(event.id); not proof of visible banner")
                                     AppModel.current?.emu.note("care notification request accepted (\(event.source.rawValue))")
                                 }
                                 self.refresh()
@@ -9068,16 +9255,11 @@ jobs:
                 ask { granted in
                     guard granted else { self.lastError = "Allow notifications in iPhone Settings first."; return }
                     let content = UNMutableNotificationContent()
-                    content.title = "TamaiOS notification test"
-                    content.body = "Test notification. Real care calls use your Tama’s name."
-                    content.sound = .default
-                    let request = UNNotificationRequest(identifier: self.prefix + "test", content: content,
-                        trigger: UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false))
+                    content.title = "TamaiOS notification test"; content.body = "Test notification. Real alerts use the currently resolved Tama name."; content.sound = .default
+                    let request = UNNotificationRequest(identifier: self.prefix + "test", content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false))
                     UNUserNotificationCenter.current().add(request) { error in
                         DispatchQueue.main.async {
-                            self.lastError = error?.localizedDescription
-                            if let error { self.record("TEST failed: \(error.localizedDescription)") }
-                            else { self.record("TEST accepted; leave app within 5 seconds") }
+                            self.lastError = error?.localizedDescription; self.record(error.map { "TEST failed: " + $0.localizedDescription } ?? "TEST accepted; leave app within 5 seconds")
                             self.status = error == nil ? "Test scheduled: leave TamaiOS within 5 seconds" : "Test could not be scheduled"
                         }
                     }
@@ -9085,19 +9267,17 @@ jobs:
             }
             func diagnostics() -> String {
                 refresh()
-                var lines = [Self.revision,
-                             "settings: care=\(Prefs.flag("callAlerts")) background=\(Prefs.flag("liveInBackground")) app=\(appState())",
-                             "burst filter: \(CareEventPolicy.burstWindow)s; later detector calls stay eligible when mask is unchanged",
-                             "bathroom: candidate F800D888=1; two matching 1-second samples; one attempt per episode until confirmed zero; Wonder Garden EN v063 only",
-                             "bathroom is independent of care calls; existing foreground suppression remains enabled",
+                var lines = [Self.revision, "settings: care=\(Prefs.flag("callAlerts")) background=\(Prefs.flag("liveInBackground")) app=\(appState())",
+                             "burst filter: 2.5s; care and bathroom are independent",
+                             "bathroom: F800D888=1; two consecutive 1-second samples; rearm on confirmed zero",
+                             "hatch: observed 0->1 once per egg; persisted stage; 2.5-second immediate-care merge",
                              "permission snapshot: \(permissionSummary)",
                              "system snapshot: \(systemSnapshotAt.map { String(describing: $0) } ?? "not captured") pending=\(pendingCount) delivered=\(deliveredCount)",
-                             "Request acceptance and delivered-list entries do not prove the user saw a banner."]
+                             LiveTamaName.shared.diagnostics(), "Request acceptance does not prove a visible banner."]
                 for key in counters.keys.sorted() { lines.append("\(key): \(counters[key] ?? 0)") }
                 for key in samples.keys.sorted() { lines.append("last sample \(key): \(samples[key] ?? "")") }
                 if let lastError { lines.append("last error: \(lastError)") }
-                lines.append("-- recent care events (monotonic seconds) --")
-                lines += history
+                lines.append("-- recent care events (monotonic seconds) --"); lines += history
                 return lines.joined(separator: "\n")
             }
             func openSettings() {
@@ -9106,72 +9286,6 @@ jobs:
             }
         }
         TAMAIOS_SOURCE_EOF
-        cat > 'ios/TamaiOS/Core/CareEventPolicy.swift' <<'CARE_POLICY_SOURCE_EOF'
-        import Foundation
-
-        struct CareEventPolicy {
-            enum Source: String { case poll, sound, bathroom }
-            static func deliveryKey(deviceID: String, source: Source, bathroomEpisode: Int = 0) -> String {
-                source == .bathroom ? deviceID + ".bathroom." + String(bathroomEpisode) : deviceID
-            }
-            static let burstWindow = 2.5
-            private(set) var notifiedEpisodes: Set<String> = []
-            private(set) var lastScheduled: [String: Double] = [:]
-            mutating func observe(mask: Int, deviceID: String) {
-                if mask == 0 { notifiedEpisodes.remove(deviceID) }
-            }
-            func blockReason(mask: Int, deviceID: String, source: Source, now: Double) -> String? {
-                if source == .poll {
-                    if mask <= 0 { return "no positive attention state" }
-                    if notifiedEpisodes.contains(deviceID) { return "poll same episode" }
-                }
-                if let last = lastScheduled[deviceID], now - last < Self.burstWindow { return "same short burst" }
-                return nil
-            }
-            mutating func accepted(mask: Int, deviceID: String, at: Double) {
-                lastScheduled[deviceID] = at
-                if mask > 0 { notifiedEpisodes.insert(deviceID) }
-            }
-            mutating func foregroundReset() { notifiedEpisodes.removeAll() }
-        }
-
-
-        // Candidate mapping from the user's three pre-cleanup and two post-cleanup samples.
-        // This is intentionally limited to that exact ROM, and accepts only observed 0/1 values.
-        struct BathroomEventPolicy {
-            static let supportedDeviceID = "fw_tg18_en_v063_2020-02-13_wondergarden"
-            enum Transition: Equatable { case appeared, cleared }
-            private(set) var present: [String: Bool] = [:]
-            private(set) var episodes: [String: Int] = [:]
-            private var candidates: [String: Bool] = [:]
-            private var confirmations: [String: Int] = [:]
-            mutating func observe(raw: Int, deviceID: String) -> Transition? {
-                guard deviceID == Self.supportedDeviceID else { return nil }
-                guard raw == 0 || raw == 1 else {
-                    candidates.removeValue(forKey: deviceID)
-                    confirmations.removeValue(forKey: deviceID)
-                    return nil
-                }
-                let candidate = raw == 1
-                if candidates[deviceID] == candidate {
-                    confirmations[deviceID] = min(2, (confirmations[deviceID] ?? 0) + 1)
-                } else {
-                    candidates[deviceID] = candidate
-                    confirmations[deviceID] = 1
-                }
-                guard confirmations[deviceID] == 2, present[deviceID] != candidate else { return nil }
-                present[deviceID] = candidate
-                if candidate {
-                    episodes[deviceID, default: 0] += 1
-                    return .appeared
-                }
-                return .cleared
-            }
-            func isCurrent(deviceID: String, episode: Int) -> Bool {
-                present[deviceID] == true && episodes[deviceID] == episode
-            }
-        }
-        CARE_POLICY_SOURCE_EOF
     - name: Write ios/TamaiOS/Core/DaytimeClock.swift
       run: |
         set -euo pipefail
@@ -9201,124 +9315,120 @@ jobs:
         TAMAIOS_SOURCE_EOF
     - name: Write patches/radio.patch
       run: "set -euo pipefail\nmkdir -p \"patches\"\ncat > 'patches/radio.patch' <<'TAMAIOS_SOURCE_EOF'\ndiff --git a/core/src/lib.rs\
-        \ b/core/src/lib.rs\nindex 784ed8b..d0a2909 100644\n--- a/core/src/lib.rs\n+++ b/core/src/lib.rs\n@@ -7,6 +7,7\
-        \ @@\n pub mod cpu;\n pub mod machine;\n pub mod png;\n+pub mod radio;\n pub mod roms;\n pub mod save;\n pub\
-        \ mod sigs;\ndiff --git a/core/src/machine.rs b/core/src/machine.rs\nindex 0bf46d4..f476e05 100644\n--- a/core/src/machine.rs\n\
-        +++ b/core/src/machine.rs\n@@ -225,6 +225,10 @@ impl Machine {\n                 true\n             }\n     \
-        \        Hook::Spi2Transfer => {\n+                if self.sys.radio.is_some() {\n+                    self.bluetooth_used\
-        \ = true;\n+                    return false; // the real driver talks to the emulated module\n+            \
-        \    }\n                 if !self.bluetooth_used {\n                     // nothing in normal play touches this\
-        \ bus: the game is\n                     // starting Bluetooth; stop so the window can undo the press\n@@ -491,7\
-        \ +495,7 @@ impl Machine {\n         if self.ble_failed {\n             return Some(Outcome::BleFail);\n    \
-        \     }\n-        if self.bluetooth_used && self.stop_on_bluetooth {\n+        if self.bluetooth_used && self.stop_on_bluetooth\
-        \ && self.sys.radio.is_none() {\n             return Some(Outcome::Bluetooth);\n         }\n         if self.sys.infrared_used\
-        \ && !self.sys.uart_is_ram {\n@@ -696,6 +700,7 @@ impl Machine {\n         q.lcd.frames = s.lcd.frames;\n   \
-        \      q.lcd.last_vsync = (q.now * sys::VSYNC_HZ) as u64;\n         q.trace_mmio = s.trace_mmio;\n+        q.radio\
-        \ = s.radio.take();\n         *self = fresh;\n     }\n \ndiff --git a/core/src/radio.rs b/core/src/radio.rs\n\
-        new file mode 100644\nindex 0000000..f249635\n--- /dev/null\n+++ b/core/src/radio.rs\n@@ -0,0 +1,260 @@\n+//!\
-        \ The Meets/On Bluetooth module (a CC2650 behind SPI 0xC0080000, chip\n+//! select GPIO 0xC0000064 bit 12, active\
-        \ low), answered like the real one.\n+//!\n+//! Byte protocol, per chip-select cycle: `reg|1` reads a 16-bit\
-        \ register\n+//! (0x0A status: 0x8040 boot ROM, 0x8000 patched, 0x8400 running, +4 when a\n+//! phone is connected;\
-        \ 0x08 bytes waiting << 6); `0x60|n` fetches n queued\n+//! bytes; `0xA0|n` sends n bytes of a message, which\
-        \ may span cycles.\n+//! Messages from the firmware: 22 data for the phone, 25 setup, 56 module\n+//! memory\
-        \ read, 55 memory write, 01 HCI command. Data from the phone is\n+//! queued as `22 len data`. Behaviour as documented\
-        \ by Paramix Studio's\n+//! T18Emu notes; this is an independent implementation.\n+\n+use std::collections::VecDeque;\n\
-        +\n+#[derive(Clone, Default)]\n+pub struct Radio {\n+    pub selected: bool,\n+    tr: Vec<u8>,\n+    answer:\
-        \ [u8; 2],\n+    answering: u8,\n+    fetch: u8,\n+    msg: Vec<u8>,\n+    queue: VecDeque<u8>,\n+    ends: VecDeque<usize>,\n\
-        +    popped: usize,\n+    pushed: usize,\n+    ac_count: u8,\n+    stage: u8,\n+    pub setup_done: bool,\n+\
-        \    last_setup: u8,\n+    pub connected: bool,\n+    mem: [u8; 16],\n+    /// Data the firmware sent to the\
-        \ phone (fff1 notifications), oldest first.\n+    pub to_phone: VecDeque<Vec<u8>>,\n+    /// Every message, for\
-        \ research (capped).\n+    pub trace: Vec<String>,\n+    pub tracing: bool,\n+}\n+\n+impl Radio {\n+    pub fn\
-        \ new() -> Radio {\n+        let mut r = Radio::default();\n+        r.mem[0] = 0xFF;\n+        r.mem[1] = 0xFF;\n\
-        +        r.mem[8] = 0xFF;\n+        r.mem[9] = 0xFF;\n+        r\n+    }\n+\n+    fn note(&mut self, dir: &str,\
-        \ d: &[u8]) {\n+        if self.tracing && self.trace.len() < 20000 {\n+            let hex: Vec<String> = d.iter().map(|b|\
-        \ format!(\"{:02x}\", b)).collect();\n+            self.trace.push(format!(\"{} {}\", dir, hex.join(\" \")));\n\
-        +        }\n+    }\n+\n+    fn push(&mut self, d: &[u8]) {\n+        if d.is_empty() || self.queue.len() + d.len()\
-        \ > 4096 {\n+            return;\n+        }\n+        self.queue.extend(d.iter().copied());\n+        self.pushed\
-        \ += d.len();\n+        self.ends.push_back(self.pushed);\n+    }\n+\n+    /// Bytes up to the end of the next\
-        \ queued message.\n+    fn to_end(&mut self) -> usize {\n+        while let Some(&e) = self.ends.front() {\n\
-        +            if e <= self.popped {\n+                self.ends.pop_front();\n+            } else {\n+       \
-        \         return e - self.popped;\n+            }\n+        }\n+        self.queue.len()\n+    }\n+\n+    fn\
-        \ pop(&mut self) -> u8 {\n+        match self.queue.pop_front() {\n+            Some(b) => {\n+             \
-        \   self.popped += 1;\n+                b\n+            }\n+            None => 0,\n+        }\n+    }\n+\n+\
-        \    pub fn select(&mut self, sel: bool) {\n+        if sel == self.selected {\n+            return;\n+     \
-        \   }\n+        self.selected = sel;\n+        if !sel {\n+            if self.tr.len() > 1 && self.tr[0] & 0xE0\
-        \ == 0xA0 {\n+                if self.msg.len() > 4096 {\n+                    self.msg.clear();\n+         \
-        \       }\n+                let body = self.tr[1..].to_vec();\n+                self.msg.extend_from_slice(&body);\n\
-        +                let need = match (self.msg.first(), self.msg.get(1)) {\n+                    (Some(0x55), Some(&n))\
-        \ => 8 + n as usize * 4,\n+                    (Some(0x22), Some(&n)) => 2 + n as usize,\n+                 \
-        \   _ => self.msg.len(),\n+                };\n+                if self.msg.len() >= need {\n+              \
-        \      let m = std::mem::take(&mut self.msg);\n+                    self.message(&m[..need.max(1).min(m.len())]);\n\
-        +                }\n+            }\n+            self.tr.clear();\n+            self.answering = 0;\n+      \
-        \      self.fetch = 0;\n+        }\n+    }\n+\n+    /// One byte over SPI; returns the byte clocked back.\n+\
-        \    pub fn xfer(&mut self, b: u8) -> u8 {\n+        self.tr.push(b);\n+        if self.fetch > 0 {\n+      \
-        \      self.fetch -= 1;\n+            return self.pop();\n+        }\n+        if self.tr.len() == 1 {\n+   \
-        \         if b == 0xAC {\n+                self.ac_count = self.ac_count.saturating_add(1);\n+            }\n\
-        +            if b & 0xE0 == 0x60 {\n+                self.fetch = b & 0x1F;\n+                return 0;\n+  \
-        \          }\n+            if b & 1 != 0 {\n+                let r = b - 1;\n+                let mut w: u16\
-        \ = 0;\n+                if r == 0x0A {\n+                    w = if self.ac_count >= 4 || self.stage == 2 {\
-        \ 0x8400 } else if self.stage == 1 { 0x8000 } else { 0x8040 };\n+                    if self.connected && self.setup_done\
-        \ {\n+                        w |= 0x0004;\n+                    }\n+                } else if r == 0x08 && !self.queue.is_empty()\
-        \ {\n+                    let k = self.to_end().min(31) as u16;\n+                    w = k << 6;\n+        \
-        \        }\n+                self.answer = [(w >> 8) as u8, w as u8];\n+                self.answering = 1;\n\
-        +            }\n+            return 0;\n+        }\n+        match self.answering {\n+            1 => {\n+ \
-        \               self.answering = 2;\n+                self.answer[0]\n+            }\n+            2 => {\n+\
-        \                self.answering = 0;\n+                self.answer[1]\n+            }\n+            _ => 0,\n\
-        +        }\n+    }\n+\n+    fn mem_at(&mut self, a: u32, n: usize) -> Option<&mut [u8]> {\n+        if a >= 0xA500_00F8\
-        \ && a as u64 + n as u64 <= 0xA500_0100 {\n+            let o = (a - 0xA500_00F8) as usize;\n+            return\
-        \ Some(&mut self.mem[o..o + n]);\n+        }\n+        if a >= 0xA500_24B8 && a as u64 + n as u64 <= 0xA500_24C0\
-        \ {\n+            let o = 8 + (a - 0xA500_24B8) as usize;\n+            return Some(&mut self.mem[o..o + n]);\n\
-        +        }\n+        None\n+    }\n+\n+    fn message(&mut self, p: &[u8]) {\n+        if p.len() < 2 {\n+  \
-        \          return;\n+        }\n+        match p[0] {\n+            0x22 => {\n+                let len = (p[1]\
-        \ as usize).min(p.len() - 2);\n+                let data = p[2..2 + len].to_vec();\n+                self.note(\"\
-        TOY>APP\", &data);\n+                self.to_phone.push_back(data);\n+                if self.to_phone.len()\
-        \ > 256 {\n+                    self.to_phone.pop_front();\n+                }\n+                self.push(&[0x26,\
-        \ 0x22, 0x00]);\n+            }\n+            0x25 => {\n+                self.note(\"setup\", p);\n+       \
-        \         let pay = (p.len() - 2).min(32);\n+                let mut a = vec![0x21, p[1], pay as u8];\n+    \
-        \            a.extend_from_slice(&p[2..2 + pay]);\n+                self.push(&a);\n+                if (p[1]\
-        \ == 0x38 && self.last_setup != 0x31) || p[1] == 0x5F {\n+                    self.setup_done = false;\n+   \
-        \                 self.ac_count = 0;\n+                    self.stage = 0;\n+                }\n+           \
-        \     if p[1] == 0x40 {\n+                    self.setup_done = true;\n+                }\n+                self.last_setup\
-        \ = p[1];\n+                if p[1] == 0x3E {\n+                    self.push(&[0x26, 0xFF, 0x11]);\n+      \
-        \          }\n+            }\n+            0x56 if p.len() >= 6 => {\n+                let a = u32::from_le_bytes([p[2],\
+        \ b/core/src/lib.rs\nindex 784ed8b..d0a2909 100644\n--- a/core/src/lib.rs\n+++ b/core/src/lib.rs\n@@ -7,6 +7,7 @@\n\
+        \ pub mod cpu;\n pub mod machine;\n pub mod png;\n+pub mod radio;\n pub mod roms;\n pub mod save;\n pub mod sigs;\n\
+        diff --git a/core/src/machine.rs b/core/src/machine.rs\nindex 0bf46d4..f476e05 100644\n--- a/core/src/machine.rs\n\
+        +++ b/core/src/machine.rs\n@@ -225,6 +225,10 @@ impl Machine {\n                 true\n             }\n          \
+        \   Hook::Spi2Transfer => {\n+                if self.sys.radio.is_some() {\n+                    self.bluetooth_used\
+        \ = true;\n+                    return false; // the real driver talks to the emulated module\n+                }\n\
+        \                 if !self.bluetooth_used {\n                     // nothing in normal play touches this bus: the\
+        \ game is\n                     // starting Bluetooth; stop so the window can undo the press\n@@ -491,7 +495,7 @@\
+        \ impl Machine {\n         if self.ble_failed {\n             return Some(Outcome::BleFail);\n         }\n-      \
+        \  if self.bluetooth_used && self.stop_on_bluetooth {\n+        if self.bluetooth_used && self.stop_on_bluetooth &&\
+        \ self.sys.radio.is_none() {\n             return Some(Outcome::Bluetooth);\n         }\n         if self.sys.infrared_used\
+        \ && !self.sys.uart_is_ram {\n@@ -696,6 +700,7 @@ impl Machine {\n         q.lcd.frames = s.lcd.frames;\n        \
+        \ q.lcd.last_vsync = (q.now * sys::VSYNC_HZ) as u64;\n         q.trace_mmio = s.trace_mmio;\n+        q.radio = s.radio.take();\n\
+        \         *self = fresh;\n     }\n \ndiff --git a/core/src/radio.rs b/core/src/radio.rs\nnew file mode 100644\nindex\
+        \ 0000000..f249635\n--- /dev/null\n+++ b/core/src/radio.rs\n@@ -0,0 +1,260 @@\n+//! The Meets/On Bluetooth module\
+        \ (a CC2650 behind SPI 0xC0080000, chip\n+//! select GPIO 0xC0000064 bit 12, active low), answered like the real one.\n\
+        +//!\n+//! Byte protocol, per chip-select cycle: `reg|1` reads a 16-bit register\n+//! (0x0A status: 0x8040 boot ROM,\
+        \ 0x8000 patched, 0x8400 running, +4 when a\n+//! phone is connected; 0x08 bytes waiting << 6); `0x60|n` fetches n\
+        \ queued\n+//! bytes; `0xA0|n` sends n bytes of a message, which may span cycles.\n+//! Messages from the firmware:\
+        \ 22 data for the phone, 25 setup, 56 module\n+//! memory read, 55 memory write, 01 HCI command. Data from the phone\
+        \ is\n+//! queued as `22 len data`. Behaviour as documented by Paramix Studio's\n+//! T18Emu notes; this is an independent\
+        \ implementation.\n+\n+use std::collections::VecDeque;\n+\n+#[derive(Clone, Default)]\n+pub struct Radio {\n+    pub\
+        \ selected: bool,\n+    tr: Vec<u8>,\n+    answer: [u8; 2],\n+    answering: u8,\n+    fetch: u8,\n+    msg: Vec<u8>,\n\
+        +    queue: VecDeque<u8>,\n+    ends: VecDeque<usize>,\n+    popped: usize,\n+    pushed: usize,\n+    ac_count: u8,\n\
+        +    stage: u8,\n+    pub setup_done: bool,\n+    last_setup: u8,\n+    pub connected: bool,\n+    mem: [u8; 16],\n\
+        +    /// Data the firmware sent to the phone (fff1 notifications), oldest first.\n+    pub to_phone: VecDeque<Vec<u8>>,\n\
+        +    /// Every message, for research (capped).\n+    pub trace: Vec<String>,\n+    pub tracing: bool,\n+}\n+\n+impl\
+        \ Radio {\n+    pub fn new() -> Radio {\n+        let mut r = Radio::default();\n+        r.mem[0] = 0xFF;\n+    \
+        \    r.mem[1] = 0xFF;\n+        r.mem[8] = 0xFF;\n+        r.mem[9] = 0xFF;\n+        r\n+    }\n+\n+    fn note(&mut\
+        \ self, dir: &str, d: &[u8]) {\n+        if self.tracing && self.trace.len() < 20000 {\n+            let hex: Vec<String>\
+        \ = d.iter().map(|b| format!(\"{:02x}\", b)).collect();\n+            self.trace.push(format!(\"{} {}\", dir, hex.join(\"\
+        \ \")));\n+        }\n+    }\n+\n+    fn push(&mut self, d: &[u8]) {\n+        if d.is_empty() || self.queue.len()\
+        \ + d.len() > 4096 {\n+            return;\n+        }\n+        self.queue.extend(d.iter().copied());\n+        self.pushed\
+        \ += d.len();\n+        self.ends.push_back(self.pushed);\n+    }\n+\n+    /// Bytes up to the end of the next queued\
+        \ message.\n+    fn to_end(&mut self) -> usize {\n+        while let Some(&e) = self.ends.front() {\n+           \
+        \ if e <= self.popped {\n+                self.ends.pop_front();\n+            } else {\n+                return e\
+        \ - self.popped;\n+            }\n+        }\n+        self.queue.len()\n+    }\n+\n+    fn pop(&mut self) -> u8 {\n\
+        +        match self.queue.pop_front() {\n+            Some(b) => {\n+                self.popped += 1;\n+        \
+        \        b\n+            }\n+            None => 0,\n+        }\n+    }\n+\n+    pub fn select(&mut self, sel: bool)\
+        \ {\n+        if sel == self.selected {\n+            return;\n+        }\n+        self.selected = sel;\n+      \
+        \  if !sel {\n+            if self.tr.len() > 1 && self.tr[0] & 0xE0 == 0xA0 {\n+                if self.msg.len()\
+        \ > 4096 {\n+                    self.msg.clear();\n+                }\n+                let body = self.tr[1..].to_vec();\n\
+        +                self.msg.extend_from_slice(&body);\n+                let need = match (self.msg.first(), self.msg.get(1))\
+        \ {\n+                    (Some(0x55), Some(&n)) => 8 + n as usize * 4,\n+                    (Some(0x22), Some(&n))\
+        \ => 2 + n as usize,\n+                    _ => self.msg.len(),\n+                };\n+                if self.msg.len()\
+        \ >= need {\n+                    let m = std::mem::take(&mut self.msg);\n+                    self.message(&m[..need.max(1).min(m.len())]);\n\
+        +                }\n+            }\n+            self.tr.clear();\n+            self.answering = 0;\n+           \
+        \ self.fetch = 0;\n+        }\n+    }\n+\n+    /// One byte over SPI; returns the byte clocked back.\n+    pub fn\
+        \ xfer(&mut self, b: u8) -> u8 {\n+        self.tr.push(b);\n+        if self.fetch > 0 {\n+            self.fetch\
+        \ -= 1;\n+            return self.pop();\n+        }\n+        if self.tr.len() == 1 {\n+            if b == 0xAC\
+        \ {\n+                self.ac_count = self.ac_count.saturating_add(1);\n+            }\n+            if b & 0xE0 ==\
+        \ 0x60 {\n+                self.fetch = b & 0x1F;\n+                return 0;\n+            }\n+            if b &\
+        \ 1 != 0 {\n+                let r = b - 1;\n+                let mut w: u16 = 0;\n+                if r == 0x0A {\n\
+        +                    w = if self.ac_count >= 4 || self.stage == 2 { 0x8400 } else if self.stage == 1 { 0x8000 } else\
+        \ { 0x8040 };\n+                    if self.connected && self.setup_done {\n+                        w |= 0x0004;\n\
+        +                    }\n+                } else if r == 0x08 && !self.queue.is_empty() {\n+                    let\
+        \ k = self.to_end().min(31) as u16;\n+                    w = k << 6;\n+                }\n+                self.answer\
+        \ = [(w >> 8) as u8, w as u8];\n+                self.answering = 1;\n+            }\n+            return 0;\n+  \
+        \      }\n+        match self.answering {\n+            1 => {\n+                self.answering = 2;\n+          \
+        \      self.answer[0]\n+            }\n+            2 => {\n+                self.answering = 0;\n+              \
+        \  self.answer[1]\n+            }\n+            _ => 0,\n+        }\n+    }\n+\n+    fn mem_at(&mut self, a: u32,\
+        \ n: usize) -> Option<&mut [u8]> {\n+        if a >= 0xA500_00F8 && a as u64 + n as u64 <= 0xA500_0100 {\n+      \
+        \      let o = (a - 0xA500_00F8) as usize;\n+            return Some(&mut self.mem[o..o + n]);\n+        }\n+    \
+        \    if a >= 0xA500_24B8 && a as u64 + n as u64 <= 0xA500_24C0 {\n+            let o = 8 + (a - 0xA500_24B8) as usize;\n\
+        +            return Some(&mut self.mem[o..o + n]);\n+        }\n+        None\n+    }\n+\n+    fn message(&mut self,\
+        \ p: &[u8]) {\n+        if p.len() < 2 {\n+            return;\n+        }\n+        match p[0] {\n+            0x22\
+        \ => {\n+                let len = (p[1] as usize).min(p.len() - 2);\n+                let data = p[2..2 + len].to_vec();\n\
+        +                self.note(\"TOY>APP\", &data);\n+                self.to_phone.push_back(data);\n+              \
+        \  if self.to_phone.len() > 256 {\n+                    self.to_phone.pop_front();\n+                }\n+        \
+        \        self.push(&[0x26, 0x22, 0x00]);\n+            }\n+            0x25 => {\n+                self.note(\"setup\"\
+        , p);\n+                let pay = (p.len() - 2).min(32);\n+                let mut a = vec![0x21, p[1], pay as u8];\n\
+        +                a.extend_from_slice(&p[2..2 + pay]);\n+                self.push(&a);\n+                if (p[1]\
+        \ == 0x38 && self.last_setup != 0x31) || p[1] == 0x5F {\n+                    self.setup_done = false;\n+        \
+        \            self.ac_count = 0;\n+                    self.stage = 0;\n+                }\n+                if p[1]\
+        \ == 0x40 {\n+                    self.setup_done = true;\n+                }\n+                self.last_setup =\
+        \ p[1];\n+                if p[1] == 0x3E {\n+                    self.push(&[0x26, 0xFF, 0x11]);\n+             \
+        \   }\n+            }\n+            0x56 if p.len() >= 6 => {\n+                let a = u32::from_le_bytes([p[2],\
         \ p[3], p[4], p[5]]);\n+                let cnt = (p[1] as usize).min(52);\n+                let mut o = vec![0x57,\
-        \ ((cnt + 3) / 4) as u8, 0, 0, p[2], p[3], p[4], p[5]];\n+                match self.mem_at(a, cnt) {\n+    \
-        \                Some(m) => {\n+                        let v = m.to_vec();\n+                        o.extend_from_slice(&v);\n\
-        +                    }\n+                    None => o.extend(std::iter::repeat(0).take(cnt)),\n+           \
-        \     }\n+                self.push(&o);\n+            }\n+            0x55 if p.len() >= 8 => {\n+         \
-        \       let a = u32::from_le_bytes([p[4], p[5], p[6], p[7]]);\n+                let data = p[8..].to_vec();\n\
-        +                if let Some(m) = self.mem_at(a, data.len()) {\n+                    m.copy_from_slice(&data);\n\
-        +                }\n+                if a == 0x0020_1F80 && p.len() >= 12 {\n+                    if u32::from_le_bytes([p[8],\
-        \ p[9], p[10], p[11]]) != 0 {\n+                        self.stage = 1;\n+                    } else if self.stage\
-        \ == 1 {\n+                        self.stage = 2;\n+                    }\n+                }\n+           \
-        \ }\n+            0x01 if p.len() >= 3 => {\n+                self.note(\"hci\", p);\n+                if p[1]\
-        \ == 0x1F && p[2] == 0x20 {\n+                    self.push(&[0x04, 0x0E, 6, 0x01, p[1], p[2], 0x00, 0, 0]);\n\
-        +                } else {\n+                    self.push(&[0x04, 0x0E, 4, 0x01, p[1], p[2], 0x00]);\n+     \
-        \           }\n+            }\n+            _ => self.note(\"other\", p),\n+        }\n+    }\n+\n+    /// A\
-        \ write from the phone (characteristic fff2). False if there is no room yet.\n+    pub fn from_phone(&mut self,\
-        \ d: &[u8]) -> bool {\n+        if d.is_empty() {\n+            return true;\n+        }\n+        if self.queue.len()\
-        \ + d.len() + 2 > 2048 {\n+            return false;\n+        }\n+        self.note(\"APP>TOY\", d);\n+    \
-        \    let mut m = vec![0x22, d.len() as u8];\n+        m.extend_from_slice(d);\n+        self.push(&m);\n+   \
-        \     true\n+    }\n+}\ndiff --git a/core/src/sys.rs b/core/src/sys.rs\nindex 6f76746..a4970c0 100644\n--- a/core/src/sys.rs\n\
-        +++ b/core/src/sys.rs\n@@ -340,6 +340,8 @@ pub struct System {\n     /// A quick tap stays held until this time.\n\
-        \     pub hold_until: [f64; 3],\n     pub gpio_applied: [u32; 8],\n+    /// The Bluetooth module, when emulated\
-        \ (None: absent, as before).\n+    pub radio: Option<crate::radio::Radio>,\n \n     pub mmio_writes: u64,\n \
-        \    /// Set by memory writes that change a value (idle detection).\n@@ -390,6 +392,7 @@ impl System {\n    \
-        \         live_keys: [false; 3],\n             hold_until: [0.0; 3],\n             gpio_applied: [0; 8],\n+ \
-        \           radio: None,\n             mmio_writes: 0,\n             changed: false,\n             tracking:\
-        \ false,\n@@ -945,7 +948,15 @@ impl System {\n             0xC015_0000 => self.flash_select(new & 0x40 != 0),\n\
-        \             0xC015_0008 => self.flash_xfer(new as u8),\n             0xC008_0008 => {\n-                self.regs.insert(SPI2_BASE\
-        \ + 0x10, SPI2_IDLE);\n+                let rx = match self.radio.as_mut() {\n+                    Some(r) =>\
-        \ {\n+                        let sel = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66],\
-        \ self.gpio[0x67]]) & 0x1000 == 0;\n+                        r.select(sel);\n+                        if sel\
-        \ { r.xfer(new as u8) as u32 } else { 0 }\n+                    }\n+                    None => SPI2_IDLE,\n\
-        +                };\n+                self.regs.insert(SPI2_BASE + 0x10, rx);\n                 let c = self.reg(SPI2_BASE\
-        \ + 0x0C) | 1;\n                 self.regs.insert(SPI2_BASE + 0x0C, c);\n             }\n@@ -1117,6 +1128,10\
-        \ @@ impl System {\n                 for i in 0..size as usize {\n                     m[o + i] = (val >> (8\
-        \ * i)) as u8;\n                 }\n+                if addr & !3 == GPIO_BASE + 0x64 && self.radio.is_some()\
-        \ {\n+                    let sel = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66], self.gpio[0x67]])\
-        \ & 0x1000 == 0;\n+                    self.radio.as_mut().unwrap().select(sel);\n+                }\n      \
-        \       }\n             Some(_) => {}\n             None => self.mmio_write(addr, size, val),\nTAMAIOS_SOURCE_EOF\n"
+        \ ((cnt + 3) / 4) as u8, 0, 0, p[2], p[3], p[4], p[5]];\n+                match self.mem_at(a, cnt) {\n+         \
+        \           Some(m) => {\n+                        let v = m.to_vec();\n+                        o.extend_from_slice(&v);\n\
+        +                    }\n+                    None => o.extend(std::iter::repeat(0).take(cnt)),\n+                }\n\
+        +                self.push(&o);\n+            }\n+            0x55 if p.len() >= 8 => {\n+                let a =\
+        \ u32::from_le_bytes([p[4], p[5], p[6], p[7]]);\n+                let data = p[8..].to_vec();\n+                if\
+        \ let Some(m) = self.mem_at(a, data.len()) {\n+                    m.copy_from_slice(&data);\n+                }\n\
+        +                if a == 0x0020_1F80 && p.len() >= 12 {\n+                    if u32::from_le_bytes([p[8], p[9], p[10],\
+        \ p[11]]) != 0 {\n+                        self.stage = 1;\n+                    } else if self.stage == 1 {\n+  \
+        \                      self.stage = 2;\n+                    }\n+                }\n+            }\n+            0x01\
+        \ if p.len() >= 3 => {\n+                self.note(\"hci\", p);\n+                if p[1] == 0x1F && p[2] == 0x20\
+        \ {\n+                    self.push(&[0x04, 0x0E, 6, 0x01, p[1], p[2], 0x00, 0, 0]);\n+                } else {\n\
+        +                    self.push(&[0x04, 0x0E, 4, 0x01, p[1], p[2], 0x00]);\n+                }\n+            }\n+ \
+        \           _ => self.note(\"other\", p),\n+        }\n+    }\n+\n+    /// A write from the phone (characteristic\
+        \ fff2). False if there is no room yet.\n+    pub fn from_phone(&mut self, d: &[u8]) -> bool {\n+        if d.is_empty()\
+        \ {\n+            return true;\n+        }\n+        if self.queue.len() + d.len() + 2 > 2048 {\n+            return\
+        \ false;\n+        }\n+        self.note(\"APP>TOY\", d);\n+        let mut m = vec![0x22, d.len() as u8];\n+    \
+        \    m.extend_from_slice(d);\n+        self.push(&m);\n+        true\n+    }\n+}\ndiff --git a/core/src/sys.rs b/core/src/sys.rs\n\
+        index 6f76746..a4970c0 100644\n--- a/core/src/sys.rs\n+++ b/core/src/sys.rs\n@@ -340,6 +340,8 @@ pub struct System\
+        \ {\n     /// A quick tap stays held until this time.\n     pub hold_until: [f64; 3],\n     pub gpio_applied: [u32;\
+        \ 8],\n+    /// The Bluetooth module, when emulated (None: absent, as before).\n+    pub radio: Option<crate::radio::Radio>,\n\
+        \ \n     pub mmio_writes: u64,\n     /// Set by memory writes that change a value (idle detection).\n@@ -390,6 +392,7\
+        \ @@ impl System {\n             live_keys: [false; 3],\n             hold_until: [0.0; 3],\n             gpio_applied:\
+        \ [0; 8],\n+            radio: None,\n             mmio_writes: 0,\n             changed: false,\n             tracking:\
+        \ false,\n@@ -945,7 +948,15 @@ impl System {\n             0xC015_0000 => self.flash_select(new & 0x40 != 0),\n  \
+        \           0xC015_0008 => self.flash_xfer(new as u8),\n             0xC008_0008 => {\n-                self.regs.insert(SPI2_BASE\
+        \ + 0x10, SPI2_IDLE);\n+                let rx = match self.radio.as_mut() {\n+                    Some(r) => {\n\
+        +                        let sel = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66], self.gpio[0x67]])\
+        \ & 0x1000 == 0;\n+                        r.select(sel);\n+                        if sel { r.xfer(new as u8) as\
+        \ u32 } else { 0 }\n+                    }\n+                    None => SPI2_IDLE,\n+                };\n+      \
+        \          self.regs.insert(SPI2_BASE + 0x10, rx);\n                 let c = self.reg(SPI2_BASE + 0x0C) | 1;\n   \
+        \              self.regs.insert(SPI2_BASE + 0x0C, c);\n             }\n@@ -1117,6 +1128,10 @@ impl System {\n    \
+        \             for i in 0..size as usize {\n                     m[o + i] = (val >> (8 * i)) as u8;\n             \
+        \    }\n+                if addr & !3 == GPIO_BASE + 0x64 && self.radio.is_some() {\n+                    let sel\
+        \ = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66], self.gpio[0x67]]) & 0x1000 == 0;\n+   \
+        \                 self.radio.as_mut().unwrap().select(sel);\n+                }\n             }\n             Some(_)\
+        \ => {}\n             None => self.mmio_write(addr, size, val),\nTAMAIOS_SOURCE_EOF\n"
     - name: Bundle Fairy, Magic, and Wonder Garden
       run: |
         set -euo pipefail
@@ -9361,73 +9471,438 @@ jobs:
         python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
         python3 tools/icon.py ios/TamaiOS/Assets.xcassets/AppIcon.appiconset/icon.png
         python3 tools/town.py ios/TamaiOS/TownBackground.png 1680
-    - name: Test care notification policy
+    - name: Write ios/TamaiOS/Core/CareEventPolicy.swift
       run: |
         set -euo pipefail
-        cat > "$RUNNER_TEMP/CarePolicyTests.swift" <<'CARE_TESTS_EOF'
+        mkdir -p "ios/TamaiOS/Core"
+        cat > 'ios/TamaiOS/Core/CareEventPolicy.swift' <<'TAMAIOS_SOURCE_EOF'
         import Foundation
-        @main
-        struct CarePolicyTests {
-            static func main() {
-                let id = "test-device"
-                var policy = CareEventPolicy()
-                for time in [117.0, 237.0, 357.0, 417.0, 597.0] {
-                    policy.observe(mask: 3, deviceID: id)
-                    precondition(policy.blockReason(mask: 3, deviceID: id, source: .sound, now: time) == nil)
-                    policy.accepted(mask: 3, deviceID: id, at: time)
+
+        struct CareEventPolicy {
+            enum Source: String { case poll, sound, bathroom, hatch }
+            static let burstWindow = 2.5
+            private(set) var notifiedEpisodes: Set<String> = []
+            private var lastScheduled: [String: Double] = [:]
+            mutating func observe(mask: Int, deviceID: String) { if mask == 0 { notifiedEpisodes.remove(deviceID) } }
+            func blockReason(mask: Int, deviceID: String, source: Source, now: Double) -> String? {
+                if source == .poll {
+                    if mask <= 0 { return "no positive attention state" }
+                    if notifiedEpisodes.contains(deviceID) { return "poll same episode" }
                 }
-                precondition(policy.blockReason(mask: 3, deviceID: id, source: .sound, now: 597.1) == "same short burst")
-                precondition(policy.blockReason(mask: 3, deviceID: id, source: .poll, now: 610) == "poll same episode")
-                policy.observe(mask: 0, deviceID: id)
-                policy.observe(mask: 1, deviceID: id)
-                precondition(policy.blockReason(mask: 1, deviceID: id, source: .poll, now: 620) == nil)
-                precondition(policy.blockReason(mask: 0, deviceID: id, source: .sound, now: 620) == nil)
-                precondition(policy.blockReason(mask: 0, deviceID: id, source: .poll, now: 620) != nil)
-                policy.accepted(mask: 1, deviceID: id, at: 620)
-                precondition(policy.blockReason(mask: 1, deviceID: "another-device", source: .sound, now: 620) == nil)
-                policy.foregroundReset()
-                precondition(policy.blockReason(mask: 1, deviceID: id, source: .poll, now: 630) == nil)
-                let bathroomID = BathroomEventPolicy.supportedDeviceID
-                var bathroom = BathroomEventPolicy()
-                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == nil)
-                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == .cleared)
-                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == nil)
-                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == .appeared)
-                let episode1 = bathroom.episodes[bathroomID]!
-                precondition(bathroom.isCurrent(deviceID: bathroomID, episode: episode1))
-                for _ in 0..<100 { precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == nil) }
-                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == nil)
-                precondition(bathroom.observe(raw: 0, deviceID: bathroomID) == .cleared)
-                precondition(!bathroom.isCurrent(deviceID: bathroomID, episode: episode1))
-                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == nil)
-                precondition(bathroom.observe(raw: 1, deviceID: bathroomID) == .appeared)
-                precondition(bathroom.episodes[bathroomID] == episode1 + 1)
-                precondition(!bathroom.isCurrent(deviceID: bathroomID, episode: episode1))
-                var invalid = BathroomEventPolicy()
-                precondition(invalid.observe(raw: 1, deviceID: bathroomID) == nil)
-                precondition(invalid.observe(raw: -1, deviceID: bathroomID) == nil)
-                precondition(invalid.observe(raw: 1, deviceID: bathroomID) == nil)
-                precondition(invalid.observe(raw: 2, deviceID: bathroomID) == nil)
-                precondition(invalid.observe(raw: 1, deviceID: "unsupported-rom") == nil)
-                precondition(invalid.observe(raw: 1, deviceID: "unsupported-rom") == nil)
-                precondition(invalid.present.isEmpty)
-                let careKey = CareEventPolicy.deliveryKey(deviceID: bathroomID, source: .sound)
-                let bathroomKey = CareEventPolicy.deliveryKey(deviceID: bathroomID, source: .bathroom, bathroomEpisode: 1)
-                precondition(careKey != bathroomKey)
-                var separation = CareEventPolicy()
-                separation.accepted(mask: 3, deviceID: careKey, at: 100)
-                precondition(separation.blockReason(mask: 0, deviceID: bathroomKey, source: .bathroom, now: 100) == nil)
-                separation.accepted(mask: 0, deviceID: bathroomKey, at: 200)
-                precondition(separation.blockReason(mask: 3, deviceID: careKey, source: .sound, now: 200) == nil)
-                print("Bathroom candidate tests passed: confirmation, deduplication, cleanup/rearm, stale episodes, ROM guard, care independence.")
-        print("Care policy tests passed: repeat calls, burst filtering, rearm, device separation.")
+                if let last = lastScheduled[deviceID], now - last < Self.burstWindow { return "same short burst" }
+                return nil
+            }
+            mutating func accepted(mask: Int, deviceID: String, at: Double) {
+                lastScheduled[deviceID] = at
+                if mask > 0 { notifiedEpisodes.insert(deviceID) }
+            }
+            mutating func foregroundReset() { notifiedEpisodes.removeAll() }
+        }
+        struct BathroomEventPolicy {
+            static let supportedDeviceID = "fw_tg18_en_v063_2020-02-13_wondergarden"
+            enum Transition: Equatable { case appeared, cleared }
+            private var present: [String: Bool] = [:]
+            private(set) var episodes: [String: Int] = [:]
+            private var candidates: [String: Bool] = [:]
+            private var confirmations: [String: Int] = [:]
+            mutating func observe(raw: Int, deviceID: String) -> Transition? {
+                guard deviceID == Self.supportedDeviceID else { return nil }
+                guard raw == 0 || raw == 1 else { candidates.removeValue(forKey: deviceID); confirmations.removeValue(forKey: deviceID); return nil }
+                let next = raw == 1
+                if candidates[deviceID] == next { confirmations[deviceID] = min(2, (confirmations[deviceID] ?? 0) + 1) }
+                else { candidates[deviceID] = next; confirmations[deviceID] = 1 }
+                guard confirmations[deviceID] == 2, present[deviceID] != next else { return nil }
+                present[deviceID] = next
+                if next { episodes[deviceID, default: 0] += 1; return .appeared }
+                return .cleared
+            }
+            func isCurrent(deviceID: String, episode: Int) -> Bool { present[deviceID] == true && episodes[deviceID] == episode }
+        }
+        struct HatchEventPolicy {
+            static let supportedDeviceID = BathroomEventPolicy.supportedDeviceID
+            static let mergeWindow = 2.5
+            private(set) var lastStages: [String: Int]
+            private var until: [String: Double] = [:]
+            init(lastStages: [String: Int] = [:]) { self.lastStages = lastStages }
+            mutating func observe(stage: Int, deviceID: String, now: Double) -> Bool {
+                guard deviceID == Self.supportedDeviceID, (0...255).contains(stage) else { return false }
+                let previous = lastStages[deviceID]; lastStages[deviceID] = stage
+                if stage == 0 { until.removeValue(forKey: deviceID) }
+                guard previous == 0, stage == 1 else { return false }
+                until[deviceID] = now + Self.mergeWindow
+                return true
+            }
+            func shouldMergeCare(deviceID: String, now: Double) -> Bool { now < (until[deviceID] ?? -.infinity) }
+        }
+        struct LiveNamePolicy {
+            // Observed screenshot/dump pairing only; NOT a complete firmware character table.
+            static func observedName(deviceID: String, stage: Int, character: Int) -> String? {
+                deviceID == BathroomEventPolicy.supportedDeviceID && stage == 1 && character == 4 ? "Hosinokotchi" : nil
+            }
+            static func key(deviceID: String, stage: Int, character: Int, signature: String) -> String? {
+                guard stage > 0, character >= 0, !signature.isEmpty else { return nil }
+                return deviceID + "." + signature + "." + String(stage) + "." + String(character)
+            }
+            static func clean(_ value: String) -> String {
+                String(value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.map { Character(String($0)) }.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
-        CARE_TESTS_EOF
-        xcrun --sdk macosx swiftc -parse-as-library -O \
-          ios/TamaiOS/Core/CareEventPolicy.swift "$RUNNER_TEMP/CarePolicyTests.swift" \
-          -o "$RUNNER_TEMP/care-policy-tests" 2>&1 | tee ios/care-policy-tests.log
-        "$RUNNER_TEMP/care-policy-tests" 2>&1 | tee -a ios/care-policy-tests.log
+        struct ForegroundPlaybackPolicy {
+            static func allowed(soundEnabled: Bool, foreground: Bool) -> Bool { soundEnabled && foreground }
+        }
+        struct ProbeTextLine {
+            let text: String
+            let confidence: Double
+            let midY: Double
+        }
+        struct NameRecognitionPolicy {
+            static func normalized(_ value: String) -> String {
+                value.uppercased().filter { $0.isLetter || $0.isNumber }
+            }
+            static func candidate(lines: [ProbeTextLine], owner: String) -> String? {
+                let ownerKey = normalized(owner)
+                guard ownerKey.count >= 2 else { return nil }
+                let headers = lines.filter {
+                    let text = normalized($0.text)
+                    return $0.confidence >= 0.55 && (text == ownerKey || text == ownerKey + "S")
+                }
+                var names: Set<String> = []
+                for header in headers {
+                    for line in lines where line.confidence >= 0.65 {
+                        let distance = header.midY - line.midY
+                        let text = normalized(line.text)
+                        guard distance > 0.035, distance < 0.27,
+                              (5...28).contains(text.count), text.hasSuffix("TCHI"),
+                              text != ownerKey, text != ownerKey + "S",
+                              text.allSatisfy({ $0.isASCII && $0.isLetter }) else { continue }
+                        names.insert(text.lowercased().capitalized)
+                    }
+                }
+                return names.count == 1 ? names.first : nil
+            }
+            static func agreed(_ first: String?, _ second: String?) -> String? {
+                guard let first, let second, normalized(first) == normalized(second) else { return nil }
+                return first
+            }
+        }
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/ProfileNameReader.swift
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat > 'ios/TamaiOS/Core/ProfileNameReader.swift' <<'TAMAIOS_SOURCE_EOF'
+        import Foundation
+        import UIKit
+        import Vision
+
+        struct NameProbeResult {
+            var name: String?
+            var detail: String
+            var trace: [String] = []
+            var captureMS: Double = 0
+            var workMS: Double = 0
+        }
+        final class ProfileNameReader {
+            static let shared = ProfileNameReader()
+            private let queue = DispatchQueue(label: "TamaiOS.disposable-name-reader", qos: .utility)
+            func read(emu: Emulator, key: String, completion: @escaping (NameProbeResult) -> Void) {
+                queue.async {
+                    let start = ProcessInfo.processInfo.systemUptime
+                    let captureStart = start
+                    guard let seed = emu.withCore({ tg_name_seed_capture($0) }) ?? nil else {
+                        DispatchQueue.main.async { completion(NameProbeResult(name: nil, detail: "Could not capture live snapshot")) }; return
+                    }
+                    let captureMS = (ProcessInfo.processInfo.systemUptime - captureStart) * 1000
+                    defer { tg_name_seed_destroy(seed) }
+                    let owner = self.text(seed, kind: 0)
+                    let identity = self.text(seed, kind: 1)
+                    var result = NameProbeResult(name: nil, detail: "Profile name could not be verified", captureMS: captureMS)
+                    guard key.hasSuffix("." + identity), NameRecognitionPolicy.normalized(owner).count >= 2 else {
+                        result.detail = "Snapshot identity changed or owner header was unavailable"
+                        let finished = result
+                        DispatchQueue.main.async { completion(finished) }; return
+                    }
+                    let deadline = ProcessInfo.processInfo.systemUptime + 12
+                    // Every strategy starts from the SAME seed, not the previous strategy's changed state.
+                    // C backs out toward Home on the disposable copy; OCR rejects incorrect destination pages.
+                    for backs in [8, 4, 2, 1, 0] {
+                        if ProcessInfo.processInfo.systemUptime >= deadline { result.detail = "Probe reached its time budget"; break }
+                        var attemptTrace: [String] = []
+                        let found = autoreleasepool {
+                            self.attempt(seed: seed, backs: backs, owner: owner, deadline: deadline, trace: &attemptTrace)
+                        }
+                        result.trace += attemptTrace
+                        if let found { result.name = found; result.detail = "Two matching profile OCR reads with the owner header verified"; break }
+                    }
+                    result.workMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
+                    result.trace = Array(result.trace.suffix(12))
+                    let finished = result
+                    DispatchQueue.main.async { completion(finished) }
+                }
+            }
+            private func text(_ seed: OpaquePointer, kind: Int32) -> String {
+                var p: UnsafeMutablePointer<UInt8>? = nil
+                var n = 0
+                tg_name_seed_text(seed, kind, &p, &n)
+                guard let p else { return "" }
+                defer { tg_free(p, n) }
+                return String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
+            }
+            private func advance(_ probe: OpaquePointer, seconds: Double, deadline: Double) -> Bool {
+                var remaining = seconds
+                while remaining > 0 {
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+                    let dt = min(0.05, remaining)
+                    guard tg_name_probe_step(probe, dt) == 1 else { return false }
+                    remaining -= dt
+                    Thread.sleep(forTimeInterval: 0.001)
+                }
+                return true
+            }
+            private func tap(_ probe: OpaquePointer, key: Int32, deadline: Double) -> Bool {
+                tg_name_probe_press(probe, key)
+                return advance(probe, seconds: 0.55, deadline: deadline)
+            }
+            private func attempt(seed: OpaquePointer, backs: Int, owner: String, deadline: Double, trace: inout [String]) -> String? {
+                guard let probe = tg_name_probe_from_seed(seed) else { trace.append("Clone creation failed"); return nil }
+                defer { tg_name_probe_destroy(probe) }
+                guard advance(probe, seconds: 0.35, deadline: deadline) else { return nil }
+                for _ in 0..<backs { guard tap(probe, key: 2, deadline: deadline) else { return nil } }
+                guard advance(probe, seconds: 1.25, deadline: deadline) else { return nil }
+                for key in [Int32(0), Int32(1), Int32(1)] { guard tap(probe, key: key, deadline: deadline) else { return nil } }
+                guard advance(probe, seconds: 0.35, deadline: deadline) else { return nil }
+                return agreedProfile(probe, owner: owner, deadline: deadline, trace: &trace)
+            }
+            private func agreedProfile(_ probe: OpaquePointer, owner: String, deadline: Double, trace: inout [String]) -> String? {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+                let first = recognizedName(probe, owner: owner, trace: &trace)
+                guard first != nil, advance(probe, seconds: 0.25, deadline: deadline) else { return nil }
+                let second = recognizedName(probe, owner: owner, trace: &trace)
+                return NameRecognitionPolicy.agreed(first, second)
+            }
+            private func recognizedName(_ probe: OpaquePointer, owner: String, trace: inout [String]) -> String? {
+                var rgb = [UInt8](repeating: 0, count: 128 * 128 * 3)
+                let ok = rgb.withUnsafeMutableBufferPointer { tg_name_probe_rgb(probe, $0.baseAddress, $0.count) }
+                guard ok == 1, let provider = CGDataProvider(data: Data(rgb) as CFData),
+                      let image = CGImage(width: 128, height: 128, bitsPerComponent: 8, bitsPerPixel: 24,
+                        bytesPerRow: 128 * 3, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: 0),
+                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+                      let context = CGContext(data: nil, width: 768, height: 768, bitsPerComponent: 8, bytesPerRow: 768 * 4,
+                        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+                context.interpolationQuality = .none
+                context.draw(image, in: CGRect(x: 0, y: 0, width: 768, height: 768))
+                guard let enlarged = context.makeImage() else { return nil }
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = false
+                request.recognitionLanguages = ["en-US"]
+                request.customWords = ["Hosinokotchi", "Hoshinokotchi"]
+                request.minimumTextHeight = 0.025
+                do {
+                    try VNImageRequestHandler(cgImage: enlarged, options: [:]).perform([request])
+                    let lines: [ProbeTextLine] = (request.results ?? []).compactMap { observation in
+                        guard let candidate = observation.topCandidates(1).first else { return nil }
+                        return ProbeTextLine(text: candidate.string, confidence: Double(candidate.confidence), midY: Double(observation.boundingBox.midY))
+                    }
+                    trace.append("OCR: " + lines.map { $0.text }.joined(separator: " | "))
+                    return NameRecognitionPolicy.candidate(lines: lines, owner: owner)
+                } catch { trace.append("OCR error: " + error.localizedDescription); return nil }
+            }
+        }
+        TAMAIOS_SOURCE_EOF
+    - name: Write ios/TamaiOS/Core/LiveTamaName.swift
+      run: |
+        set -euo pipefail
+        mkdir -p "ios/TamaiOS/Core"
+        cat > 'ios/TamaiOS/Core/LiveTamaName.swift' <<'TAMAIOS_SOURCE_EOF'
+        import Foundation
+        import Combine
+
+        final class LiveTamaName: ObservableObject {
+            static let shared = LiveTamaName()
+            @Published private(set) var name = "Your Tama"
+            @Published private(set) var source = "No current character sample"
+            @Published private(set) var overrideName = ""
+            @Published private(set) var identity: String? = nil
+            @Published private(set) var probeStatus = "Waiting for a stable living Tama"
+            private var deviceID = ""
+            private var stage = -1
+            private var character = -1
+            private var signature = ""
+            private var probeName = ""
+            private var attempts: [String: Int] = [:]
+            private var scheduled: UUID? = nil
+            private var running = false
+            private var captureMS = 0.0
+            private var workMS = 0.0
+            private var trace: [String] = []
+            func observe(deviceID: String, stage: Int, character: Int, signature: String) {
+                self.deviceID = deviceID; self.stage = stage; self.character = character; self.signature = signature
+                let key = LiveNamePolicy.key(deviceID: deviceID, stage: stage, character: character, signature: signature)
+                if identity != key {
+                    identity = key; scheduled = nil
+                    overrideName = key.flatMap { Prefs.d.string(forKey: "notification.currentName." + $0) } ?? ""
+                    probeName = key.flatMap { Prefs.d.string(forKey: "notification.probeName.v1." + $0) } ?? ""
+                    probeStatus = key == nil ? "Waiting for hatch" : (probeName.isEmpty ? "New state: waiting 3 seconds for animations to settle" : "Using cached profile OCR name")
+                    resolve()
+                    if let key { schedule(key: key, delay: 3) }
+                } else { resolve() }
+            }
+            func setOverride(_ value: String) {
+                guard let identity else { return }
+                overrideName = LiveNamePolicy.clean(value)
+                if overrideName.isEmpty { Prefs.d.removeObject(forKey: "notification.currentName." + identity) }
+                else { Prefs.d.set(overrideName, forKey: "notification.currentName." + identity) }
+                resolve()
+                if overrideName.isEmpty { schedule(key: identity, delay: 3) }
+            }
+            func requestCheck() {
+                guard let identity else { return }
+                attempts[identity] = 0
+                scheduled = nil
+                probeName = ""
+                Prefs.d.removeObject(forKey: "notification.probeName.v1." + identity)
+                resolve(); schedule(key: identity, delay: 3)
+            }
+            private func schedule(key: String, delay: Double) {
+                guard deviceID == BathroomEventPolicy.supportedDeviceID, identity == key, probeName.isEmpty,
+                      overrideName.isEmpty, scheduled == nil, (attempts[key] ?? 0) < 3 else { return }
+                let token = UUID(); scheduled = token
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    guard self.scheduled == token, self.identity == key else { return }
+                    self.scheduled = nil
+                    guard self.probeName.isEmpty, self.overrideName.isEmpty else { return }
+                    guard let emu = AppModel.current?.emu, emu.toy?.id == self.deviceID, !emu.loading else {
+                        self.probeStatus = "Waiting for emulator availability"; self.schedule(key: key, delay: 5); return
+                    }
+                    if self.running || emu.linkBusy || emu.holdForApp || emu.appWaiting || ArcadeDiagnostics.shared.report().contains("state: active") {
+                        self.probeStatus = "Deferred while another probe, connection, or arcade round is busy"
+                        self.schedule(key: key, delay: 5); return
+                    }
+                    self.running = true
+                    self.attempts[key, default: 0] += 1
+                    self.probeStatus = "Reading a disposable copy; live inputs are not used"
+                    let expectedDevice = self.deviceID, expectedStage = self.stage, expectedCharacter = self.character
+                    let expectedSignature = UInt32(self.signature, radix: 16) ?? 0
+                    ProfileNameReader.shared.read(emu: emu, key: key) { result in
+                        self.running = false
+                        self.captureMS = result.captureMS; self.workMS = result.workMS; self.trace = result.trace
+                        let matches = emu.withCore { tg_name_identity_matches($0, Int32(expectedStage), UInt32(clamping: expectedCharacter), expectedSignature) } ?? 0
+                        guard self.identity == key, emu.toy?.id == expectedDevice, matches == 1 else {
+                            self.probeStatus = "Discarded stale name result; live identity changed"
+                            if let current = self.identity { self.schedule(key: current, delay: 3) }; return
+                        }
+                        if let resultName = result.name, !resultName.isEmpty {
+                            self.probeName = resultName
+                            Prefs.d.set(resultName, forKey: "notification.probeName.v1." + key)
+                            self.probeStatus = "Verified two matching profile reads; cached for this state"
+                            emu.note("disposable name reader accepted: " + resultName)
+                            self.resolve()
+                        } else {
+                            self.probeStatus = result.detail + " (attempt \(self.attempts[key] ?? 0)/3)"
+                            emu.note("disposable name reader: " + result.detail)
+                            self.schedule(key: key, delay: (self.attempts[key] ?? 0) == 1 ? 10 : 30)
+                        }
+                    }
+                }
+            }
+            private func resolve() {
+                let next: String, detail: String
+                if !overrideName.isEmpty { next = overrideName; detail = "Override for current profile signature/stage/character" }
+                else if !probeName.isEmpty { next = probeName; detail = "Two agreeing profile OCR reads on a disposable emulator copy" }
+                else if let observed = LiveNamePolicy.observedName(deviceID: deviceID, stage: stage, character: character) {
+                    next = observed; detail = "Observed baby mapping fallback; complete firmware table not verified"
+                } else { next = "Your Tama"; detail = "No validated name yet; no owner-name or old-visitor substitution" }
+                if name != next { name = next }; if source != detail { source = detail }
+            }
+            func diagnostics() -> String {
+                var lines = ["hidden-profile-name-v1", "display name: \(name)", "source: \(source)",
+                             "stage=\(stage) candidate character=\(character) profile signature=\(signature)",
+                             "probe: \(probeStatus)", "last capture ms=\(Int(captureMS)) total work ms=\(Int(workMS))",
+                             "Automatic probe: state changes or uncached startup; 3-second settle; at most 3 attempts; no live menu inputs."]
+                lines += trace
+                return lines.joined(separator: "\n")
+            }
+        }
+        TAMAIOS_SOURCE_EOF
+    - name: Test disposable clone memory isolation
+      run: |
+        set -euo pipefail
+        cargo test --manifest-path ffi/Cargo.toml --lib name_probe_isolation_tests -- --nocapture 2>&1 | tee ios/name-probe-isolation.log
+    - name: Test notification and OCR acceptance policies
+      run: |
+        set -euo pipefail
+        cat > "$RUNNER_TEMP/NotificationPolicyTests.swift" <<'POLICY_TEST_EOF'
+        import Foundation
+        @main
+        struct NotificationPolicyTests {
+            static func main() {
+                let id = BathroomEventPolicy.supportedDeviceID
+                var care = CareEventPolicy()
+                for time in [117.0, 237.0, 357.0, 417.0, 597.0] {
+                    care.observe(mask: 3, deviceID: id)
+                    precondition(care.blockReason(mask: 3, deviceID: id, source: .sound, now: time) == nil)
+                    care.accepted(mask: 3, deviceID: id, at: time)
+                }
+                precondition(care.blockReason(mask: 3, deviceID: id, source: .sound, now: 597.1) == "same short burst")
+                precondition(care.blockReason(mask: 3, deviceID: id, source: .poll, now: 610) == "poll same episode")
+                care.observe(mask: 0, deviceID: id)
+                precondition(care.blockReason(mask: 1, deviceID: id, source: .poll, now: 620) == nil)
+                var bathroom = BathroomEventPolicy()
+                precondition(bathroom.observe(raw: 0, deviceID: id) == nil)
+                precondition(bathroom.observe(raw: 0, deviceID: id) == .cleared)
+                precondition(bathroom.observe(raw: 1, deviceID: id) == nil)
+                precondition(bathroom.observe(raw: 1, deviceID: id) == .appeared)
+                let first = bathroom.episodes[id]!
+                for _ in 0..<100 { precondition(bathroom.observe(raw: 1, deviceID: id) == nil) }
+                precondition(bathroom.observe(raw: 0, deviceID: id) == nil)
+                precondition(bathroom.observe(raw: 0, deviceID: id) == .cleared)
+                precondition(!bathroom.isCurrent(deviceID: id, episode: first))
+                precondition(bathroom.observe(raw: 1, deviceID: id) == nil)
+                precondition(bathroom.observe(raw: 1, deviceID: id) == .appeared)
+                precondition(bathroom.episodes[id] == first + 1)
+                var hatch = HatchEventPolicy()
+                precondition(!hatch.observe(stage: 0, deviceID: id, now: 1))
+                precondition(hatch.observe(stage: 1, deviceID: id, now: 2))
+                precondition(hatch.shouldMergeCare(deviceID: id, now: 2.7))
+                precondition(!hatch.shouldMergeCare(deviceID: id, now: 5))
+                for _ in 0..<100 { precondition(!hatch.observe(stage: 1, deviceID: id, now: 6)) }
+                var resumed = HatchEventPolicy(lastStages: hatch.lastStages)
+                precondition(!resumed.observe(stage: 1, deviceID: id, now: 7))
+                precondition(!hatch.observe(stage: 0, deviceID: id, now: 9))
+                precondition(hatch.observe(stage: 1, deviceID: id, now: 10))
+                var alreadyBaby = HatchEventPolicy()
+                precondition(!alreadyBaby.observe(stage: 1, deviceID: id, now: 1))
+                let key = LiveNamePolicy.key(deviceID: id, stage: 1, character: 4, signature: "42C43157")
+                precondition(key != nil)
+                precondition(key != LiveNamePolicy.key(deviceID: id, stage: 2, character: 4, signature: "42C43157"))
+                precondition(key != LiveNamePolicy.key(deviceID: id, stage: 1, character: 4, signature: "650B46AB"))
+                precondition(LiveNamePolicy.key(deviceID: id, stage: 0, character: 4, signature: "42C43157") == nil)
+                precondition(LiveNamePolicy.observedName(deviceID: id, stage: 1, character: 4) == "Hosinokotchi")
+                precondition(LiveNamePolicy.observedName(deviceID: id, stage: 2, character: 4) == nil)
+                for sound in [false,true] { for active in [false,true] {
+                    precondition(ForegroundPlaybackPolicy.allowed(soundEnabled: sound, foreground: active) == (sound && active))
+                } }
+                let owner = ProbeTextLine(text: "JAKE'S", confidence: 0.99, midY: 0.36)
+                let name = ProbeTextLine(text: "HOSINOKOTCHI", confidence: 0.99, midY: 0.23)
+                precondition(NameRecognitionPolicy.candidate(lines: [owner,name], owner: "Jake") == "Hosinokotchi")
+                precondition(NameRecognitionPolicy.candidate(lines: [name], owner: "Jake") == nil)
+                precondition(NameRecognitionPolicy.candidate(lines: [owner,name], owner: "Other") == nil)
+                precondition(NameRecognitionPolicy.candidate(lines: [owner], owner: "Jake") == nil)
+                precondition(NameRecognitionPolicy.candidate(lines: [owner, ProbeTextLine(text: "HAPPY", confidence: 0.99, midY: 0.23)], owner: "Jake") == nil)
+                precondition(NameRecognitionPolicy.candidate(lines: [owner, ProbeTextLine(text: "HOSINOKOTCHI", confidence: 0.20, midY: 0.23)], owner: "Jake") == nil)
+                precondition(NameRecognitionPolicy.candidate(lines: [owner, ProbeTextLine(text: "HOSINOKOTCHI", confidence: 0.99, midY: 0.50)], owner: "Jake") == nil)
+                let other = ProbeTextLine(text: "MAMETCHI", confidence: 0.99, midY: 0.20)
+                precondition(NameRecognitionPolicy.candidate(lines: [owner,name,other], owner: "Jake") == nil)
+                precondition(NameRecognitionPolicy.agreed("Hosinokotchi", "HOSINOKOTCHI") == "Hosinokotchi")
+                precondition(NameRecognitionPolicy.agreed("Hosinokotchi", "Mametchi") == nil)
+                precondition(NameRecognitionPolicy.agreed(nil, "Mametchi") == nil)
+                print("Notification and profile-name policy tests passed: care, bathroom, hatch, scoped cache, foreground audio, header/geometry/confidence/OCR agreement guards.")
+            }
+        }
+        POLICY_TEST_EOF
+        xcrun --sdk macosx swiftc -parse-as-library -O ios/TamaiOS/Core/CareEventPolicy.swift "$RUNNER_TEMP/NotificationPolicyTests.swift" -o "$RUNNER_TEMP/notification-policy-tests" 2>&1 | tee ios/notification-policy-tests.log
+        "$RUNNER_TEMP/notification-policy-tests" 2>&1 | tee -a ios/notification-policy-tests.log
     - name: Make the Xcode project
       run: |
         brew install xcodegen
@@ -9490,8 +9965,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: TamaiOS-build-diagnostics
-        path: |-
+        path: |
           ios/build.log
           ios/swift-syntax.log
-          ios/care-policy-tests.log
+          ios/name-probe-isolation.log
+          ios/notification-policy-tests.log
         if-no-files-found: ignore

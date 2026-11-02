@@ -1,0 +1,20 @@
+[package]
+name = "tamaios-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "tamaios"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tg18-core = { path = "../upstream/core" }
+miniz_oxide = "0.8"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+

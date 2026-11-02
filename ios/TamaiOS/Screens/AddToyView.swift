@@ -186,14 +186,20 @@ struct Card<C: View>: View {
 struct ColorPickerRow: View {
     @Binding var selection: Int
     var body: some View {
-        HStack(spacing: 10) {
+        // Wraps onto extra rows instead of overflowing, so no circle is ever cut off.
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 6)], alignment: .leading, spacing: 6) {
             ForEach(Theme.all) { t in
-                Circle()
-                    .fill(LinearGradient(colors: [t.top, t.bottom], startPoint: .top, endPoint: .bottom))
-                    .frame(width: 38, height: 38)
-                    .overlay(Circle().stroke(Color.primary, lineWidth: selection == t.id ? 3 : 0))
-                    .onTapGesture { withAnimation { selection = t.id } }
-                    .accessibilityLabel(t.name)
+                Button { withAnimation { selection = t.id } } label: {
+                    Circle()
+                        .fill(LinearGradient(colors: [t.top, t.bottom], startPoint: .top, endPoint: .bottom))
+                        .frame(width: 38, height: 38)
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.2), lineWidth: 1))
+                        .overlay(Circle().strokeBorder(Color.primary, lineWidth: selection == t.id ? 3 : 0))
+                        .frame(width: 48, height: 48)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(t.name)
             }
         }
     }

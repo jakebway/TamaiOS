@@ -338,14 +338,17 @@ struct DesignView: View {
                 Picker("Part", selection: $part) { ForEach(0..<4, id: \.self) { Text(parts[$0]).tag($0) } }
                     .pickerStyle(.segmented)
                 if part != 1 {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(0..<13, id: \.self) { p in
-                                Circle().fill(Town.swatch(p)).frame(width: 30, height: 30)
-                                    .overlay(Circle().stroke(Color.primary, lineWidth: color == p ? 3 : 0.5))
-                                    .onTapGesture { setColor(p) }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 4)], spacing: 4) {
+                        ForEach(0..<13, id: \.self) { p in
+                            Button { setColor(p) } label: {
+                                Circle().fill(Town.swatch(p)).frame(width: 36, height: 36)
+                                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.3), lineWidth: 1))
+                                    .overlay(Circle().strokeBorder(Color.primary, lineWidth: color == p ? 3 : 0))
+                                    .frame(width: 48, height: 48)
+                                    .contentShape(Circle())
                             }
-                        }.padding(.horizontal, 4)
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
                 ScrollView {
@@ -355,6 +358,7 @@ struct DesignView: View {
                                 .frame(width: 56, height: 56)
                                 .padding(4)
                                 .background(RoundedRectangle(cornerRadius: 10).fill(current == id ? Color.pink.opacity(0.3) : Color(.secondarySystemBackground)))
+                                .contentShape(RoundedRectangle(cornerRadius: 10))
                                 .onTapGesture { setPart(id) }
                         }
                     }

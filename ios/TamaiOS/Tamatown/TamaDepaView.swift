@@ -29,6 +29,7 @@ struct TamaDepaView: View {
     @State private var progress = ""
     @State private var result: (ok: Bool, text: String)?
     @State private var importing = false
+    @State private var drawing = false
     @State private var custom: (name: String, data: Data)?
 
     private var isJP: Bool { emu.toy?.romName.contains("(JP") ?? false }
@@ -161,6 +162,7 @@ struct TamaDepaView: View {
                 custom = (n.isEmpty ? u.deletingPathExtension().lastPathComponent : n, d)
             }.ignoresSafeArea()
         }
+        .background(Color.clear.fullScreenCover(isPresented: $drawing) { CustomItemMaker() })
         .alert(result?.ok == true ? "TamaDepa" : "Not delivered", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
             Button("OK") {}
         } message: { Text(result?.text ?? "") }
@@ -261,11 +263,9 @@ struct TamaDepaView: View {
             }
             Button(custom == nil ? "Choose file…" : "Choose another file…") { importing = true }
                 .font(.subheadline.weight(.semibold))
-            NavigationLink {
-                CustomItemMaker()
-            } label: {
+            Button { drawing = true } label: {
                 Label("Draw your own", systemImage: "paintbrush.fill")
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 28)
             }
             .buttonStyle(.bordered)
             .tint(.purple)

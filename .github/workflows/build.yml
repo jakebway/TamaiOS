@@ -18,6 +18,22 @@ jobs:
         with:
           lfs: true
 
+      - name: Apply tamaios_changes.patch if it is in the repo
+        run: |
+          set -euo pipefail
+          P=tamaios_changes.patch
+          if [ ! -f "$P" ]; then
+            echo "No $P in the repo, building the code as it is."
+          elif git apply --check "$P" 2>/dev/null; then
+            git apply "$P"
+            echo "Applied $P"
+          elif git apply --check -R "$P" 2>/dev/null; then
+            echo "$P is already part of the code, skipping it."
+          else
+            echo "::error::$P does not apply to this code. Remove it or ask for a fresh one."
+            exit 1
+          fi
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

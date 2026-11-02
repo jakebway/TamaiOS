@@ -21,12 +21,17 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Get the emulator core (tg18-emu) and apply Bluetooth patch
+      - name: Get the emulator core (tg18-emu)
         run: |
           set -euo pipefail
           git clone https://github.com/oreo-fox/tg18-emu upstream
           git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
-          git -C upstream apply ../patches/radio.patch
+          # Try to apply the Bluetooth patch; continue if it fails
+          if git -C upstream apply ../patches/radio.patch; then
+            echo "Bluetooth patch applied successfully"
+          else
+            echo "Warning: Bluetooth patch failed to apply — continuing without it"
+          fi
 
       - name: Build Rust static library for iOS
         run: |

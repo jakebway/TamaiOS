@@ -1,0 +1,262 @@
+name: Firmware reverse-engineering baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Get the pinned firmware repository
+        uses: actions/checkout@v4
+        with:
+          repository: jakebway/TamaiOS
+          ref: d40cb99aeb46fb369b9287564d457aff25ea5dd7
+          path: firmware-source
+          persist-credentials: false
+
+      - name: Get the pinned upstream emulator
+        uses: actions/checkout@v4
+        with:
+          repository: oreo-fox/nijiiro-egg
+          ref: 41204c92e98a8882d5c90a9876d8990f3b63e285
+          path: emulator-source
+          persist-credentials: false
+
+      - name: Inventory Wonder Garden firmware
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import subprocess
+
+          rom = pathlib.Path(
+              "firmware-source/firmware/"
+              "fw_tg18_en_v063_2020-02-13_wondergarden.bin"
+          )
+          core = pathlib.Path("emulator-source")
+          output = pathlib.Path("analysis")
+          output.mkdir(parents=True, exist_ok=True)
+
+          data = rom.read_bytes()
+
+          if len(data) != 0x800000:
+              raise SystemExit(
+                  f"Expected 8 MiB firmware; got {len(data)} bytes"
+              )
+
+          blob_sha = hashlib.sha1(
+              b"blob "
+              + str(len(data)).encode()
+              + b"\0"
+              + data
+          ).hexdigest()
+
+          expected_blob = (
+              "b90fcfc2c43516c750b5e840c0132c35f20be4cd"
+          )
+
+          if blob_sha != expected_blob:
+              raise SystemExit(
+                  f"Firmware identity mismatch: {blob_sha}"
+              )
+
+          core_commit = subprocess.check_output(
+              ["git", "-C", str(core), "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+
+          expected_commit = (
+              "41204c92e98a8882d5c90a9876d8990f3b63e285"
+          )
+
+          if core_commit != expected_commit:
+              raise SystemExit(
+                  f"Unexpected emulator revision: {core_commit}"
+              )
+
+          sha256 = hashlib.sha256(data).hexdigest()
+
+          manifest = {
+              "rom": rom.name,
+              "size_bytes": len(data),
+              "sha256": sha256,
+              "git_blob_sha1": blob_sha,
+              "firmware_repository_commit":
+                  "d40cb99aeb46fb369b9287564d457aff25ea5dd7",
+              "emulator_commit": core_commit,
+              "flash_base": "0x20000000",
+              "reset_candidate": "0x20000048",
+              "signature_scan_limit": "0x220000",
+              "scope": (
+                  "Static inventory only. "
+                  "No firmware boot, gameplay test, "
+                  "or decompilation was performed."
+              ),
+          }
+
+          (output / "manifest.json").write_text(
+              json.dumps(manifest, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          source = (
+              core / "core" / "src" / "sigs.rs"
+          ).read_text(encoding="utf-8")
+
+          signatures = re.findall(
+              r'pub const (\w+): &str\s*=\s*"([^"]+)";',
+              source,
+          )
+
+          if not signatures:
+              raise SystemExit(
+                  "No upstream signatures found; "
+                  "check the source format."
+              )
+
+          code = data[:0x220000]
+          results = []
+
+          for name, pattern in signatures:
+              compact = re.sub(r"\s+", "", pattern)
+
+              if not compact or len(compact) % 2:
+                  raise SystemExit(
+                      f"Invalid signature: {name}"
+                  )
+
+              pairs = [
+                  compact[i:i + 2]
+                  for i in range(0, len(compact), 2)
+              ]
+
+              expression = b"".join(
+                  b"."
+                  if pair == "??"
+                  else re.escape(bytes.fromhex(pair))
+                  for pair in pairs
+              )
+
+              offsets = [
+                  match.start()
+                  for match in re.finditer(
+                      b"(?=(" + expression + b"))",
+                      code,
+                      re.DOTALL,
+                  )
+              ]
+
+              if len(offsets) == 1:
+                  status = "unique_candidate"
+              elif offsets:
+                  status = "ambiguous"
+              else:
+                  status = "not_found"
+
+              results.append({
+                  "signature": name,
+                  "status": status,
+                  "match_count": len(offsets),
+                  "matches": [
+                      {
+                          "file_offset": hex(offset),
+                          "cpu_address": hex(
+                              0x20000000 + offset
+                          ),
+                      }
+                      for offset in offsets
+                  ],
+              })
+
+          (output / "signatures.json").write_text(
+              json.dumps(results, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          string_count = 0
+
+          with (output / "strings.tsv").open(
+              "w", encoding="utf-8"
+          ) as handle:
+              handle.write(
+                  "file_offset\tcpu_address\ttext\n"
+              )
+
+              for match in re.finditer(
+                  rb"[\x20-\x7e]{6,}", data
+              ):
+                  offset = match.start()
+                  text = match.group().decode("ascii")
+
+                  handle.write(
+                      f"0x{offset:08X}\t"
+                      f"0x{0x20000000 + offset:08X}\t"
+                      f"{text}\n"
+                  )
+                  string_count += 1
+
+          unique_count = sum(
+              result["status"] == "unique_candidate"
+              for result in results
+          )
+
+          summary = [
+              "# Wonder Garden static inventory",
+              "",
+              f"- Firmware: `{rom.name}`",
+              f"- Size: {len(data):,} bytes",
+              f"- SHA-256: `{sha256}`",
+              f"- Emulator revision: `{core_commit}`",
+              f"- Signatures searched: {len(results)}",
+              f"- Unique candidates: {unique_count}",
+              f"- Printable strings: {string_count}",
+              "",
+              "## Limitations",
+              "",
+              "A signature match is a candidate location, "
+              "not a verified function boundary.",
+              "",
+              "This run does not boot or decompile the "
+              "firmware and does not validate gameplay.",
+              "",
+              "The build check is a separate workflow step.",
+          ]
+
+          (output / "SUMMARY.md").write_text(
+              "\n".join(summary) + "\n",
+              encoding="utf-8",
+          )
+
+          print("\n".join(summary))
+          PY
+
+      - name: Add inventory summary to the run
+        shell: bash
+        run: |
+          cat analysis/SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile upstream emulator library
+        working-directory: emulator-source
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --locked -p tg18-core --lib \
+            2>&1 | tee ../analysis/core-build.log
+
+      - name: Upload research results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wondergarden-static-baseline
+          path: analysis/
+          if-no-files-found: warn
+          retention-days: 7

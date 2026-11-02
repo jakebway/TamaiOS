@@ -127,7 +127,7 @@ struct TamaDepaView: View {
                         .font(.subheadline).foregroundStyle(.secondary).padding(12)
                 }
                 grid
-                DisclosureGroup("Import a place or item") { ownFileCard }
+                DisclosureGroup("Make or import") { ownFileCard }
                 if !packReady {
                     Text("The built-in character pack is loading. If it does not finish, use Reload built-in characters in Tamatown Settings.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -249,9 +249,9 @@ struct TamaDepaView: View {
 
     private var ownFileCard: some View {
         TownCard(tint: .purple) {
-            Label("Bring your own place", systemImage: "wand.and.stars")
+            Label("Custom wallpaper, food, or file", systemImage: "wand.and.stars")
                 .font(.system(.headline, design: .rounded)).foregroundStyle(.purple)
-            Text("Have a place or item file of your own, like Magic Hut? Choose it and TamaiOS sends it to your Tama, just like the app did.")
+            Text("Draw your own wallpaper or food, or import a ready-made file (like Magic Hut).")
                 .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
             if let c = custom {
                 Button { sendCustom(c.data, name: c.name) } label: {
@@ -261,6 +261,14 @@ struct TamaDepaView: View {
             }
             Button(custom == nil ? "Choose file…" : "Choose another file…") { importing = true }
                 .font(.subheadline.weight(.semibold))
+            NavigationLink {
+                CustomItemMaker()
+            } label: {
+                Label("Draw your own", systemImage: "paintbrush.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(.purple)
         }
     }
 

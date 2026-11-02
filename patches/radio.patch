@@ -1,0 +1,359 @@
+diff --git a/core/src/lib.rs b/core/src/lib.rs
+index 784ed8b..d0a2909 100644
+--- a/core/src/lib.rs
++++ b/core/src/lib.rs
+@@ -7,6 +7,7 @@
+ pub mod cpu;
+ pub mod machine;
+ pub mod png;
++pub mod radio;
+ pub mod roms;
+ pub mod save;
+ pub mod sigs;
+diff --git a/core/src/machine.rs b/core/src/machine.rs
+index 0bf46d4..f476e05 100644
+--- a/core/src/machine.rs
++++ b/core/src/machine.rs
+@@ -225,6 +225,10 @@ impl Machine {
+                 true
+             }
+             Hook::Spi2Transfer => {
++                if self.sys.radio.is_some() {
++                    self.bluetooth_used = true;
++                    return false; // the real driver talks to the emulated module
++                }
+                 if !self.bluetooth_used {
+                     // nothing in normal play touches this bus: the game is
+                     // starting Bluetooth; stop so the window can undo the press
+@@ -491,7 +495,7 @@ impl Machine {
+         if self.ble_failed {
+             return Some(Outcome::BleFail);
+         }
+-        if self.bluetooth_used && self.stop_on_bluetooth {
++        if self.bluetooth_used && self.stop_on_bluetooth && self.sys.radio.is_none() {
+             return Some(Outcome::Bluetooth);
+         }
+         if self.sys.infrared_used && !self.sys.uart_is_ram {
+@@ -696,6 +700,7 @@ impl Machine {
+         q.lcd.frames = s.lcd.frames;
+         q.lcd.last_vsync = (q.now * sys::VSYNC_HZ) as u64;
+         q.trace_mmio = s.trace_mmio;
++        q.radio = s.radio.take();
+         *self = fresh;
+     }
+ 
+diff --git a/core/src/radio.rs b/core/src/radio.rs
+new file mode 100644
+index 0000000..f249635
+--- /dev/null
++++ b/core/src/radio.rs
+@@ -0,0 +1,260 @@
++//! The Meets/On Bluetooth module (a CC2650 behind SPI 0xC0080000, chip
++//! select GPIO 0xC0000064 bit 12, active low), answered like the real one.
++//!
++//! Byte protocol, per chip-select cycle: `reg|1` reads a 16-bit register
++//! (0x0A status: 0x8040 boot ROM, 0x8000 patched, 0x8400 running, +4 when a
++//! phone is connected; 0x08 bytes waiting << 6); `0x60|n` fetches n queued
++//! bytes; `0xA0|n` sends n bytes of a message, which may span cycles.
++//! Messages from the firmware: 22 data for the phone, 25 setup, 56 module
++//! memory read, 55 memory write, 01 HCI command. Data from the phone is
++//! queued as `22 len data`. Behaviour as documented by Paramix Studio's
++//! T18Emu notes; this is an independent implementation.
++
++use std::collections::VecDeque;
++
++#[derive(Clone, Default)]
++pub struct Radio {
++    pub selected: bool,
++    tr: Vec<u8>,
++    answer: [u8; 2],
++    answering: u8,
++    fetch: u8,
++    msg: Vec<u8>,
++    queue: VecDeque<u8>,
++    ends: VecDeque<usize>,
++    popped: usize,
++    pushed: usize,
++    ac_count: u8,
++    stage: u8,
++    pub setup_done: bool,
++    last_setup: u8,
++    pub connected: bool,
++    mem: [u8; 16],
++    /// Data the firmware sent to the phone (fff1 notifications), oldest first.
++    pub to_phone: VecDeque<Vec<u8>>,
++    /// Every message, for research (capped).
++    pub trace: Vec<String>,
++    pub tracing: bool,
++}
++
++impl Radio {
++    pub fn new() -> Radio {
++        let mut r = Radio::default();
++        r.mem[0] = 0xFF;
++        r.mem[1] = 0xFF;
++        r.mem[8] = 0xFF;
++        r.mem[9] = 0xFF;
++        r
++    }
++
++    fn note(&mut self, dir: &str, d: &[u8]) {
++        if self.tracing && self.trace.len() < 20000 {
++            let hex: Vec<String> = d.iter().map(|b| format!("{:02x}", b)).collect();
++            self.trace.push(format!("{} {}", dir, hex.join(" ")));
++        }
++    }
++
++    fn push(&mut self, d: &[u8]) {
++        if d.is_empty() || self.queue.len() + d.len() > 4096 {
++            return;
++        }
++        self.queue.extend(d.iter().copied());
++        self.pushed += d.len();
++        self.ends.push_back(self.pushed);
++    }
++
++    /// Bytes up to the end of the next queued message.
++    fn to_end(&mut self) -> usize {
++        while let Some(&e) = self.ends.front() {
++            if e <= self.popped {
++                self.ends.pop_front();
++            } else {
++                return e - self.popped;
++            }
++        }
++        self.queue.len()
++    }
++
++    fn pop(&mut self) -> u8 {
++        match self.queue.pop_front() {
++            Some(b) => {
++                self.popped += 1;
++                b
++            }
++            None => 0,
++        }
++    }
++
++    pub fn select(&mut self, sel: bool) {
++        if sel == self.selected {
++            return;
++        }
++        self.selected = sel;
++        if !sel {
++            if self.tr.len() > 1 && self.tr[0] & 0xE0 == 0xA0 {
++                if self.msg.len() > 4096 {
++                    self.msg.clear();
++                }
++                let body = self.tr[1..].to_vec();
++                self.msg.extend_from_slice(&body);
++                let need = match (self.msg.first(), self.msg.get(1)) {
++                    (Some(0x55), Some(&n)) => 8 + n as usize * 4,
++                    (Some(0x22), Some(&n)) => 2 + n as usize,
++                    _ => self.msg.len(),
++                };
++                if self.msg.len() >= need {
++                    let m = std::mem::take(&mut self.msg);
++                    self.message(&m[..need.max(1).min(m.len())]);
++                }
++            }
++            self.tr.clear();
++            self.answering = 0;
++            self.fetch = 0;
++        }
++    }
++
++    /// One byte over SPI; returns the byte clocked back.
++    pub fn xfer(&mut self, b: u8) -> u8 {
++        self.tr.push(b);
++        if self.fetch > 0 {
++            self.fetch -= 1;
++            return self.pop();
++        }
++        if self.tr.len() == 1 {
++            if b == 0xAC {
++                self.ac_count = self.ac_count.saturating_add(1);
++            }
++            if b & 0xE0 == 0x60 {
++                self.fetch = b & 0x1F;
++                return 0;
++            }
++            if b & 1 != 0 {
++                let r = b - 1;
++                let mut w: u16 = 0;
++                if r == 0x0A {
++                    w = if self.ac_count >= 4 || self.stage == 2 { 0x8400 } else if self.stage == 1 { 0x8000 } else { 0x8040 };
++                    if self.connected && self.setup_done {
++                        w |= 0x0004;
++                    }
++                } else if r == 0x08 && !self.queue.is_empty() {
++                    let k = self.to_end().min(31) as u16;
++                    w = k << 6;
++                }
++                self.answer = [(w >> 8) as u8, w as u8];
++                self.answering = 1;
++            }
++            return 0;
++        }
++        match self.answering {
++            1 => {
++                self.answering = 2;
++                self.answer[0]
++            }
++            2 => {
++                self.answering = 0;
++                self.answer[1]
++            }
++            _ => 0,
++        }
++    }
++
++    fn mem_at(&mut self, a: u32, n: usize) -> Option<&mut [u8]> {
++        if a >= 0xA500_00F8 && a as u64 + n as u64 <= 0xA500_0100 {
++            let o = (a - 0xA500_00F8) as usize;
++            return Some(&mut self.mem[o..o + n]);
++        }
++        if a >= 0xA500_24B8 && a as u64 + n as u64 <= 0xA500_24C0 {
++            let o = 8 + (a - 0xA500_24B8) as usize;
++            return Some(&mut self.mem[o..o + n]);
++        }
++        None
++    }
++
++    fn message(&mut self, p: &[u8]) {
++        if p.len() < 2 {
++            return;
++        }
++        match p[0] {
++            0x22 => {
++                let len = (p[1] as usize).min(p.len() - 2);
++                let data = p[2..2 + len].to_vec();
++                self.note("TOY>APP", &data);
++                self.to_phone.push_back(data);
++                if self.to_phone.len() > 256 {
++                    self.to_phone.pop_front();
++                }
++                self.push(&[0x26, 0x22, 0x00]);
++            }
++            0x25 => {
++                self.note("setup", p);
++                let pay = (p.len() - 2).min(32);
++                let mut a = vec![0x21, p[1], pay as u8];
++                a.extend_from_slice(&p[2..2 + pay]);
++                self.push(&a);
++                if (p[1] == 0x38 && self.last_setup != 0x31) || p[1] == 0x5F {
++                    self.setup_done = false;
++                    self.ac_count = 0;
++                    self.stage = 0;
++                }
++                if p[1] == 0x40 {
++                    self.setup_done = true;
++                }
++                self.last_setup = p[1];
++                if p[1] == 0x3E {
++                    self.push(&[0x26, 0xFF, 0x11]);
++                }
++            }
++            0x56 if p.len() >= 6 => {
++                let a = u32::from_le_bytes([p[2], p[3], p[4], p[5]]);
++                let cnt = (p[1] as usize).min(52);
++                let mut o = vec![0x57, ((cnt + 3) / 4) as u8, 0, 0, p[2], p[3], p[4], p[5]];
++                match self.mem_at(a, cnt) {
++                    Some(m) => {
++                        let v = m.to_vec();
++                        o.extend_from_slice(&v);
++                    }
++                    None => o.extend(std::iter::repeat(0).take(cnt)),
++                }
++                self.push(&o);
++            }
++            0x55 if p.len() >= 8 => {
++                let a = u32::from_le_bytes([p[4], p[5], p[6], p[7]]);
++                let data = p[8..].to_vec();
++                if let Some(m) = self.mem_at(a, data.len()) {
++                    m.copy_from_slice(&data);
++                }
++                if a == 0x0020_1F80 && p.len() >= 12 {
++                    if u32::from_le_bytes([p[8], p[9], p[10], p[11]]) != 0 {
++                        self.stage = 1;
++                    } else if self.stage == 1 {
++                        self.stage = 2;
++                    }
++                }
++            }
++            0x01 if p.len() >= 3 => {
++                self.note("hci", p);
++                if p[1] == 0x1F && p[2] == 0x20 {
++                    self.push(&[0x04, 0x0E, 6, 0x01, p[1], p[2], 0x00, 0, 0]);
++                } else {
++                    self.push(&[0x04, 0x0E, 4, 0x01, p[1], p[2], 0x00]);
++                }
++            }
++            _ => self.note("other", p),
++        }
++    }
++
++    /// A write from the phone (characteristic fff2). False if there is no room yet.
++    pub fn from_phone(&mut self, d: &[u8]) -> bool {
++        if d.is_empty() {
++            return true;
++        }
++        if self.queue.len() + d.len() + 2 > 2048 {
++            return false;
++        }
++        self.note("APP>TOY", d);
++        let mut m = vec![0x22, d.len() as u8];
++        m.extend_from_slice(d);
++        self.push(&m);
++        true
++    }
++}
+diff --git a/core/src/sys.rs b/core/src/sys.rs
+index 6f76746..a4970c0 100644
+--- a/core/src/sys.rs
++++ b/core/src/sys.rs
+@@ -340,6 +340,8 @@ pub struct System {
+     /// A quick tap stays held until this time.
+     pub hold_until: [f64; 3],
+     pub gpio_applied: [u32; 8],
++    /// The Bluetooth module, when emulated (None: absent, as before).
++    pub radio: Option<crate::radio::Radio>,
+ 
+     pub mmio_writes: u64,
+     /// Set by memory writes that change a value (idle detection).
+@@ -390,6 +392,7 @@ impl System {
+             live_keys: [false; 3],
+             hold_until: [0.0; 3],
+             gpio_applied: [0; 8],
++            radio: None,
+             mmio_writes: 0,
+             changed: false,
+             tracking: false,
+@@ -945,7 +948,15 @@ impl System {
+             0xC015_0000 => self.flash_select(new & 0x40 != 0),
+             0xC015_0008 => self.flash_xfer(new as u8),
+             0xC008_0008 => {
+-                self.regs.insert(SPI2_BASE + 0x10, SPI2_IDLE);
++                let rx = match self.radio.as_mut() {
++                    Some(r) => {
++                        let sel = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66], self.gpio[0x67]]) & 0x1000 == 0;
++                        r.select(sel);
++                        if sel { r.xfer(new as u8) as u32 } else { 0 }
++                    }
++                    None => SPI2_IDLE,
++                };
++                self.regs.insert(SPI2_BASE + 0x10, rx);
+                 let c = self.reg(SPI2_BASE + 0x0C) | 1;
+                 self.regs.insert(SPI2_BASE + 0x0C, c);
+             }
+@@ -1117,6 +1128,10 @@ impl System {
+                 for i in 0..size as usize {
+                     m[o + i] = (val >> (8 * i)) as u8;
+                 }
++                if addr & !3 == GPIO_BASE + 0x64 && self.radio.is_some() {
++                    let sel = u32::from_le_bytes([self.gpio[0x64], self.gpio[0x65], self.gpio[0x66], self.gpio[0x67]]) & 0x1000 == 0;
++                    self.radio.as_mut().unwrap().select(sel);
++                }
+             }
+             Some(_) => {}
+             None => self.mmio_write(addr, size, val),

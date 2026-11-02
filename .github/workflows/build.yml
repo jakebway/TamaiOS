@@ -50,6 +50,12 @@ jobs:
           fi
           ls -lh ios/TamaiOS/BundledFirmware ios/TamaiOS/BundledAssets || true
 
+      - name: Draw the app icon
+        run: |
+          python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
+          python3 tools/icon.py ios/TamaiOS/Assets.xcassets/AppIcon.appiconset/icon.png
+          python3 tools/town.py ios/TamaiOS/TownBackground.png 1680 || true
+
       - name: Generate Xcode project
         run: |
           cd ios

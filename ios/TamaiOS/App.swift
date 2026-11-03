@@ -258,12 +258,16 @@ struct RootView: View {
     var body: some View {
         Group {
             if model.toys.isEmpty {
-                BundledDevicePicker(firstRun: true)
+                if BundledVariant.anyAvailable { BundledDevicePicker(firstRun: true) }
+                else { AddToyView(firstRun: true) }      // no built-in firmware at all: ask for a ROM file
             } else {
                 DeviceView()
                     .onAppear { Town.shared.loadIfPresent() }   // Tamatown ready before it's needed
                     .sheet(isPresented: $model.showAdd) {
-                        BundledDevicePicker(firstRun: false).environmentObject(model).environmentObject(model.emu)
+                        Group {
+                            if BundledVariant.anyAvailable { BundledDevicePicker(firstRun: false) }
+                            else { AddToyView(firstRun: false) }
+                        }.environmentObject(model).environmentObject(model.emu)
                     }
             }
         }
@@ -321,6 +325,7 @@ struct BundledDevicePicker: View {
     @Environment(\.dismiss) private var dismiss
     @State private var installing = false
     @State private var errorMessage: String?
+    @State private var ownRom = false
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -342,10 +347,16 @@ struct BundledDevicePicker: View {
                         }.buttonStyle(.plain).disabled(installing)
                     }
                     if installing { ProgressView("Preparing your device…") }
+                    if !model.devicesFull || firstRun {
+                        Button { ownRom = true } label: {
+                            Text("Use my own ROM file…").font(.footnote).foregroundStyle(.secondary).underline()
+                        }.buttonStyle(.plain).disabled(installing).padding(.top, 6)
+                    }
                 }.padding(24)
             }
             .background(LinearGradient(colors: [Color.pink.opacity(0.08), Color.purple.opacity(0.06)], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
             .toolbar { if !firstRun { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(installing) } } }
+            .sheet(isPresented: $ownRom) { AddToyView(firstRun: false).environmentObject(model).environmentObject(model.emu) }
             .alert("Couldn't prepare your device", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: { Text(errorMessage ?? "") }

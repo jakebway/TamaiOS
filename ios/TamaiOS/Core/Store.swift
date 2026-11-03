@@ -174,6 +174,9 @@ struct BundledVariant: Identifiable {
         BundledVariant(id: "magic", name: "Magic", filename: "fw_tg18_en_v058_2019-05-13_magic", color: 4),
         BundledVariant(id: "wondergarden", name: "Wonder Garden", filename: "fw_tg18_en_v063_2020-02-13_wondergarden", color: 5)
     ]
+    static var anyAvailable: Bool {
+        all.contains { Bundle.main.url(forResource: $0.filename, withExtension: "bin", subdirectory: "BundledFirmware") != nil }
+    }
 }
 extension ToyStore {
     static func installBundled(_ variant: BundledVariant) throws -> Toy {

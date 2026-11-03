@@ -77,6 +77,11 @@ final class AppModel: ObservableObject {
     init() {
         toys = ToyStore.list()
         AppModel.current = self
+        // Pictures saved by older builds had see-through holes in the face; take them again.
+        if !Prefs.d.bool(forKey: "spriteFormat.v2") {
+            for t in toys { try? FileManager.default.removeItem(at: ToyStore.spriteURL(t.id)) }
+            Prefs.d.set(true, forKey: "spriteFormat.v2")
+        }
         Town.shared.loadIfPresent()
         if let t = currentToy { emu.load(t) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { IRLink.refreshNames(recheck: false) }   // first fill: right away

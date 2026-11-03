@@ -249,7 +249,7 @@ struct DevicesSection: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(tamaName(t) ?? t.name)
                             .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
-                        Text(tamaName(t) == nil ? t.romName : "\(t.name) · \(t.romName)")
+                        Text(tamaName(t) == nil || t.romName.lowercased().hasPrefix(t.name.lowercased()) ? t.romName : "\(t.name) · \(t.romName)")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 8)

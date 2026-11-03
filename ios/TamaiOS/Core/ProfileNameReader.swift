@@ -103,21 +103,35 @@ final class ProfileNameReader {
     /// The Tama's picture on the profile page: the non-white part of the area above its name, on a transparent background.
     static func cropSprite(_ rgb: [UInt8]) -> UIImage? {
         let x0 = 14, x1 = 74, y0 = 34, y1 = 78
-        func ink(_ x: Int, _ y: Int) -> Bool {
+        let W = x1 - x0, H = y1 - y0
+        func white(_ x: Int, _ y: Int) -> Bool {
             let i = (y * 128 + x) * 3
-            return rgb[i] < 232 || rgb[i + 1] < 232 || rgb[i + 2] < 232
+            return rgb[i] >= 232 && rgb[i + 1] >= 232 && rgb[i + 2] >= 232
         }
-        var minX = x1, maxX = x0, minY = y1, maxY = y0
-        for y in y0..<y1 { for x in x0..<x1 where ink(x, y) {
+        // Background = near-white that connects to the edge of the area. Light parts inside the Tama
+        // (face, eye shine) are not connected to the edge, so they stay solid instead of going see-through.
+        var bg = [Bool](repeating: false, count: W * H)
+        var stack: [Int] = []
+        func seed(_ x: Int, _ y: Int) { let k = y * W + x; if !bg[k], white(x0 + x, y0 + y) { bg[k] = true; stack.append(k) } }
+        for x in 0..<W { seed(x, 0); seed(x, H - 1) }
+        for y in 0..<H { seed(0, y); seed(W - 1, y) }
+        while let k = stack.popLast() {
+            let x = k % W, y = k / W
+            if x > 0 { seed(x - 1, y) }
+            if x < W - 1 { seed(x + 1, y) }
+            if y > 0 { seed(x, y - 1) }
+            if y < H - 1 { seed(x, y + 1) }
+        }
+        var minX = W, maxX = -1, minY = H, maxY = -1
+        for y in 0..<H { for x in 0..<W where !bg[y * W + x] {
             minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
         } }
         guard maxX > minX, maxY > minY, maxX - minX < 60, maxY - minY < 44 else { return nil }
         let w = maxX - minX + 1, h = maxY - minY + 1
         var px = [UInt8](repeating: 0, count: w * h * 4)
-        for y in 0..<h { for x in 0..<w {
-            let sx = minX + x, sy = minY + y
-            let i = (sy * 128 + sx) * 3, o = (y * w + x) * 4
-            if ink(sx, sy) { px[o] = rgb[i]; px[o + 1] = rgb[i + 1]; px[o + 2] = rgb[i + 2]; px[o + 3] = 255 }
+        for y in 0..<h { for x in 0..<w where !bg[(minY + y) * W + (minX + x)] {
+            let i = ((y0 + minY + y) * 128 + (x0 + minX + x)) * 3, o = (y * w + x) * 4
+            px[o] = rgb[i]; px[o + 1] = rgb[i + 1]; px[o + 2] = rgb[i + 2]; px[o + 3] = 255
         } }
         guard let prov = CGDataProvider(data: Data(px) as CFData),
               let cg = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,

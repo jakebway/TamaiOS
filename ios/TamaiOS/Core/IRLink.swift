@@ -416,14 +416,42 @@ extension IRLink {
     /// PROFILE-page reading, on a hidden copy): a first check soon after it opens, then every few minutes.
     static func watchActiveName() {
         let token = UUID(); activeNameLoop = token
-        func tick(_ delay: Double) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        var lastIdentity = ""
+        var polls = 0
+        func identity() -> String {
+            AppModel.current?.emu.withCore { h -> String in
+                var stage: UInt8 = 0
+                var ch = [UInt8](repeating: 0, count: 4), sig = [UInt8](repeating: 0, count: 4)
+                guard tg_peek(h, 0xF800_D8B6, &stage, 1) == 1,
+                      ch.withUnsafeMutableBufferPointer({ tg_peek(h, 0xF800_D8C4, $0.baseAddress, 4) }) == 1,
+                      sig.withUnsafeMutableBufferPointer({ tg_peek(h, 0xF800_D8B0, $0.baseAddress, 4) }) == 1 else { return "" }
+                return "\(sig.map { String(format: "%02X", $0) }.joined()).\(stage).\(ch.map { String($0) }.joined(separator: "-"))"
+            } ?? ""
+        }
+        // A name can only change when the Tama does: a new egg hatching, a new game, growing up.
+        // So the Tama's identity (its id, life stage and look) is checked every couple of seconds (it is
+        // a few bytes of memory), and the name is read the moment that changes: right away, then
+        // again a little later in case the name is only filled in after the hatch scene.
+        func poll() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 guard activeNameLoop == token else { return }
-                refreshActiveName()
-                tick(240)
+                polls += 1
+                let now = identity()
+                if !now.isEmpty, now != lastIdentity {
+                    lastIdentity = now
+                    for d in [3.0, 9.0, 20.0, 45.0, 90.0] {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + d) {
+                            guard activeNameLoop == token, identity() == now else { return }
+                            refreshActiveName()
+                        }
+                    }
+                } else if polls % 150 == 0 {      // every five minutes as a safety net
+                    refreshActiveName()
+                }
+                poll()
             }
         }
-        tick(20)
+        poll()
     }
     static func refreshActiveName() {
         guard let model = AppModel.current, let toy = model.emu.toy, toy.id != BathroomEventPolicy.supportedDeviceID,

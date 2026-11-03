@@ -366,7 +366,7 @@ final class Emulator: ObservableObject {
                 stalls.count += 1; stalls.maxMs = max(stalls.maxMs, dt * 1000)
                 if stalls.notes < 12 {
                     stalls.notes += 1
-                    note("stall \(Int(dt * 1000)) ms (link \(IRLink.shared.active || IRLink.shared.starting))")
+                    note("stall \(Int(dt * 1000)) ms (link \(IRLink.shared.active))")
                 }
             }
             inputLock.lock()

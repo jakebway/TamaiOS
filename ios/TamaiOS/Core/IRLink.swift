@@ -403,9 +403,16 @@ extension IRLink {
     /// Garden). Each device is started from its save as a disposable copy, taken to Connection › App,
     /// and asked hello like the phone app does; the answer carries the Tama's name. Nothing is saved
     /// back, so the real device isn't touched and its clock isn't moved.
+    private static var namesChecked = Set<String>()
     static func refreshNames(note: ((String) -> Void)? = nil) {
         guard let model = AppModel.current else { return }
-        let toys = model.toys.filter { LiveTamaName.savedName($0.id) == nil && !Town.shared.state($0).away }
+        // Devices with no known name are read now; known names are re-checked once per launch
+        // (a Tama may have hatched or been renamed while you played another device).
+        let current = model.emu.toy?.id
+        let toys = model.toys.filter {
+            !Town.shared.state($0).away && ($0.id != current || LiveTamaName.savedName($0.id) == nil)
+                && (LiveTamaName.savedName($0.id) == nil || !namesChecked.contains($0.id))
+        }
         guard !toys.isEmpty else { return }
         nameQueue.async {
             guard !probing, !shared.active, !shared.starting else { return }
@@ -413,6 +420,7 @@ extension IRLink {
             defer { probing = false }
             for t in toys {
                 if shared.active || shared.starting { break }
+                namesChecked.insert(t.id)
                 let log: (String) -> Void = { m in (note ?? { AppModel.current?.emu.note($0) })("name reader: \(t.name): \(m)") }
                 if let n = shared.readName(t, log: log) {
                     log("found \(n)")

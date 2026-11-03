@@ -27,6 +27,14 @@ final class IRLink {
         return Int(b[0])
     }
 
+    /// For GIFT: 0 = this device chose GIVE, 1 = RECEIVE (Wonder Garden EN; others: unknown = -1).
+    static func role(_ h: OpaquePointer, deviceID: String) -> Int {
+        guard deviceID.contains("wondergarden") else { return -1 }
+        var b = [UInt8](repeating: 0, count: 1)
+        guard tg_peek(h, 0xF80178BC, &b, 1) == 1, b[0] <= 1 else { return -1 }
+        return Int(b[0])
+    }
+
     /// Called from the run loop (core locked) whenever the radio state is polled.
     func watch(emu: Emulator, handle h: OpaquePointer, deviceID: String, now: Double) {
         guard !active, !starting, now >= cooldownUntil, IRLink.waiting(h),
@@ -38,9 +46,10 @@ final class IRLink {
         guard !others.isEmpty else { cooldownUntil = now + 5; return }
         starting = true
         let mode = IRLink.mode(h, deviceID: deviceID)
+        let role = IRLink.role(h, deviceID: deviceID)
         let begin: (Toy) -> Void = { [self] partner in
             let t = Thread { [self] in
-                run(emu: emu, me: me, partner: partner, mode: mode)
+                run(emu: emu, me: me, partner: partner, mode: mode, role: role)
                 starting = false
                 cooldownUntil = CACurrentMediaTime() + 5
             }
@@ -62,7 +71,7 @@ final class IRLink {
         for _ in 0..<n { _ = tg_tick(p, 0.02); _ = tg_take_audio(p, audio, 44100) }
     }
 
-    private func run(emu: Emulator, me: Toy, partner: Toy, mode: Int) {
+    private func run(emu: Emulator, me: Toy, partner: Toy, mode: Int, role: Int) {
         let (maybe, _) = Emulator.makeHandle(partner)
         guard let p = maybe else { return }
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
@@ -75,7 +84,9 @@ final class IRLink {
         // B, B enters Connection › Tamagotchi; A picks the mode; for GIFT the visitor receives.
         var keys: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b]
         keys += Array(repeating: .a, count: mode)
-        if mode == 1 { keys += [.b, .a] }
+        // GIFT asks GIVE or RECEIVE: the visitor takes the opposite of what you chose
+        // (RECEIVE when you give or when unsure; GIVE then picks the first thing in the BOX).
+        if mode == 1 { keys += role == 1 ? [.b, .b, .b] : [.b, .a] }
         keys += [.b]
         for k in keys {
             tg_press(p, k.rawValue, CACurrentMediaTime())
@@ -86,6 +97,7 @@ final class IRLink {
         tickAll(p, 25, audio)
         guard IRLink.waiting(p) else {
             emu.note("infrared link: \(partner.name) didn't reach the waiting screen")
+            emu.say("The other device couldn't get ready (is its Tama home and awake?). Nothing was changed.", seconds: 6)
             return
         }
         guard emu.withCore({ h -> Bool in
@@ -103,6 +115,9 @@ final class IRLink {
         let began = last
         var idleSince: Double? = nil
         var sawTraffic = false
+        var bytes = 0
+        var sawDisc = false
+        var trace: [String] = []
         var lastTraffic = CACurrentMediaTime()
         while true {
             let now = CACurrentMediaTime()
@@ -115,6 +130,7 @@ final class IRLink {
                 moved = false
                 let n = tg_ir_take(p, &buf, buf.count)
                 if n > 0 {
+                    bytes += n; trace.append("visitor→you \(n)B " + buf[0..<min(n, 6)].map { String(format: "%02x", $0) }.joined())
                     moved = true; sawTraffic = true; lastTraffic = CACurrentMediaTime()
                     buf.withUnsafeBufferPointer { bp in
                         _ = emu.withCore { h in tg_ir_deliver(h, bp.baseAddress, n) }
@@ -126,6 +142,8 @@ final class IRLink {
                 } ?? -1
                 if m < 0 { break }
                 if m > 0 {
+                    if m == 2 && buf[1] == 0x53 { sawDisc = true }
+                    bytes += m; trace.append("you→visitor \(m)B " + buf[0..<min(m, 6)].map { String(format: "%02x", $0) }.joined())
                     moved = true; sawTraffic = true; lastTraffic = CACurrentMediaTime()
                     buf.withUnsafeBufferPointer { bp in tg_ir_deliver(p, bp.baseAddress, m) }
                 }
@@ -159,14 +177,19 @@ final class IRLink {
         tickAll(p, 100, audio)
         var out: UnsafeMutablePointer<UInt8>? = nil
         var n = 0
-        if tg_snapshot(p, &out, &n) == 1, let out {
+        // only keep the visitor's new state if the exchange really finished; otherwise it stays as it was
+        let finished = sawDisc && bytes > 3000
+        if finished, tg_snapshot(p, &out, &n) == 1, let out {
             let d = Data(bytes: out, count: n)
             tg_free(out, n)
             try? d.write(to: ToyStore.snapURL(partner.id), options: .atomic)
         }
-        if sawTraffic {
+        emu.note("infrared link: \(trace.count) frames, \(bytes) bytes; last frames:\n" + trace.suffix(30).joined(separator: "\n"))
+        if finished {
             let who = LiveTamaName.savedName(partner.id) ?? "Your other Tama"
             emu.say("\(who) has returned home. 💕", seconds: 5)
+        } else if sawTraffic {
+            emu.say("The infrared link stopped early, so nothing was exchanged. Your other device is unchanged. Try again.", seconds: 7)
         }
         emu.note("infrared link ended")
     }

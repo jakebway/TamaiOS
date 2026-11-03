@@ -1,0 +1,1069 @@
+diff --git a/core/src/irpartner.rs b/core/src/irpartner.rs
+new file mode 100644
+index 0000000..be4297b
+--- /dev/null
++++ b/core/src/irpartner.rs
+@@ -0,0 +1,385 @@
++//! A pretend second Tamagotchi on the infrared link.
++//!
++//! The toy talks IrDA: IrLAP (link) > IrLMP (multiplexing) > TinyTP (flow control) > OBEX
++//! (file transfer). When you press B on WAITING it becomes the IrLAP primary and walks the
++//! whole stack against us. This module is the other end: feed it every frame the toy sends
++//! (address, control, data, no checksum) and it says what to send back, if anything.
++//!
++//! What PLAYDATE / GIFT / MARRY turned out to be, as seen from here: an OBEX session where
++//! the toy PUTs a 512-byte "put1.jpg" (a TAMAGO info block), GETs "get1.jpg" (ours), PUTs
++//! "put2.jpg" (the big character data) and GETs "get2.jpg".
++
++use std::collections::{HashMap, VecDeque};
++
++/// Our IrLAP device address.
++pub const OUR_ADDR: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
++/// The link parameters we accept (9600 baud, 500 ms turnaround, 512-byte frames, window 1).
++const QOS: [u8; 21] = [
++    0x01, 0x01, 0x02, 0x82, 0x01, 0x01, 0x83, 0x01, 0x0F, 0x84, 0x01, 0x01, 0x85, 0x01, 0x81, 0x86, 0x01, 0x07, 0x08, 0x01, 0x01,
++];
++/// How many data bytes the toy puts in one frame.
++const PDU_MAX: usize = 477;
++/// How much file data goes in one OBEX packet (the toy's own packet limit is 508).
++const BODY_MAX: usize = 496;
++/// The LSAP (port) the toy's OBEX server listens on.
++const LSAP_OBEX: u8 = 3;
++
++#[derive(Default)]
++pub struct Partner {
++    /// Files the toy PUT to us, by name ("put1.jpg" ...).
++    pub files_in: HashMap<String, Vec<u8>>,
++    /// Files we offer when the toy GETs them ("get1.jpg" ...). A missing one falls back
++    /// to the matching file the toy sent us, so a toy meeting a clone of itself works.
++    pub files_out: HashMap<String, Vec<u8>>,
++    /// Where to save every file the toy sends us (the folder must exist).
++    pub dump_dir: Option<String>,
++
++    caddr: Option<u8>,
++    ns: u8,
++    nr: u8,
++    out: VecDeque<Vec<u8>>,
++    ias_open: bool,
++    obex_open: bool,
++    obex_toy_lsap: u8,
++    rx: Vec<u8>,
++    put_name: String,
++    put_buf: Vec<u8>,
++    get_data: Vec<u8>,
++    get_pos: usize,
++    credit_given: i32,
++    notes: Vec<String>,
++}
++
++fn cstr16(b: &[u8]) -> String {
++    let mut s = String::new();
++    for c in b.chunks(2) {
++        if c.len() < 2 {
++            break;
++        }
++        let u = (c[0] as u16) << 8 | c[1] as u16;
++        if u == 0 {
++            break;
++        }
++        s.push(char::from_u32(u as u32).unwrap_or('?'));
++    }
++    s
++}
++
++impl Partner {
++    pub fn new() -> Partner {
++        Partner::default()
++    }
++
++    /// One frame from the toy in, the frame to answer with out.
++    pub fn handle(&mut self, b: &[u8]) -> (Option<Vec<u8>>, String) {
++        self.notes.clear();
++        let reply = self.frame(b);
++        (reply, self.notes.join("; "))
++    }
++
++    fn note(&mut self, s: impl Into<String>) {
++        self.notes.push(s.into());
++    }
++
++    fn frame(&mut self, b: &[u8]) -> Option<Vec<u8>> {
++        if b.len() < 2 {
++            return None;
++        }
++        let (addr, ctrl) = (b[0], b[1]);
++        if addr == 0xFF {
++            match ctrl & 0xEF {
++                // discovery: answer only the first slot
++                0x2F if b.len() >= 13 && b[12] == 0 => {
++                    self.note("XID slot 0 -> discovery reply");
++                    let mut r = vec![0xFE, 0xBF, 0x01];
++                    r.extend_from_slice(&OUR_ADDR);
++                    r.extend_from_slice(&b[3..7]);
++                    r.extend_from_slice(&[0x00, 0x00, 0x00, 0x80, 0x20, 0x00]);
++                    r.extend_from_slice(b"TMGC");
++                    return Some(r);
++                }
++                // connect request
++                0x83 if b.len() >= 11 => return Some(self.snrm(b)),
++                _ => return None,
++            }
++        }
++        let caddr = self.caddr?;
++        if addr != caddr | 1 {
++            return None;
++        }
++        let poll = ctrl & 0x10 != 0;
++        if ctrl & 1 == 0 {
++            // information frame
++            let ns_in = (ctrl >> 1) & 7;
++            if ns_in == self.nr {
++                self.nr = (self.nr + 1) & 7;
++                self.link_data(&b[2..]);
++            } else {
++                self.note(format!("I-frame out of order (got {} want {})", ns_in, self.nr));
++            }
++            return if poll { Some(self.turn()) } else { None };
++        }
++        if ctrl & 3 == 1 {
++            // supervisory: RR/RNR/REJ/SREJ, all just a turn for us
++            return if poll { Some(self.turn()) } else { None };
++        }
++        match ctrl & 0xEF {
++            0x43 => {
++                self.note("DISC -> UA");
++                self.reset_link();
++                Some(vec![caddr, 0x73])
++            }
++            0x83 => Some(self.snrm(b)),
++            _ => None,
++        }
++    }
++
++    fn reset_link(&mut self) {
++        self.ns = 0;
++        self.nr = 0;
++        self.out.clear();
++        self.ias_open = false;
++        self.obex_open = false;
++        self.rx.clear();
++        self.get_data.clear();
++        self.get_pos = 0;
++    }
++
++    fn snrm(&mut self, b: &[u8]) -> Vec<u8> {
++        self.reset_link();
++        let caddr = b[10];
++        self.caddr = Some(caddr);
++        self.note(format!("SNRM conn addr {:02x} -> UA", caddr));
++        let mut r = vec![caddr, 0x73];
++        r.extend_from_slice(&b[6..10]);
++        r.extend_from_slice(&b[2..6]);
++        r.extend_from_slice(&QOS);
++        r
++    }
++
++    /// The toy gave us the turn: send the next queued message, or just an acknowledgement.
++    fn turn(&mut self) -> Vec<u8> {
++        let caddr = self.caddr.unwrap_or(0);
++        if let Some(pdu) = self.out.pop_front() {
++            let ctrl = (self.nr << 5) | 0x10 | (self.ns << 1);
++            self.ns = (self.ns + 1) & 7;
++            let mut r = vec![caddr, ctrl];
++            r.extend_from_slice(&pdu);
++            r
++        } else {
++            vec![caddr, (self.nr << 5) | 0x10 | 1]
++        }
++    }
++
++    /// IrLMP: one frame's worth of data.
++    fn link_data(&mut self, d: &[u8]) {
++        if d.len() < 2 {
++            return;
++        }
++        let (b0, b1) = (d[0], d[1]);
++        if b0 & 0x80 != 0 {
++            // link control
++            let dlsap = b0 & 0x7F;
++            let slsap = b1 & 0x7F;
++            match d.get(2).copied() {
++                Some(0x01) => {
++                    if dlsap == 0 {
++                        self.note("LM connect IAS");
++                        self.ias_open = true;
++                        self.out.push_back(vec![slsap | 0x80, 0x00, 0x81, 0x00]);
++                    } else if dlsap == LSAP_OBEX {
++                        self.note("LM connect OBEX");
++                        self.obex_open = true;
++                        self.obex_toy_lsap = slsap;
++                        self.rx.clear();
++                        self.credit_given = 127;
++                        self.out.push_back(vec![slsap | 0x80, LSAP_OBEX, 0x81, 0x00, 0x7F]);
++                    }
++                }
++                Some(0x02) => {
++                    self.note(format!("LM disconnect lsap {}", dlsap));
++                    if dlsap == 0 {
++                        self.ias_open = false;
++                    } else if dlsap == LSAP_OBEX {
++                        self.obex_open = false;
++                    }
++                }
++                _ => {}
++            }
++            return;
++        }
++        let payload = &d[2..];
++        if b0 == 0 {
++            self.ias(b1 & 0x7F, payload);
++        } else if b0 == LSAP_OBEX {
++            if payload.is_empty() {
++                return;
++            }
++            let data = &payload[1..];
++            if data.is_empty() {
++                return; // credit only
++            }
++            self.credit_given -= 1;
++            self.rx.extend_from_slice(data);
++            self.obex_rx();
++            if self.credit_given < 40 {
++                let more = (127 - self.credit_given).clamp(1, 127) as u8;
++                self.credit_given += more as i32;
++                self.out.push_back(vec![self.obex_toy_lsap, LSAP_OBEX, more]);
++            }
++        }
++    }
++
++    /// IAS, the toy's directory of ports: only the OBEX port lookup is answered.
++    fn ias(&mut self, toy_lsap: u8, p: &[u8]) {
++        if p.first().map(|x| x & 0x7F) != Some(4) || p.len() < 3 {
++            return;
++        }
++        let cl = p[1] as usize;
++        if p.len() < 3 + cl {
++            return;
++        }
++        let class = &p[2..2 + cl];
++        let al = p[2 + cl] as usize;
++        let attr = p.get(3 + cl..3 + cl + al).unwrap_or(&[]);
++        let class_s = String::from_utf8_lossy(class).to_string();
++        let attr_s = String::from_utf8_lossy(attr).to_string();
++        self.note(format!("IAS {}/{}", class_s, attr_s));
++        let mut r = vec![toy_lsap, 0x00, 0x84];
++        if class_s == "OBEX" && attr_s == "IrDA:TinyTP:LsapSel" {
++            r.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, LSAP_OBEX]);
++        } else {
++            r.push(0x01);
++        }
++        self.out.push_back(r);
++    }
++
++    /// Whole OBEX packets out of the byte stream (the toy cuts them into frames at will).
++    fn obex_rx(&mut self) {
++        loop {
++            if self.rx.len() < 3 {
++                return;
++            }
++            let len = (self.rx[1] as usize) << 8 | self.rx[2] as usize;
++            if len < 3 {
++                self.rx.clear();
++                return;
++            }
++            if self.rx.len() < len {
++                return;
++            }
++            let pkt: Vec<u8> = self.rx.drain(..len).collect();
++            self.obex_packet(&pkt);
++        }
++    }
++
++    /// Headers of an OBEX packet: (name, body, end-of-body flag).
++    fn headers(p: &[u8]) -> (Option<String>, Vec<u8>, bool) {
++        let mut i = 0;
++        let (mut name, mut body, mut end) = (None, Vec::new(), false);
++        while i < p.len() {
++            let id = p[i];
++            let n = match id >> 6 {
++                0 | 1 => {
++                    if i + 3 > p.len() {
++                        break;
++                    }
++                    let l = (p[i + 1] as usize) << 8 | p[i + 2] as usize;
++                    if l < 3 || i + l > p.len() {
++                        break;
++                    }
++                    let v = &p[i + 3..i + l];
++                    match id {
++                        0x01 => name = Some(cstr16(v)),
++                        0x48 => body.extend_from_slice(v),
++                        0x49 => {
++                            body.extend_from_slice(v);
++                            end = true;
++                        }
++                        _ => {}
++                    }
++                    l
++                }
++                2 => 2,
++                _ => 5,
++            };
++            i += n;
++        }
++        (name, body, end)
++    }
++
++    fn obex_packet(&mut self, p: &[u8]) {
++        let op = p[0];
++        match op {
++            0x80 => {
++                self.note("OBEX connect");
++                self.obex_send(&[0xA0, 0x00, 0x07, 0x10, 0x00, 0x01, 0xFC]);
++            }
++            0x81 => {
++                self.note("OBEX disconnect");
++                self.obex_send(&[0xA0, 0x00, 0x03]);
++            }
++            0x02 | 0x82 => {
++                let (name, body, end) = Self::headers(&p[3..]);
++                if let Some(n) = name {
++                    self.put_name = n;
++                    self.put_buf.clear();
++                }
++                self.put_buf.extend_from_slice(&body);
++                let last = op == 0x82 || end;
++                if last {
++                    let name = self.put_name.clone();
++                    let data = std::mem::take(&mut self.put_buf);
++                    self.note(format!("OBEX put {} complete, {} bytes", name, data.len()));
++                    if let Some(dir) = &self.dump_dir {
++                        let _ = std::fs::write(format!("{}/{}", dir, name), &data);
++                    }
++                    self.files_in.insert(name, data);
++                    self.obex_send(&[0xA0, 0x00, 0x03]);
++                } else {
++                    self.obex_send(&[0x90, 0x00, 0x03]);
++                }
++            }
++            0x03 | 0x83 => {
++                let (name, _, _) = Self::headers(&p[3..]);
++                if let Some(n) = name {
++                    let data = self.files_out.get(&n).cloned().or_else(|| self.files_in.get(&n.replacen("get", "put", 1)).cloned());
++                    self.note(format!("OBEX get {} ({} bytes available)", n, data.as_ref().map_or(0, |d| d.len())));
++                    match data {
++                        Some(d) => {
++                            self.get_data = d;
++                            self.get_pos = 0;
++                        }
++                        None => {
++                            self.obex_send(&[0xC4, 0x00, 0x03]);
++                            return;
++                        }
++                    }
++                }
++                let left = self.get_data.len().saturating_sub(self.get_pos);
++                let n = left.min(BODY_MAX);
++                let last = n == left;
++                let chunk = self.get_data[self.get_pos..self.get_pos + n].to_vec();
++                self.get_pos += n;
++                let hl = n + 3;
++                let tl = hl + 3;
++                let mut r = vec![if last { 0xA0 } else { 0x90 }, (tl >> 8) as u8, tl as u8, if last { 0x49 } else { 0x48 }, (hl >> 8) as u8, hl as u8];
++                r.extend_from_slice(&chunk);
++                self.obex_send(&r);
++            }
++            _ => {
++                self.note(format!("OBEX opcode {:02x} not handled", op));
++                self.obex_send(&[0xD0, 0x00, 0x03]);
++            }
++        }
++    }
++
++    /// An OBEX packet to the toy, cut into frames the way the toy does it.
++    fn obex_send(&mut self, pkt: &[u8]) {
++        for (i, c) in pkt.chunks(PDU_MAX).enumerate() {
++            let mut v = vec![self.obex_toy_lsap, LSAP_OBEX, if i == 0 { 0x01 } else { 0x00 }];
++            v.extend_from_slice(c);
++            self.out.push_back(v);
++        }
++    }
++}
+diff --git a/core/src/lib.rs b/core/src/lib.rs
+index d0a2909..0c2d621 100644
+--- a/core/src/lib.rs
++++ b/core/src/lib.rs
+@@ -5,6 +5,7 @@
+ //! Android alike.
+ 
+ pub mod cpu;
++pub mod irpartner;
+ pub mod machine;
+ pub mod png;
+ pub mod radio;
+diff --git a/core/src/machine.rs b/core/src/machine.rs
+index f476e05..66354ee 100644
+--- a/core/src/machine.rs
++++ b/core/src/machine.rs
+@@ -418,6 +418,8 @@ impl Machine {
+                 }
+                 continue;
+             }
++            self.sys.ir_pc = pc;
++            self.sys.ir_thumb = self.cpu.cpsr & 0x20 != 0;
+             self.cpu.step(&mut self.sys);
+             done += 1;
+             if self.sys.stop || self.cpu.fault.is_some() {
+@@ -447,6 +449,11 @@ impl Machine {
+             let ran = self.exec(n, 1);
+             self.executed += ran + self.spin_skipped;
+             self.spin_skipped = 0;
++            self.sys.ir_pc = self.cpu.r[15];
++            self.sys.ir_thumb = self.cpu.cpsr & 0x20 != 0;
++            if crate::sys::ir_take_dump_request() {
++                self.sys.ir_dump_code();
++            }
+             if let Some(out) = self.check_stop() {
+                 return out;
+             }
+diff --git a/core/src/sys.rs b/core/src/sys.rs
+index a4970c0..f22c0b2 100644
+--- a/core/src/sys.rs
++++ b/core/src/sys.rs
+@@ -9,6 +9,457 @@ use std::hash::{BuildHasherDefault, Hasher};
+ use crate::cpu::Bus;
+ use crate::*;
+ 
++// --- infrared trace (TG18_IR_TRACE=<file>) --------------------------------
++//
++// With the variable set, the first IR access no longer stops the game (and the
++// port stays a real register block instead of turning into plain memory).
++// The file gets:
++//   * every WRITE to the UART:      `t_us offset W size value`
++//   * a READ only when its value differs from the previous read of that
++//     register (or is the first read after a write): `t_us offset R size value`
++//   * `# N identical reads skipped` summaries, so waiting for a partner costs
++//     a few lines per second instead of millions
++//   * `# CODE ...` lines: the machine code around the polling loop, to read
++//     what the firmware tests (printed after 20000 and 20000000 status reads)
++// Time is the emulated clock, refreshed every 1000 instructions (~10 us).
++
++static IR_TRACE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++static IR_WANT_DUMP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++/// What the status register (+0x10) reads while tracing. Bit 4 = receive FIFO
++/// empty (cleared while bytes wait), bit 14 = transmitter ready (interrupt
++/// source), bit 7 = transmitter empty, bit 5 = transmit FIFO full, bit 3 = busy.
++/// Override with TG18_IR_STATUS=<hex>.
++static IR_STATUS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x4090);
++/// Interrupt number of the UART (the firmware registers interrupt 14 for it).
++static IR_IRQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(14);
++/// Value of +0x04 while received bytes are waiting (TG18_IR_ISR=<hex>).
++static IR_ISR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++/// Test bytes to feed the firmware (TG18_IR_RX=<hex bytes>), once, TG18_IR_RX_DELAY
++/// seconds (default 2) after the firmware first switches the port to 0x341.
++static IR_RX: std::sync::Mutex<std::collections::VecDeque<u8>> = std::sync::Mutex::new(std::collections::VecDeque::new());
++static IR_RX_DATA: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
++static IR_RX_DUE: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
++static IR_RX_DELAY: std::sync::Mutex<f64> = std::sync::Mutex::new(2.0);
++/// Further frames (TG18_IR_RX is ';'-separated). Each is sent TG18_IR_RX_GAP seconds
++/// (default 0.05) after the toy finishes sending a frame (it writes the EOF byte 0xC1).
++/// A frame written with a leading '+' is instead sent TG18_IR_RX_STEP seconds (default 0.3)
++/// after the previous one was fed in, for frames the toy does not answer.
++static IR_RX_NEXT: std::sync::Mutex<std::collections::VecDeque<(bool, Vec<u8>)>> = std::sync::Mutex::new(std::collections::VecDeque::new());
++static IR_RX_GAP: std::sync::Mutex<f64> = std::sync::Mutex::new(0.05);
++static IR_RX_STEP: std::sync::Mutex<f64> = std::sync::Mutex::new(0.3);
++static IR_RX_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++static IR_DUMP_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++static IR_DUMP_THUMB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++static IR_TRACE: std::sync::Mutex<Option<IrTrace>> = std::sync::Mutex::new(None);
++const IR_TRACE_MAX_LINES: u64 = 400_000;
++
++struct IrTrace {
++    out: std::io::LineWriter<std::fs::File>,
++    last_read: std::collections::HashMap<u32, u32>,
++    skipped: u64,
++    status_reads: u64,
++    tx_dumps: u64,
++    rx_dumps: u64,
++    lines: u64,
++}
++
++pub fn ir_trace_init() {
++    use std::io::Write;
++    if IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
++        return; // already open (the machine can be rebuilt)
++    }
++    if let Some(path) = std::env::var_os("TG18_IR_TRACE") {
++        if let Ok(f) = std::fs::File::create(&path) {
++            let mut t = IrTrace {
++                out: std::io::LineWriter::new(f),
++                last_read: std::collections::HashMap::new(),
++                skipped: 0,
++                status_reads: 0,
++                tx_dumps: 0,
++                rx_dumps: 0,
++                lines: 0,
++            };
++            let _ = writeln!(t.out, "# t_us offset dir size value");
++            if let Some(v) = std::env::var("TG18_IR_STATUS").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
++                IR_STATUS.store(v, std::sync::atomic::Ordering::Relaxed);
++            }
++            if let Ok(v) = std::env::var("TG18_IR_RX") {
++                let mut frames: Vec<(bool, Vec<u8>)> = Vec::new();
++                for part in v.split(';') {
++                    let timed = part.trim_start().starts_with('+');
++                    let hex: String = part.chars().filter(|c| c.is_ascii_hexdigit()).collect();
++                    let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
++                    if !bytes.is_empty() {
++                        let _ = writeln!(t.out, "# will feed frame {}: {} byte(s): {}", frames.len(), bytes.len(), hex);
++                        frames.push((timed, bytes));
++                    }
++                }
++                if !frames.is_empty() {
++                    *IR_RX_DATA.lock().unwrap() = frames.remove(0).1;
++                    IR_RX_NEXT.lock().unwrap().extend(frames);
++                }
++            }
++            if std::env::var("TG18_IR_PARTNER").is_ok() {
++                let mut p = crate::irpartner::Partner::new();
++                p.dump_dir = std::env::var("TG18_IR_DUMP").ok();
++                *IR_PARTNER.lock().unwrap() = Some(p);
++                let _ = writeln!(t.out, "# partner: built-in IR partner on");
++            }
++            if let Ok(v) = std::env::var("TG18_IR_REACT") {
++                let mut rules = IR_REACT.lock().unwrap();
++                for rule in v.split(';') {
++                    if let Some((p, r)) = rule.split_once('>') {
++                        // optional "*N" at the end: use this rule at most N times
++                        let (r, maxn) = match r.rsplit_once('*') {
++                            Some((a, n)) => (a, n.trim().parse::<u32>().unwrap_or(0)),
++                            None => (r, 0),
++                        };
++                        IR_REACT_MAX.lock().unwrap().push((maxn, 0));
++                        let pat: Vec<Option<u8>> = p.split('.').map(|t| u8::from_str_radix(t, 16).ok()).collect();
++                        let resp: Vec<String> = r.split('.').map(|t| t.to_string()).collect();
++                        let _ = writeln!(t.out, "# partner rule {}: {} > {}", rules.len(), p, r);
++                        rules.push((pat, resp));
++                    }
++                }
++            }
++            if let Some(g) = std::env::var("TG18_IR_RX_GAP").ok().and_then(|v| v.parse::<f64>().ok()) {
++                *IR_RX_GAP.lock().unwrap() = g;
++            }
++            if let Some(g) = std::env::var("TG18_IR_RX_STEP").ok().and_then(|v| v.parse::<f64>().ok()) {
++                *IR_RX_STEP.lock().unwrap() = g;
++            }
++            if let Some(d) = std::env::var("TG18_IR_RX_DELAY").ok().and_then(|v| v.parse::<f64>().ok()) {
++                *IR_RX_DELAY.lock().unwrap() = d;
++            }
++            if let Some(n) = std::env::var("TG18_IR_IRQ").ok().and_then(|v| v.parse::<u32>().ok()) {
++                IR_IRQ.store(n, std::sync::atomic::Ordering::Relaxed);
++            }
++            if let Some(v) = std::env::var("TG18_IR_ISR").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
++                IR_ISR.store(v, std::sync::atomic::Ordering::Relaxed);
++            }
++            *IR_TRACE.lock().unwrap() = Some(t);
++            IR_TRACE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
++        }
++    }
++}
++
++/// True once if the trace wants the machine code around the current pc dumped.
++pub fn ir_take_dump_request() -> bool {
++    IR_WANT_DUMP.swap(false, std::sync::atomic::Ordering::Relaxed)
++}
++
++static IR_LAST_MASK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0xFFFF_FFFF);
++
++/// Log changes of the interrupt mask, with the interrupt numbers it leaves on
++/// (bit 32-n clear = interrupt n on). Shows which interrupt the UART uses.
++fn ir_mask_note(now: f64, mask: u32) {
++    if IR_LAST_MASK.swap(mask, std::sync::atomic::Ordering::Relaxed) == mask {
++        return;
++    }
++    let on: Vec<String> = (1..=32u32).filter(|n| (mask >> (32 - n)) & 1 == 0).map(|n| n.to_string()).collect();
++    ir_note(&format!("INTC mask t={:.1} value={:08X} enabled interrupts: {}", now * 1e6, mask, on.join(" ")));
++}
++
++fn ir_note(text: &str) {
++    use std::io::Write;
++    if let Some(t) = IR_TRACE.lock().unwrap().as_mut() {
++        let _ = writeln!(t.out, "# {}", text);
++    }
++}
++
++/// Partner rules (TG18_IR_REACT=<rule>;<rule>...): each rule is `PATTERN>RESPONSE`, dot-separated
++/// byte tokens. PATTERN is matched against the start of a frame the toy sent (address, control,
++/// data, no checksum); `xx` matches any byte. RESPONSE is sent back (framed, checksummed) about
++/// TG18_IR_RX_GAP seconds after the toy's frame ends; `@N` copies byte N of the toy's frame,
++/// `@N+K` copies K bytes from N. The first matching rule wins.
++static IR_REACT: std::sync::Mutex<Vec<(Vec<Option<u8>>, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
++static IR_PARTNER: std::sync::Mutex<Option<crate::irpartner::Partner>> = std::sync::Mutex::new(None);
++static IR_REACT_MAX: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
++static IR_REACT_OUT: std::sync::Mutex<std::collections::VecDeque<(f64, Vec<u8>)>> = std::sync::Mutex::new(std::collections::VecDeque::new());
++static IR_REACT_DEFRAME: std::sync::Mutex<(bool, bool, Vec<u8>)> = std::sync::Mutex::new((false, false, Vec::new()));
++
++fn ir_fcs16(data: &[u8]) -> u16 {
++    let mut fcs: u16 = 0xFFFF;
++    for &b in data {
++        fcs ^= b as u16;
++        for _ in 0..8 {
++            fcs = if fcs & 1 != 0 { (fcs >> 1) ^ 0x8408 } else { fcs >> 1 };
++        }
++    }
++    fcs ^ 0xFFFF
++}
++
++fn ir_build_frame(body: &[u8]) -> Vec<u8> {
++    let f = ir_fcs16(body);
++    let mut full = body.to_vec();
++    full.push((f & 0xFF) as u8);
++    full.push((f >> 8) as u8);
++    let mut out = vec![0xC0u8; 4];
++    for b in full {
++        if b == 0xC0 || b == 0xC1 || b == 0x7D {
++            out.push(0x7D);
++            out.push(b ^ 0x20);
++        } else {
++            out.push(b);
++        }
++    }
++    out.push(0xC1);
++    out
++}
++
++fn ir_react_expand(tokens: &[String], recv: &[u8]) -> Vec<u8> {
++    let mut out = Vec::new();
++    for t in tokens {
++        if let Some(rest) = t.strip_prefix('@') {
++            let (a, n) = match rest.split_once('+') {
++                Some((a, n)) => (a.parse::<usize>().unwrap_or(0), n.parse::<usize>().unwrap_or(1)),
++                None => (rest.parse::<usize>().unwrap_or(0), 1),
++            };
++            for i in a..a + n {
++                out.push(*recv.get(i).unwrap_or(&0));
++            }
++        } else if let Ok(b) = u8::from_str_radix(t, 16) {
++            out.push(b);
++        }
++    }
++    out
++}
++
++fn ir_react_match(now: f64, body: &[u8]) -> Option<(f64, Vec<u8>, String)> {
++    if let Some(p) = IR_PARTNER.lock().unwrap().as_mut() {
++        let (resp, note) = p.handle(body);
++        let hex: String = body.iter().take(24).map(|x| format!("{:02x}", x)).collect();
++        let gap = *IR_RX_GAP.lock().unwrap();
++        return Some(match resp {
++            Some(r) => (now + gap, ir_build_frame(&r), format!("PARTNER t={:.1} toy {}.. [{}] -> reply {} byte(s)", now * 1e6, hex, note, r.len())),
++            None => (f64::MAX, Vec::new(), format!("PARTNER t={:.1} toy {}.. [{}] -> no reply", now * 1e6, hex, note)),
++        });
++    }
++    let rules = IR_REACT.lock().unwrap();
++    let mut maxes = IR_REACT_MAX.lock().unwrap();
++    for (i, (pat, resp)) in rules.iter().enumerate() {
++        if let Some(m) = maxes.get(i) {
++            if m.0 != 0 && m.1 >= m.0 {
++                continue;
++            }
++        }
++        if body.len() >= pat.len() && pat.iter().zip(body.iter()).all(|(p, x)| p.map_or(true, |v| v == *x)) {
++            if let Some(m) = maxes.get_mut(i) {
++                m.1 += 1;
++            }
++            let out = ir_react_expand(resp, body);
++            let frame = ir_build_frame(&out);
++            let gap = *IR_RX_GAP.lock().unwrap();
++            let hex: String = body.iter().map(|x| format!("{:02x}", x)).collect();
++            return Some((now + gap, frame, format!("REACT rule {} matched toy frame {} at t={:.1}", i, hex, now * 1e6)));
++        }
++    }
++    let hex: String = body.iter().map(|x| format!("{:02x}", x)).collect();
++    Some((f64::MAX, Vec::new(), format!("REACT no rule for toy frame {} at t={:.1}", hex, now * 1e6)))
++}
++
++/// Feed one byte the toy transmitted; returns a reaction once a whole frame has been seen.
++fn ir_react_feed(now: f64, b: u8) -> Option<(f64, Vec<u8>, String)> {
++    if IR_REACT.lock().unwrap().is_empty() && IR_PARTNER.lock().unwrap().is_none() {
++        return None;
++    }
++    let mut st = IR_REACT_DEFRAME.lock().unwrap();
++    if b == 0xC0 {
++        st.0 = true;
++        st.1 = false;
++        st.2.clear();
++        return None;
++    }
++    if !st.0 {
++        return None;
++    }
++    if b == 0xC1 {
++        st.0 = false;
++        let mut body = std::mem::take(&mut st.2);
++        drop(st);
++        if body.len() < 4 {
++            return None;
++        }
++        body.truncate(body.len() - 2);
++        return ir_react_match(now, &body);
++    }
++    if st.1 {
++        st.1 = false;
++        st.2.push(b ^ 0x20);
++    } else if b == 0x7D {
++        st.1 = true;
++    } else {
++        st.2.push(b);
++    }
++    None
++}
++
++static IR_GPIO_LAST: std::sync::Mutex<Option<std::collections::HashMap<u32, u32>>> = std::sync::Mutex::new(None);
++static IR_GPIO_LINES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++
++/// Log reads and writes of the GPIO pin block (plain memory here, so the UART trace
++/// never saw it): a read only when its value changed, a write only when it changes
++/// what was last written. Lines look like `t G<offset> R|W size value pc=...`.
++fn ir_gpio_log(now: f64, pc: u32, off: u32, write: bool, size: u32, val: u32) {
++    use std::io::Write;
++    {
++        let mut last = IR_GPIO_LAST.lock().unwrap();
++        let map = last.get_or_insert_with(std::collections::HashMap::new);
++        let key = off | if write { 0x8000_0000 } else { 0 };
++        if map.get(&key) == Some(&val) {
++            return;
++        }
++        map.insert(key, val);
++    }
++    if IR_GPIO_LINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 30_000 {
++        return;
++    }
++    let mut g = IR_TRACE.lock().unwrap();
++    if let Some(t) = g.as_mut() {
++        let _ = writeln!(t.out, "{:.1} G{:03X} {} {} {:X} pc={:08X}", now * 1e6, off, if write { 'W' } else { 'R' }, size, val, pc);
++    }
++}
++
++fn ir_rx_len() -> usize {
++    IR_RX.lock().unwrap().len()
++}
++
++fn ir_rx_pop() -> u8 {
++    IR_RX.lock().unwrap().pop_front().unwrap_or(0)
++}
++
++/// The firmware just started a session: schedule the test bytes.
++fn ir_arm_rx(now: f64) {
++    if IR_RX_DONE.load(std::sync::atomic::Ordering::Relaxed) || IR_RX_DATA.lock().unwrap().is_empty() {
++        return;
++    }
++    let delay = *IR_RX_DELAY.lock().unwrap();
++    let mut due = IR_RX_DUE.lock().unwrap();
++    if due.is_none() {
++        *due = Some(now + delay);
++    }
++}
++
++/// Called as emulated time advances: deliver the test bytes when they are due.
++fn ir_rx_tick(now: f64) {
++    if !IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
++        return;
++    }
++    let ready_frame: Option<Vec<u8>> = {
++        let mut q = IR_REACT_OUT.lock().unwrap();
++        let ready = match q.front() {
++            Some(f) => now >= f.0,
++            None => false,
++        };
++        if ready { q.pop_front().map(|f| f.1) } else { None }
++    };
++    if let Some(f) = ready_frame {
++        IR_RX.lock().unwrap().extend(f.iter().copied());
++        ir_note(&format!("REACT injected {} byte(s) at t={:.1}", f.len(), now * 1e6));
++    }
++    let mut due = IR_RX_DUE.lock().unwrap();
++    let current: Option<f64> = *due;
++    if let Some(t) = current {
++        if now >= t {
++            *due = None;
++            let first = !IR_RX_DONE.swap(true, std::sync::atomic::Ordering::Relaxed);
++            let data: Vec<u8> = if first {
++                IR_RX_DATA.lock().unwrap().clone()
++            } else {
++                IR_RX_NEXT.lock().unwrap().pop_front().map(|f| f.1).unwrap_or_default()
++            };
++            let next_timed: bool = IR_RX_NEXT.lock().unwrap().front().map(|f| f.0).unwrap_or(false);
++            if next_timed {
++                *due = Some(now + *IR_RX_STEP.lock().unwrap());
++            }
++            IR_RX.lock().unwrap().extend(data.iter().copied());
++            drop(due);
++            ir_note(&format!("INJECTED {} byte(s) at t={:.1}", data.len(), now * 1e6));
++        }
++    }
++}
++
++fn ir_log(now: f64, pc: u32, thumb: bool, off: u32, write: bool, size: u32, val: u32) {
++    use std::io::Write;
++    let mut g = IR_TRACE.lock().unwrap();
++    let t = match g.as_mut() {
++        Some(t) => t,
++        None => return,
++    };
++    let mut want_dump = false;
++    if write && off == 0x0C && val == 0x341 {
++        ir_arm_rx(now);
++    }
++    if write && off == 0 {
++        if let Some((due, frame, note)) = ir_react_feed(now, (val & 0xFF) as u8) {
++            let _ = writeln!(t.out, "# {}", note);
++            if !frame.is_empty() {
++                IR_REACT_OUT.lock().unwrap().push_back((due, frame));
++            }
++        }
++    }
++    // The toy just finished a frame (EOF byte): schedule the next scripted frame.
++    if write && off == 0 && (val & 0xFF) == 0xC1 && IR_RX_DONE.load(std::sync::atomic::Ordering::Relaxed) {
++        if !IR_RX_NEXT.lock().unwrap().is_empty() {
++            let gap = *IR_RX_GAP.lock().unwrap();
++            let mut due = IR_RX_DUE.lock().unwrap();
++            if due.is_none() {
++                *due = Some(now + gap);
++            }
++        }
++    }
++    if !write {
++        if off == 0x10 {
++            t.status_reads += 1;
++            if t.status_reads == 20_000 || t.status_reads == 20_000_000 {
++                want_dump = true;
++            }
++        }
++        if (off == 0x00 || off == 0x04) && IR_RX_DONE.load(std::sync::atomic::Ordering::Relaxed) && t.rx_dumps < 4 {
++            t.rx_dumps += 1;
++            want_dump = true;
++        }
++    } else if off == 0 && t.tx_dumps < 3 {
++        t.tx_dumps += 1;
++        want_dump = true;
++    }
++    if want_dump {
++        IR_DUMP_PC.store(pc, std::sync::atomic::Ordering::Relaxed);
++        IR_DUMP_THUMB.store(thumb, std::sync::atomic::Ordering::Relaxed);
++        IR_WANT_DUMP.store(true, std::sync::atomic::Ordering::Relaxed);
++    }
++    if !write {
++        if t.last_read.get(&off) == Some(&val) {
++            t.skipped += 1;
++            if t.skipped % 50_000_000 == 0 {
++                let _ = writeln!(t.out, "# still waiting: {} identical reads so far (t={:.1})", t.skipped, now * 1e6);
++            }
++            return;
++        }
++        t.last_read.insert(off, val);
++    }
++    if t.skipped > 0 {
++        let _ = writeln!(t.out, "# {} identical reads skipped, until t={:.1}", t.skipped, now * 1e6);
++        t.skipped = 0;
++    }
++    if write {
++        t.last_read.clear();
++    }
++    if t.lines >= IR_TRACE_MAX_LINES {
++        return;
++    }
++    t.lines += 1;
++    let _ = writeln!(
++        t.out,
++        "{:.1} {:02X} {} {} {:X}",
++        now * 1e6,
++        off,
++        if write { 'W' } else { 'R' },
++        size,
++        val
++    );
++}
++
+ /// Identity-style hasher for register addresses (fast, keys are u32).
+ #[derive(Default)]
+ pub struct AddrHasher(u64);
+@@ -316,6 +767,9 @@ pub struct System {
+     pub gpio: Vec<u8>,
+     pub uart: Vec<u8>,
+     pub uart_is_ram: bool,
++    /// pc and instruction set at the end of the last slice (for the IR trace).
++    pub ir_pc: u32,
++    pub ir_thumb: bool,
+     /// Zero pages mapped on demand for stray accesses (64 KiB each).
+     pub extra: HashMap<u32, Vec<u8>>,
+     pub unmapped: Vec<(u32, u32)>,
+@@ -366,12 +820,15 @@ impl System {
+     pub fn new(image: &[u8]) -> System {
+         let mut ram = vec![0u8; RAM_SIZE];
+         ram[..image.len()].copy_from_slice(image);
++        ir_trace_init();
+         System {
+             ram,
+             sram: vec![0; SRAM_SIZE],
+             gpio: vec![0; GPIO_SIZE],
+             uart: vec![0; UART_SIZE],
+             uart_is_ram: false,
++            ir_pc: 0,
++            ir_thumb: false,
+             extra: HashMap::new(),
+             unmapped: Vec::new(),
+             regs: RegMap::default(),
+@@ -709,20 +1166,33 @@ impl System {
+ 
+     // --- interrupts, time, buttons ---
+ 
+-    fn irq_lines(&self) -> [bool; 4] {
++    fn irq_lines(&self) -> [bool; 5] {
+         [
+             self.rtc_irq_line(),
+             self.timers.iter().any(|t| t.pending),
+             self.lcd_irq_line(),
+             self.adc_irq_line(),
++            self.uart_irq_line(),
+         ]
+     }
+ 
++    /// UART interrupt (trace/probe mode only): bytes are waiting and the
++    /// firmware switched on interrupt bits in the control register.
++    fn uart_irq_line(&self) -> bool {
++        if !IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
++            return false;
++        }
++        let ctrl = self.reg(UART_BASE + 0x08);
++        // receive: bytes waiting and a receive interrupt switched on;
++        // transmit: the firmware switched on the transmit interrupt (bit 14)
++        (ir_rx_len() > 0 && ctrl & 0xA000 != 0) || ctrl & 0x4000 != 0
++    }
++
+     /// Highest-priority unmasked pending IRQ number (1..32), 0 = none.
+     pub fn pending_irq(&self) -> u32 {
+         let mask = self.reg(INTC_MASK);
+         let lines = self.irq_lines();
+-        for (n, on) in [RTC_IRQ, TIMER_IRQ, LCD_IRQ, ADC_IRQ].iter().zip(lines) {
++        for (n, on) in [RTC_IRQ, TIMER_IRQ, LCD_IRQ, ADC_IRQ, IR_IRQ.load(std::sync::atomic::Ordering::Relaxed)].iter().zip(lines) {
+             if on && (mask >> (32 - n)) & 1 == 0 {
+                 return *n;
+             }
+@@ -738,6 +1208,7 @@ impl System {
+     pub fn advance(&mut self, now: f64) {
+         self.game_time += (now - self.now) * self.turbo;
+         self.now = now;
++        ir_rx_tick(now);
+         for n in 0..TIMER_COUNT {
+             self.timer_advance(n);
+         }
+@@ -833,6 +1304,9 @@ impl System {
+     }
+ 
+     fn uart_ir_access(&mut self, addr: u32) {
++        if IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
++            return; // tracing: let the game carry on, the port stays registers
++        }
+         if self.infrared_armed && (UART_BASE..UART_BASE + UART_SIZE as u32).contains(&addr)
+             && UART_IR_REGS.contains(&((addr - UART_BASE) & !3))
+         {
+@@ -879,6 +1353,14 @@ impl System {
+             0xC004_0000 | 0xC004_0004 | 0xC004_0008 => self.tod_read((word - RTC_IRQ_BASE) / 4),
+             0xC009_0010 => 1,
+             0xC009_0014 => self.rtc.data_out,
++            w if w == UART_BASE + 0x10 && IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) => {
++                let base = IR_STATUS.load(std::sync::atomic::Ordering::Relaxed) & !0x10;
++                if ir_rx_len() == 0 { base | 0x10 } else { base }
++            }
++            w if w == UART_BASE && IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) => ir_rx_pop() as u32,
++            w if w == UART_BASE + 0x04 && IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) => {
++                if ir_rx_len() > 0 { IR_ISR.load(std::sync::atomic::Ordering::Relaxed) } else { old }
++            }
+             _ => {
+                 let off = word.wrapping_sub(TIMER_BASE);
+                 if off < (TIMER_COUNT as u32) * 0x20 && off % 0x20 == 0 {
+@@ -892,6 +1374,11 @@ impl System {
+             }
+         };
+         let val = (val >> ((addr & 3) * 8)) & if size == 4 { u32::MAX } else { (1 << (size * 8)) - 1 };
++        if IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed)
++            && (UART_BASE..UART_BASE + UART_SIZE as u32).contains(&addr)
++        {
++            ir_log(self.now, self.ir_pc, self.ir_thumb, addr - UART_BASE, false, size, val);
++        }
+         if self.trace_mmio {
+             self.log_mmio(addr, false, val);
+         }
+@@ -900,6 +1387,12 @@ impl System {
+ 
+     fn mmio_write(&mut self, addr: u32, size: u32, val: u32) {
+         self.uart_ir_access(addr);
++        if IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed)
++            && (UART_BASE..UART_BASE + UART_SIZE as u32).contains(&addr)
++        {
++            let v = if size == 4 { val } else { val & ((1u32 << (size * 8)) - 1) };
++            ir_log(self.now, self.ir_pc, self.ir_thumb, addr - UART_BASE, true, size, v);
++        }
+         if self.trace_mmio {
+             self.log_mmio(addr, true, val);
+         }
+@@ -909,6 +1402,9 @@ impl System {
+         self.mmio_writes += 1;
+         let old = self.reg(word);
+         let new = (old & !mask) | ((val << sh) & mask);
++        if word == INTC_MASK && IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
++            ir_mask_note(self.now, new);
++        }
+         let off = word.wrapping_sub(TIMER_BASE);
+         if off < (TIMER_COUNT as u32) * 0x20 && off % 0x20 == 0 {
+             let n = (off / 0x20) as usize;
+@@ -1032,6 +1528,20 @@ impl System {
+         }
+     }
+ 
++    /// IR trace: write the 512 bytes of code around the current pc to the trace.
++    pub fn ir_dump_code(&mut self) {
++        let pc = IR_DUMP_PC.load(std::sync::atomic::Ordering::Relaxed);
++        let thumb = IR_DUMP_THUMB.load(std::sync::atomic::Ordering::Relaxed);
++        let start = pc.wrapping_sub(0x180) & !1;
++        let mut hex = String::new();
++        for i in 0..0x400u32 {
++            let b = self.peek8(start.wrapping_add(i));
++            hex.push_str(&format!("{:02x}", b));
++        }
++        ir_note(&format!("CODE pc={:08X} thumb={} start={:08X}", pc, thumb as u8, start));
++        ir_note(&format!("HEX {}", hex));
++    }
++
+     /// Make the infrared port plain memory ("idle, nothing received").
+     pub fn uart_to_ram(&mut self) {
+         if self.uart_is_ram {
+@@ -1108,7 +1618,7 @@ const SRAM_END: u32 = SRAM_BASE + SRAM_SIZE as u32;
+ impl System {
+     #[inline(never)]
+     fn slow_read(&mut self, addr: u32, size: u32) -> u32 {
+-        match self.plain(addr) {
++        let r = match self.plain(addr) {
+             Some((m, o)) if o + size as usize <= m.len() => {
+                 let mut v = 0u32;
+                 for i in (0..size as usize).rev() {
+@@ -1118,11 +1628,18 @@ impl System {
+             }
+             Some(_) => 0,
+             None => self.mmio_read(addr, size),
++        };
++        if addr >= GPIO_BASE && addr < GPIO_BASE + GPIO_SIZE as u32 && IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
++            ir_gpio_log(self.now, self.ir_pc, addr - GPIO_BASE, false, size, r);
+         }
++        r
+     }
+ 
+     #[inline(never)]
+     fn slow_write(&mut self, addr: u32, size: u32, val: u32) {
++        if addr >= GPIO_BASE && addr < GPIO_BASE + GPIO_SIZE as u32 && IR_TRACE_ON.load(std::sync::atomic::Ordering::Relaxed) {
++            ir_gpio_log(self.now, self.ir_pc, addr - GPIO_BASE, true, size, val);
++        }
+         match self.plain(addr) {
+             Some((m, o)) if o + size as usize <= m.len() => {
+                 for i in 0..size as usize {

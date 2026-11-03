@@ -254,6 +254,19 @@ pub extern "C" fn tg_rtc_seconds(y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u3
 
 // --- creating ------------------------------------------------------------------
 
+/// Switch on the built-in infrared partner (a pretend second toy that answers the toy's
+/// PLAYDATE / GIFT / MARRY infrared connection). The core reads these two settings when
+/// it builds a toy; the trace goes nowhere.
+fn ir_partner_setup() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("TG18_IR_TRACE").is_none() {
+            std::env::set_var("TG18_IR_TRACE", "/dev/null");
+        }
+        std::env::set_var("TG18_IR_PARTNER", "1");
+    });
+}
+
 /// Boot a toy from its newest save. `snap` = autosave snapshot bytes,
 /// `flash` = the toy's own flash save with `meta` (its JSON), any may be null.
 /// `rtc_now` = tg_rtc_seconds for the local time now. On success `elapsed`
@@ -270,6 +283,7 @@ pub extern "C" fn tg_create(
     rtc_now: f64,
     elapsed: *mut f64,
 ) -> *mut Emu {
+    ir_partner_setup();
     let rom = match unsafe { bytes(rom, rom_len) } {
         Some(r) if r.len() >= FLASH_SIZE => r[..FLASH_SIZE].to_vec(),
         _ => return std::ptr::null_mut(),

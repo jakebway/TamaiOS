@@ -250,8 +250,12 @@ struct DumpHelpContent: View {
                     Text("Tamagotchi ON: Fairy, Magic, Wonder Garden (EN)")
                     Text("Tamagotchi Meets: Fairy, Magical, Pastel, Sanrio, Sweets, Fantasy (JP)")
                 }
-                Section("Not available") {
-                    Text("Connection › App works with TamaiOS's built-in Tamatown: Visit to date, marry, shop and play; Download to get new items. Infrared (Connection › Tamagotchi: playdates, gifts, marriage with another device) can't be used — if you choose it, the device is put back to just before.")
+                Section("Infrared (Connection › Tamagotchi)") {
+                    Text("TamaiOS plays the other device for you. Choose PLAYDATE, and when the screen says WAITING… press B (the middle button). Your Tama meets a copy of itself.")
+                    Text("GIFT and MARRY use the same connection and are experimental: they may not finish yet.")
+                }
+                Section("Bluetooth") {
+                    Text("Connection › App works with TamaiOS's built-in Tamatown: Visit to date, marry, shop and play; Download to get new items.")
                 }
             }
             .navigationTitle("Getting your ROM")

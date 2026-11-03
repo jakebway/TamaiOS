@@ -54,7 +54,7 @@ final class Emulator: ObservableObject {
     /// The toy is on "WAITING FOR APP CONNECT" (Connection › App).
     @Published var appWaiting = false
     /// Setting the toy's clock while it is playing a long sound or scene can leave the buzzer stuck, so the automatic
-    /// clock fix stays off for a while after a link or an app session.
+    /// clock fix stays off briefly (about a minute) after a link or an app session.
     static var clockHoldUntil = 0.0
 
     let audio = AudioOut()
@@ -466,7 +466,7 @@ final class Emulator: ObservableObject {
             if radioChanged {
                 let r = radioReady
                 note(r ? "device is waiting for the app" : "device stopped waiting for the app")
-                if !r { Emulator.clockHoldUntil = CACurrentMediaTime() + 240 }      // an app session just ended (unboxing, sounds, scenes)
+                if !r { Emulator.clockHoldUntil = CACurrentMediaTime() + 45 }      // an app session just ended (unboxing, sounds, scenes)
                 DispatchQueue.main.async { self.appWaiting = r }
             }
             if flags & 2 != 0 { careCall() }

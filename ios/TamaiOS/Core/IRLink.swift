@@ -100,39 +100,44 @@ final class IRLink {
     }
 
     /// The same listening the app does for a toy's answer (see TamaLink.answer), timed in toy ticks.
-    private func radioAnswer(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, firstTicks: Int = 200, idleTicks: Int = 200) -> Bool {
+    private func radioAnswer(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, firstTicks: Int = 200, idleTicks: Int = 200) -> [UInt8]? {
         var gotAny = false, acked = false
-        var buffer = 0, expected = -1
+        var buffer: [UInt8] = [], expected = -1
         var waited = 0
         while true {
             if let n = radioRead(p) {
                 gotAny = true; waited = 0
                 let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
-                if expected >= 0 && buffer < expected && tag != 0x4DF0 { buffer += n.count }
+                if expected >= 0 && buffer.count < expected && tag != 0x4DF0 { buffer += n }
                 else if tag == 0x0CF0 {
                     acked = true
                     let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
-                    if status == 0x0200 { return true }
+                    if status == 0x0200 { return buffer }
                     _ = radioWrite(p, [0xF0, 0x8E, 0x0D], audio)
                 } else if tag == 0x0DF0 {
                     expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
-                    buffer = 0
-                } else if tag == 0x4DF0 || tag == 0x5CF0 { return true }
-                else if expected >= 0 { buffer += n.count }
+                    buffer = []
+                } else if tag == 0x4DF0 || tag == 0x5CF0 { return buffer }
+                else if expected >= 0 { buffer += n }
                 continue
             }
             tickAll(p, 1, audio)
             waited += 1
-            if !gotAny && waited > firstTicks { return false }
-            if gotAny && waited > idleTicks { return acked }
+            if !gotAny && waited > firstTicks { return nil }
+            if gotAny && waited > idleTicks { return acked ? buffer : nil }
         }
     }
 
+    enum Homecoming { case home(name: String), notOut, stuck }
+
     /// If the visitor came back from the link "out" (I'M OUT), take it through GO BACK? › YES and the
     /// app's ordinary come-home exchange so it is home and ready for another connection.
-    /// At home the same keys only open and close a menu, which the C presses afterwards undo.
-    private func bringHome(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>) -> Bool {
-        for _ in 0..<2 {
+    /// It is still playing its receiving animation for a while, so the keys are tried every few
+    /// seconds. At home the same keys only open and close a menu, which the C presses undo.
+    private func bringHome(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>) -> Homecoming {
+        var ready = false
+        for round in 0..<8 {
+            tickAll(p, round == 0 ? 100 : 150, audio)
             for k in [TGKey.b, .a, .b] {
                 tg_press(p, k.rawValue, CACurrentMediaTime())
                 tickAll(p, 8, audio)
@@ -140,20 +145,40 @@ final class IRLink {
                 tickAll(p, 30, audio)
             }
             for _ in 0..<60 where tg_radio_ready(p) == 0 { tickAll(p, 1, audio) }
-            if tg_radio_ready(p) != 0 { break }
-            // not waiting for the app: back out of whatever those keys opened and look again
+            if tg_radio_ready(p) != 0 { ready = true; break }
             for _ in 0..<3 {
                 tg_press(p, TGKey.c.rawValue, CACurrentMediaTime()); tickAll(p, 8, audio)
                 tg_release(p, TGKey.c.rawValue); tickAll(p, 30, audio)
             }
         }
-        guard tg_radio_ready(p) != 0 else { return false }
+        guard ready else { return .notOut }
         tg_radio_connect(p, 1)
         defer { tickAll(p, 5, audio); tg_radio_connect(p, 0) }
-        guard radioSend(p, TamaLink.packet(op: 0x15, cmd: 0), audio), radioAnswer(p, audio) else { return false }
+        guard radioSend(p, TamaLink.packet(op: 0x15, cmd: 0), audio), let hello = radioAnswer(p, audio) else { return .stuck }
+        let name = Town.decodeName(hello)
         tickAll(p, 3, audio)
-        guard radioSend(p, Town.backPacket(nil, points: 0), audio) else { return false }
-        return radioAnswer(p, audio, firstTicks: 400, idleTicks: 200)
+        guard radioSend(p, Town.backPacket(nil, points: 0), audio), radioAnswer(p, audio, firstTicks: 400, idleTicks: 200) != nil else {
+            return .stuck
+        }
+        return .home(name: name)
+    }
+
+    /// How to call a device's Tama in messages: its read name, else a name the user gave the device.
+    static func tamaLabel(_ t: Toy) -> String {
+        if let n = LiveTamaName.savedName(t.id) { return n }
+        if let n = Town.shared.state(t).petName, !n.isEmpty { return n }
+        if !BundledVariant.all.contains(where: { $0.name == t.name }) { return t.name }
+        return "your other Tama"
+    }
+
+    private func saveSnapshot(_ p: OpaquePointer, _ toy: Toy) {
+        var out: UnsafeMutablePointer<UInt8>? = nil
+        var n = 0
+        if tg_snapshot(p, &out, &n) == 1, let out {
+            let d = Data(bytes: out, count: n)
+            tg_free(out, n)
+            try? d.write(to: ToyStore.snapURL(toy.id), options: .atomic)
+        }
     }
 
     private func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {
@@ -173,23 +198,35 @@ final class IRLink {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
             tails = role == 1 ? [[.b, .b, .b], [.b, .b]] : [[.b, .a, .b], [.b, .b], [.b, .a, .a, .b]]
         }
-        for tail in tails {
-            if let v = visitor { tg_destroy(v); visitor = nil }
-            guard let v = Emulator.makeHandle(partner).0 else { return }
-            visitor = v
-            tg_set_volume(v, 0)
-            tg_set_never_sleep(v, 0)
-            tg_wake(v)
-            tickAll(v, 50, audio)
-            for k in head + tail {
-                tg_press(v, k.rawValue, CACurrentMediaTime())
-                tickAll(v, 8, audio)
-                tg_release(v, k.rawValue)
-                tickAll(v, 40, audio)
+        func reach() -> Bool {
+            for tail in tails {
+                if let v = visitor { tg_destroy(v); visitor = nil }
+                guard let v = Emulator.makeHandle(partner).0 else { return false }
+                visitor = v
+                tg_set_volume(v, 0)
+                tg_set_never_sleep(v, 0)
+                tg_wake(v)
+                tickAll(v, 50, audio)
+                for k in head + tail {
+                    tg_press(v, k.rawValue, CACurrentMediaTime())
+                    tickAll(v, 8, audio)
+                    tg_release(v, k.rawValue)
+                    tickAll(v, 40, audio)
+                }
+                tickAll(v, 25, audio)
+                if IRLink.waiting(v) { return true }
+                emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })")
             }
-            tickAll(v, 25, audio)
-            if IRLink.waiting(v) { break }
-            emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })")
+            return false
+        }
+        var reached = reach()
+        if !reached, let v = visitor {
+            // maybe it is still out from an earlier visit: send it home, then try again
+            if case .home = bringHome(v, audio) {
+                emu.note("infrared link: \(partner.name) was out and is home now")
+                saveSnapshot(v, partner)
+                reached = reach()
+            }
         }
         guard let p = visitor, IRLink.waiting(p) else {
             emu.say("The other device couldn't get ready (is its Tama home and awake?). Nothing was changed.", seconds: 6)
@@ -204,7 +241,7 @@ final class IRLink {
         tg_ir_link(p, 1)
         active = true
         emu.note("infrared link: \(me.name) ⇄ \(partner.name) (mode \(mode))")
-        emu.say("Linked with \(partner.name)'s device — press B to start. 📡", seconds: 6)
+        emu.say("Linked with \(IRLink.tamaLabel(partner)) — press B to start. 📡", seconds: 6)
 
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
@@ -264,10 +301,11 @@ final class IRLink {
         // let it finish whatever it was doing (a half-finished connection times out), show the
         // result, then press C until it is back on its home screen, so it is saved at home
         let finished = sawDisc && bytes > 3000
-        tickAll(p, 150, audio)
+        var outcome = Homecoming.notOut
         if finished {
-            let home = bringHome(p, audio)
-            emu.note("infrared link: \(partner.name) \(home ? "came home" : "was not out (or could not be sent home)")")
+            outcome = bringHome(p, audio)
+            if case .home(let n) = outcome, !n.isEmpty { Prefs.d.set(n, forKey: "tamaName.v1." + partner.id) }
+            emu.note("infrared link: \(partner.name) \(outcome)")
         }
         for _ in 0..<6 {
             tg_press(p, TGKey.c.rawValue, CACurrentMediaTime())
@@ -285,11 +323,15 @@ final class IRLink {
             try? d.write(to: ToyStore.snapURL(partner.id), options: .atomic)
         }
         emu.note("infrared link: \(trace.count) frames, \(bytes) bytes; last frames:\n" + trace.suffix(30).joined(separator: "\n"))
+        let who = IRLink.tamaLabel(partner)
         if finished {
-            let who = LiveTamaName.savedName(partner.id) ?? "Your other Tama"
-            emu.say("\(who) has returned home. 💕", seconds: 5)
+            switch outcome {
+            case .home: emu.say("Gift delivered, and \(who) is back home. 💕", seconds: 5)
+            case .notOut: emu.say("Done. \(who) is home. 💕", seconds: 5)
+            case .stuck: emu.say("Done, but \(who) didn't make it home. On that device choose GO BACK › YES.", seconds: 8)
+            }
         } else if sawTraffic {
-            emu.say("The infrared link stopped early, so nothing was exchanged. Your other device is unchanged. Try again.", seconds: 7)
+            emu.say("The infrared link stopped early, so nothing was exchanged. \(who) is unchanged. Try again.", seconds: 7)
         }
         emu.note("infrared link ended")
     }

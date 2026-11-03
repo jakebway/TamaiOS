@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 /// The toys and which one is in play.
 struct IRChoice {
     let candidates: [Toy]
+    var blocked: [String: String] = [:]      // device id → why it can't be chosen (shown greyed out)
     let pick: (Toy) -> Void
     let cancel: () -> Void
 }
@@ -299,7 +300,9 @@ struct LinkPicker: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(LiveTamaName.savedName(t.id) ?? t.name).font(.system(.title3, design: .rounded).weight(.bold))
                                     Text(t.name + " · " + t.romName).font(.caption).foregroundStyle(.secondary)
-                                    if i == 0, Prefs.d.string(forKey: "ir.lastPartner") == t.id {
+                                    if let why = choice.blocked[t.id] {
+                                        Text(why).font(.caption2.weight(.semibold)).foregroundStyle(.orange)
+                                    } else if i == 0, Prefs.d.string(forKey: "ir.lastPartner") == t.id {
                                         Text("Last used").font(.caption2.weight(.semibold)).foregroundStyle(.pink)
                                     }
                                 }
@@ -309,6 +312,8 @@ struct LinkPicker: View {
                             .padding(14)
                             .background(RoundedRectangle(cornerRadius: 20).fill(Color(.secondarySystemBackground)))
                         }.buttonStyle(.plain)
+                        .disabled(choice.blocked[t.id] != nil)
+                        .opacity(choice.blocked[t.id] != nil ? 0.4 : 1)
                     }
                 }.padding(20)
             }

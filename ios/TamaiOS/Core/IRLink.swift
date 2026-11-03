@@ -26,11 +26,11 @@ final class IRLink {
         return g & 0x80 == 0
     }
 
-    /// Which entry of the PLAYDATE / GIFT / MARRY list is chosen (Wonder Garden EN; others: PLAYDATE).
+    /// Which entry of the PLAYDATE / GIFT / MARRY / TRAVEL list is chosen (Wonder Garden EN; others: PLAYDATE).
     static func mode(_ h: OpaquePointer, deviceID: String) -> Int {
         guard deviceID.contains("wondergarden") else { return 0 }
         var b = [UInt8](repeating: 0, count: 1)
-        guard tg_peek(h, 0xF80178E4, &b, 1) == 1, b[0] <= 2 else { return 0 }
+        guard tg_peek(h, 0xF80178E4, &b, 1) == 1, b[0] <= 3 else { return 0 }
         return Int(b[0])
     }
 
@@ -41,6 +41,15 @@ final class IRLink {
         guard tg_peek(h, 0xF80178BC, &b, 1) == 1, b[0] <= 1 else { return -1 }
         return Int(b[0])
     }
+
+    /// A saved device's life stage (read from its save, without running it). TRAVEL needs stage 2 or later.
+    static func stage(of toy: Toy) -> Int {
+        guard let v = Emulator.makeHandle(toy).0 else { return -1 }
+        defer { tg_destroy(v) }
+        var b: UInt8 = 0
+        return tg_peek(v, 0xF800D8B6, &b, 1) == 1 ? Int(b) : -1
+    }
+    static let travelMinStage = 2
 
     /// Called from the run loop (core locked) whenever the radio state is polled.
     func watch(emu: Emulator, handle h: OpaquePointer, deviceID: String, now: Double) {
@@ -75,14 +84,32 @@ final class IRLink {
             t.qualityOfService = .userInitiated
             t.start()
         }
-        if others.count == 1 { begin(others[0]); return }
-        // more than one other device: ask which one to link with
-        DispatchQueue.main.async {
-            model.irChoice = IRChoice(candidates: others, pick: begin, cancel: { [self] in
-                starting = false
-                cooldownUntil = CACurrentMediaTime() + 20
-            })
+        let choose: ([Toy], [String: String]) -> Void = { _, blocked in
+            DispatchQueue.main.async {
+                model.irChoice = IRChoice(candidates: others, blocked: blocked, pick: begin, cancel: { [self] in
+                    starting = false
+                    cooldownUntil = CACurrentMediaTime() + 20
+                })
+            }
         }
+        if mode == 3 {
+            // TRAVEL: every device taking part has to be old enough, or the toy refuses and the link would fail
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                var blocked: [String: String] = [:]
+                for t in others where IRLink.stage(of: t) < IRLink.travelMinStage { blocked[t.id] = "Too young to travel" }
+                let eligible = others.filter { blocked[$0.id] == nil }
+                if eligible.isEmpty {
+                    cooldownUntil = CACurrentMediaTime() + 30
+                    starting = false
+                    emu.say("None of your other devices is old enough to travel yet. Try again when they've grown.", seconds: 7)
+                    return
+                }
+                if eligible.count == 1 { begin(eligible[0]) } else { choose(eligible, blocked) }
+            }
+            return
+        }
+        if others.count == 1 { begin(others[0]); return }
+        choose(others, [:])
     }
 
     // MARK: bringing the visitor home
@@ -250,6 +277,7 @@ final class IRLink {
         // after choosing GIFT (GIVE / RECEIVE), so try the likely endings until one reaches WAITING.
         let head: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b] + Array(repeating: .a, count: mode)
         var tails: [[TGKey]] = [[.b]]
+        if mode == 3 { tails = [[.b, .b]] }      // TRAVEL › VISIT
         if mode == 1 {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
             tails = role == 1 ? [[.b, .b, .b], [.b, .b]] : [[.b, .a, .b], [.b, .b], [.b, .a, .a, .b]]
@@ -392,7 +420,7 @@ final class IRLink {
             default:
                 // Your device is still playing the visit scene (about 25 s: the guest plays, says
                 // goodbye and leaves). Say it when that's over, not when the infrared stops.
-                let text = mode == 1 ? "Gift delivered! \(who) is back home. 💕" : "\(who) has gone back home. 💕"
+                let text = mode == 1 ? "Gift delivered! \(who) is back home. 💕" : (mode == 3 ? "Travel is over. \(who) is back home. ✈️" : "\(who) has gone back home. 💕")
                 emu.note("infrared link: message due when the visit scene ends")
                 // counted from the last infrared traffic (not from when the link thread finished, which is
                 // some 10 s later: it waits out 8 s of silence first)

@@ -275,7 +275,7 @@ final class Console: ObservableObject {
 
         case "perf":
             let s = emu.stats
-            return "ticks: \(s.ticks)  last tick: \(String(format: "%.2f", s.lastTickMs)) ms  frames published: \(s.frames)  audio queued: \(emu.audio.queued)  underruns: \(emu.audio.underruns)"
+            return "ticks: \(s.ticks)  last tick: \(String(format: "%.2f", s.lastTickMs)) ms  frames published: \(s.frames)  audio queued: \(emu.audio.queued)  underruns: \(emu.audio.underruns)  stalls >50ms: \(emu.stalls.count) (worst \(Int(emu.stalls.maxMs)) ms)"
 
         case "redraw":
             emu.forceRedraw()

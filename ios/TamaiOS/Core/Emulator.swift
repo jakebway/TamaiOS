@@ -132,6 +132,9 @@ final class Emulator: ObservableObject {
     private var lastDark = false
     private var syncAnnounced = false
     private(set) var stats = (ticks: 0, lastTickMs: 0.0, frames: 0)
+    /// Loop gaps over 50 ms while on screen (what a dropped frame looks like from inside).
+    var stalls = (count: 0, maxMs: 0.0, notes: 0)
+    private let saveQueue = DispatchQueue(label: "TamaiOS autosave", qos: .utility)
     var appLog: [String] = []
 
     // MARK: core access
@@ -359,6 +362,13 @@ final class Emulator: ObservableObject {
             if now >= nextPrefs { lp = LoopPrefs.read(); nextPrefs = now + 1 }
             var dt = now - last
             last = now
+            if dt > 0.05 && dt < lp.gap && visible {
+                stalls.count += 1; stalls.maxMs = max(stalls.maxMs, dt * 1000)
+                if stalls.notes < 12 {
+                    stalls.notes += 1
+                    note("stall \(Int(dt * 1000)) ms (link \(IRLink.shared.active || IRLink.shared.starting))")
+                }
+            }
             inputLock.lock()
             let inputs = inputQ
             inputQ.removeAll(keepingCapacity: true)
@@ -420,7 +430,7 @@ final class Emulator: ObservableObject {
             }
             if now >= nextAutosave {
                 nextAutosave = now + lp.autosave
-                saveLocked(h, snapshot: true)
+                saveLocked(h, snapshot: true, later: true)
             }
             lock.unlock()
 
@@ -548,7 +558,7 @@ final class Emulator: ObservableObject {
 
     // MARK: saving
 
-    private func saveLocked(_ h: OpaquePointer, snapshot: Bool) {
+    private func saveLocked(_ h: OpaquePointer, snapshot: Bool, later: Bool = false) {
         guard let id = toyID else { return }
         if snapshot {
             var p: UnsafeMutablePointer<UInt8>? = nil
@@ -556,7 +566,12 @@ final class Emulator: ObservableObject {
             if tg_snapshot(h, &p, &n) == 1, let p {
                 let d = Data(bytes: p, count: n)
                 tg_free(p, n)
-                do { try d.write(to: ToyStore.snapURL(id), options: .atomic) } catch { note("autosave failed: \(error)") }
+                let url = ToyStore.snapURL(id)
+                // the periodic autosave writes the file after letting go of the core, so a frame never waits for the disk
+                let write = { [weak self] in
+                    do { try d.write(to: url, options: .atomic) } catch { self?.note("autosave failed: \(error)") }
+                }
+                if later { saveQueue.async(execute: write) } else { write() }
             }
         }
         if tg_is_asleep(h) != 0 { tg_flash_save(h, ToyStore.flashURL(id).path) }

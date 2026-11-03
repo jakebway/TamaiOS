@@ -11,7 +11,7 @@ struct NameProbeResult {
 }
 final class ProfileNameReader {
     static let shared = ProfileNameReader()
-    private let queue = DispatchQueue(label: "TamaiOS.disposable-name-reader", qos: .background)
+    private let queue = DispatchQueue(label: "TamaiOS.disposable-name-reader", qos: .utility)
     func read(emu: Emulator, key: String?, completion: @escaping (NameProbeResult) -> Void) {
         queue.async {
             let start = ProcessInfo.processInfo.systemUptime

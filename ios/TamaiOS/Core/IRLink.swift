@@ -404,7 +404,7 @@ final class IRLink {
 // MARK: reading a Tama's name from any device
 
 extension IRLink {
-    private static let nameQueue = DispatchQueue(label: "TamaiOS name probe", qos: .background)
+    private static let nameQueue = DispatchQueue(label: "TamaiOS name probe", qos: .utility)
     private static var probing = false
 
     /// Find out the names of Tamas whose name isn't known yet (the on-screen reader only knows Wonder

@@ -202,6 +202,27 @@ final class IRLink {
         }
     }
 
+    /// A 32×16 text sketch of the screen, for the log.
+    fileprivate func asciiScreen(_ h: OpaquePointer) -> String {
+        var px = [UInt32](repeating: 0, count: 128 * 128)
+        _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
+        var rows: [String] = []
+        for y in stride(from: 0, to: 128, by: 8) {
+            var r = ""
+            for x in stride(from: 0, to: 128, by: 4) {
+                var sum = 0
+                for dy in 0..<8 { for dx in 0..<4 {
+                    let c = px[(y + dy) * 128 + x + dx]
+                    sum += Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255)
+                } }
+                let avg = sum / (32 * 3)
+                r += avg < 90 ? "#" : avg < 170 ? "+" : "."
+            }
+            rows.append(r)
+        }
+        return rows.joined(separator: "\n")
+    }
+
     fileprivate func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {
         for _ in 0..<n { _ = tg_tick(p, 0.02); _ = tg_take_audio(p, audio, 44100) }
     }
@@ -433,6 +454,7 @@ extension IRLink {
             }
             for _ in 0..<100 where tg_radio_ready(v) == 0 { tickAll(v, 1, audio) }
             if tg_radio_ready(v) != 0 { found = v; log("reached the app screen with ending \(i)"); break }
+            log("ending \(i): asleep=\(tg_is_asleep(v)), screen:\n" + asciiScreen(v))
             tg_destroy(v)
         }
         guard let p = found else { log("never reached WAITING FOR APP"); return nil }

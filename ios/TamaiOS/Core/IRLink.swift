@@ -428,7 +428,7 @@ extension IRLink {
         defer { audio.deallocate() }
         // Connection › (the APP entry, tried at the third and then second place) — or, if the Tama is
         // out in town, GO BACK? › YES leads to the same app screen
-        let endings: [[TGKey]] = [[.a, .a, .b], [.a, .b], []]
+        let endings: [[TGKey]] = [[.a, .a, .b], [.a, .b], [.a, .a, .a, .b], [.a, .a, .a, .a, .b], [.a, .a, .b, .b], []]
         var found: OpaquePointer?
         for (i, ending) in endings.enumerated() {
             guard let v = Emulator.makeHandle(toy).0 else { log("could not start"); return nil }

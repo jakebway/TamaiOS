@@ -429,6 +429,7 @@ extension IRLink {
             Thread.sleep(forTimeInterval: 1)
         }
     }
+    private static var identityChangedAt = 0.0
     static func watchActiveName() {
         let token = UUID(); activeNameLoop = token
         var lastIdentity = ""
@@ -456,9 +457,13 @@ extension IRLink {
                 let known = Prefs.d.string(forKey: "tamaIdentity.v1." + toyID)
                 if !now.isEmpty, now != lastIdentity {
                     lastIdentity = now
+                    identityChangedAt = CACurrentMediaTime()
                     if known != now || LiveTamaName.savedName(toyID) == nil || !FileManager.default.fileExists(atPath: ToyStore.spriteURL(toyID).path) {
                         // read when it has settled; try again a little later only if there was no name yet
-                        for (i, d) in [0.4, 15.0, 60.0].enumerated() {
+                        // A growth animation keeps the old picture on screen for a while, so a read soon after a change is
+                        // only provisional: it is repeated once things have settled (the identity is only marked as
+                        // "done" by a read taken at least 12 s after the change).
+                        for (i, d) in [0.4, 5.0, 13.0, 40.0, 90.0].enumerated() {
                             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + d) {
                                 guard activeNameLoop == token, identity() == now else { return }
                                 if i > 0, Prefs.d.string(forKey: "tamaIdentity.v1." + toyID) == now { return }
@@ -483,13 +488,13 @@ extension IRLink {
         DispatchQueue.main.async { startActiveNameRead(identity: identity) }
     }
     private static func startActiveNameRead(identity: String) {
-        guard let model = AppModel.current, let toy = model.emu.toy, toy.id != BathroomEventPolicy.supportedDeviceID,
+        guard let model = AppModel.current, let toy = model.emu.toy,
               !model.emu.loading, !shared.active, !shared.starting, !model.emu.holdForApp, !model.emu.appWaiting,
               UIApplication.shared.applicationState == .active else { return }
         ProfileNameReader.shared.read(emu: model.emu, key: nil, spriteURL: ToyStore.spriteURL(toy.id)) { r in
             guard model.emu.toy?.id == toy.id else { return }
             if let n = r.name, !n.isEmpty {
-                if !identity.isEmpty { Prefs.d.set(identity, forKey: "tamaIdentity.v1." + toy.id) }
+                if !identity.isEmpty, CACurrentMediaTime() - identityChangedAt >= 12 { Prefs.d.set(identity, forKey: "tamaIdentity.v1." + toy.id) }
                 if LiveTamaName.savedName(toy.id) != n {
                     Prefs.d.set(n, forKey: "tamaName.v1." + toy.id)
                     model.emu.note("name sync: \(toy.name) is \(n)")

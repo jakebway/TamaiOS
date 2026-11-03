@@ -31,7 +31,7 @@ final class ProfileNameReader {
         return process(seed: seed, key: nil, start: start, captureMS: 0, backsList: [0, 2, 8], budget: 45, spriteURL: spriteURL)
     }
     private func process(seed: OpaquePointer, key: String?, start: Double, captureMS: Double,
-                         backsList: [Int] = [8, 4, 2, 1, 0], budget: Double = 12, spriteURL: URL? = nil) -> NameProbeResult {
+                         backsList: [Int] = [8, 4, 2, 0, 12, 1], budget: Double = 20, spriteURL: URL? = nil) -> NameProbeResult {
         defer { tg_name_seed_destroy(seed) }
         let owner = self.text(seed, kind: 0)
         let identity = self.text(seed, kind: 1)
@@ -88,7 +88,7 @@ final class ProfileNameReader {
     private func attempt(seed: OpaquePointer, backs: Int, owner: String, deadline: Double, trace: inout [String], sprite: inout UIImage?) -> String? {
         guard let probe = tg_name_probe_from_seed(seed) else { trace.append("Clone creation failed"); return nil }
         defer { tg_name_probe_destroy(probe) }
-        guard advance(probe, seconds: 0.35, deadline: deadline) else { return nil }
+        guard advance(probe, seconds: backs >= 12 || backs == 1 ? 3.0 : 0.35, deadline: deadline) else { return nil }
         for _ in 0..<backs { guard tap(probe, key: 2, deadline: deadline) else { return nil } }
         guard advance(probe, seconds: 1.25, deadline: deadline) else { return nil }
         for key in [Int32(0), Int32(1), Int32(1)] { guard tap(probe, key: key, deadline: deadline) else { return nil } }

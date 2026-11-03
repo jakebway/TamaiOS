@@ -99,8 +99,8 @@ final class LiveTamaName: ObservableObject {
                 } else {
                     self.probeStatus = result.detail + " (attempt \(self.attempts[key] ?? 0)/3)"
                     emu.note("automatic profile name reader: " + result.detail)
-                    if (self.attempts[key] ?? 0) < 3 { self.schedule(key: key, delay: (self.attempts[key] ?? 0) == 1 ? 10 : 30) }
-                    else { self.nextCheck[key] = ProcessInfo.processInfo.systemUptime + 120 }
+                    if (self.attempts[key] ?? 0) < 3 { self.schedule(key: key, delay: (self.attempts[key] ?? 0) == 1 ? 4 : 12) }
+                    else { self.nextCheck[key] = ProcessInfo.processInfo.systemUptime + 30 }
                 }
             }
         }

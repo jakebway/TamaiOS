@@ -25,6 +25,7 @@ struct TamatownView: View {
             ArrivalView(status: link.status)
         } else if inTown && !downloadOnly {
             TownSquare(path: $path, onHome: { leave() }).navigationTitle("Tamatown")
+                .toolbarColorScheme(.light, for: .navigationBar)   // the town is always a light pastel scene: dark title and buttons
         } else {
             TamaDepaView()
                 .toolbar {

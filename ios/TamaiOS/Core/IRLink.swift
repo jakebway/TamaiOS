@@ -470,7 +470,7 @@ extension IRLink {
     /// Background name work waits for a quiet moment so it never competes with play.
     fileprivate static func waitForQuiet(_ emu: Emulator, maxWait: Double = 60) {
         let end = CACurrentMediaTime() + maxWait
-        while CACurrentMediaTime() < end, CACurrentMediaTime() - emu.lastKeyTime < 8 || shared.busy {
+        while CACurrentMediaTime() < end, CACurrentMediaTime() - emu.lastKeyTime < 1.5 || shared.busy {
             Thread.sleep(forTimeInterval: 1)
         }
     }
@@ -528,7 +528,7 @@ extension IRLink {
         if let m = AppModel.current {
             let id = m.emu.toy?.id ?? ""
             let haveAll = LiveTamaName.savedName(id) != nil && FileManager.default.fileExists(atPath: ToyStore.spriteURL(id).path)
-            if haveAll { waitForQuiet(m.emu, maxWait: 20) }     // only an update waits for a pause; a first fill goes straight away
+            if haveAll { waitForQuiet(m.emu, maxWait: 4) }     // only an update waits for a pause; a first fill goes straight away
         }
         DispatchQueue.main.async { startActiveNameRead(identity: identity) }
     }

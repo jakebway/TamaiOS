@@ -15,8 +15,13 @@ final class IRLink {
     /// The device's infrared is on (its serial speed was set for infrared).
     static func waiting(_ h: OpaquePointer) -> Bool {
         var b = [UInt8](repeating: 0, count: 2)
-        guard tg_peek(h, 0xC006000C, &b, 2) == 1 else { return false }
-        return UInt16(b[0]) | UInt16(b[1]) << 8 == 0x341
+        guard tg_peek(h, 0xC006000C, &b, 2) == 1,
+              UInt16(b[0]) | UInt16(b[1]) << 8 == 0x341 else { return false }
+        // The serial speed stays set after leaving the screen (and in saves), so also require the
+        // infrared transceiver to be switched on (GPIO 0x24 bit 15, active low).
+        var g: UInt8 = 0xFF
+        guard tg_peek(h, 0xC0000025, &g, 1) == 1 else { return false }
+        return g & 0x80 == 0
     }
 
     /// Which entry of the PLAYDATE / GIFT / MARRY list is chosen (Wonder Garden EN; others: PLAYDATE).

@@ -112,8 +112,8 @@ struct ShellArt: View, Equatable {
 
             // shine along the upper-left edge, clear of the screen frame
             EggShape().trim(from: 0.86, to: 0.925)
-                .stroke(Color.white.opacity(0.75), style: StrokeStyle(lineWidth: w * 0.03, lineCap: .round))
-                .frame(width: (w - lw) * 0.93, height: (h - lw) * 0.93)
+                .stroke(Color.white.opacity(0.75), style: StrokeStyle(lineWidth: w * 0.021, lineCap: .round))
+                .frame(width: (w - lw) * 0.935, height: (h - lw) * 0.935)
                 .position(x: cx, y: eggMid)
 
             // screen frame (centred on the screen), its shadow, and a heart

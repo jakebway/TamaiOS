@@ -283,10 +283,13 @@ final class IRLink {
         let head: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b] + Array(repeating: .a, count: mode)
         var tails: [[TGKey]] = [[.b]]
         // TRAVEL: you INVITE (and pick the place) → the other device VISITs. You VISIT → the other device
-        // INVITEs and picks a random place: the list has 8 entries and wraps, and only the places that
-        // device has unlocked can be chosen, so go round from a random start until one accepts.
+        // INVITEs and picks a random place from the 8 in the list; locked ones refuse, so try them in
+        // random order until one accepts (every unlocked place is equally likely).
         let inviteScan = mode == 3 && role == 0
-        if mode == 3 { tails = inviteScan ? [[.b, .a, .b]] : [[.b, .b]] }
+        if mode == 3 {
+            // each place in random order, until one that this device has unlocked accepts
+            tails = inviteScan ? (0..<8).shuffled().map { [TGKey.b, .a, .b] + Array(repeating: TGKey.a, count: $0) + [.b] } : [[.b, .b]]
+        }
         if mode == 1 {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
             tails = role == 1 ? [[.b, .b, .b], [.b, .b]] : [[.b, .a, .b], [.b, .b], [.b, .a, .a, .b]]
@@ -306,18 +309,7 @@ final class IRLink {
                     tg_release(v, k.rawValue)
                     tickAll(v, 22, audio)
                 }
-                if inviteScan {
-                    func tap(_ k: TGKey, _ settle: Int) {
-                        tg_press(v, k.rawValue, CACurrentMediaTime()); tickAll(v, 8, audio)
-                        tg_release(v, k.rawValue); tickAll(v, settle, audio)
-                    }
-                    for _ in 0..<Int.random(in: 0..<8) { tap(.a, 22) }
-                    for _ in 0..<8 {
-                        tap(.b, 70)
-                        if IRLink.waiting(v) { break }
-                        tap(.a, 22)
-                    }
-                }
+                if inviteScan { tickAll(v, 70, audio) }      // the CONNECTING screen takes a moment
                 tickAll(v, 25, audio)
                 if IRLink.waiting(v) { return true }
                 emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })")

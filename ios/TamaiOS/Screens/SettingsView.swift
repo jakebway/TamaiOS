@@ -293,14 +293,27 @@ struct DevicesSection: View {
     /// The Tama's own picture (taken from its profile page and kept up to date), or the egg until it is known.
     @ViewBuilder private func portrait(_ t: Toy, _ theme: Theme) -> some View {
         if let img = UIImage(contentsOfFile: ToyStore.spriteURL(t.id).path) {
-            Image(uiImage: img)
-                .interpolation(.none).resizable().scaledToFit()
+            Image(uiImage: Self.pixelSharp(img))
+                .interpolation(.high).resizable().scaledToFit()
                 .padding(7)
                 .frame(width: 58, height: 58)
                 .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(LinearGradient(colors: [theme.top, theme.bottom.opacity(0.75)], startPoint: .top, endPoint: .bottom)))
         } else {
             EggBadge(theme: theme).frame(width: 38, height: 48).frame(width: 58, height: 58)
+        }
+    }
+
+    /// Pixel art looks ragged when a small picture is stretched by a non-whole factor. Blow it up by a whole factor
+    /// first (every pixel an exact square), then let the final, gentle shrink to the card size smooth the edges.
+    private static func pixelSharp(_ img: UIImage) -> UIImage {
+        let w = max(1, Int(img.size.width * img.scale)), h = max(1, Int(img.size.height * img.scale))
+        let k = max(1, Int((300.0 / Double(max(w, h))).rounded(.up)))
+        let size = CGSize(width: w * k, height: h * k)
+        let fmt = UIGraphicsImageRendererFormat(); fmt.scale = 1; fmt.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: fmt).image { ctx in
+            ctx.cgContext.interpolationQuality = .none
+            img.draw(in: CGRect(origin: .zero, size: size))
         }
     }
 

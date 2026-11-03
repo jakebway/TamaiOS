@@ -12,26 +12,26 @@ struct NameProbeResult {
 final class ProfileNameReader {
     static let shared = ProfileNameReader()
     private let queue = DispatchQueue(label: "TamaiOS.disposable-name-reader", qos: .utility)
-    func read(emu: Emulator, key: String?, completion: @escaping (NameProbeResult) -> Void) {
+    func read(emu: Emulator, key: String?, spriteURL: URL? = nil, completion: @escaping (NameProbeResult) -> Void) {
         queue.async {
             let start = ProcessInfo.processInfo.systemUptime
             guard let seed = emu.withCore({ tg_name_seed_capture($0) }) ?? nil else {
                 DispatchQueue.main.async { completion(NameProbeResult(name: nil, detail: "Could not capture live snapshot")) }; return
             }
             let captureMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
-            let finished = self.process(seed: seed, key: key, start: start, captureMS: captureMS)
+            let finished = self.process(seed: seed, key: key, start: start, captureMS: captureMS, spriteURL: spriteURL)
             DispatchQueue.main.async { completion(finished) }
         }
     }
     /// Same as `read`, for a device that isn't the one on screen: reads a headless core you own.
-    func readNow(handle: OpaquePointer) -> NameProbeResult {
+    func readNow(handle: OpaquePointer, spriteURL: URL? = nil) -> NameProbeResult {
         let start = ProcessInfo.processInfo.systemUptime
         guard let seed = tg_name_seed_capture(handle) else { return NameProbeResult(name: nil, detail: "Could not capture a snapshot") }
         // a fresh headless copy starts on the home screen, so no backing out is needed (it is tried first)
-        return process(seed: seed, key: nil, start: start, captureMS: 0, backsList: [0, 2, 8], budget: 45)
+        return process(seed: seed, key: nil, start: start, captureMS: 0, backsList: [0, 2, 8], budget: 45, spriteURL: spriteURL)
     }
     private func process(seed: OpaquePointer, key: String?, start: Double, captureMS: Double,
-                         backsList: [Int] = [8, 4, 2, 1, 0], budget: Double = 12) -> NameProbeResult {
+                         backsList: [Int] = [8, 4, 2, 1, 0], budget: Double = 12, spriteURL: URL? = nil) -> NameProbeResult {
         defer { tg_name_seed_destroy(seed) }
         let owner = self.text(seed, kind: 0)
         let identity = self.text(seed, kind: 1)
@@ -43,14 +43,20 @@ final class ProfileNameReader {
         let deadline = ProcessInfo.processInfo.systemUptime + budget
         // Every strategy starts from the SAME seed, not the previous strategy's changed state.
         // C backs out toward Home on the disposable copy; OCR rejects incorrect destination pages.
+        var lastSprite: UIImage?
         for backs in backsList {
             if ProcessInfo.processInfo.systemUptime >= deadline { result.detail = "Probe reached its time budget"; break }
             var attemptTrace: [String] = []
             let found = autoreleasepool {
-                self.attempt(seed: seed, backs: backs, owner: owner, deadline: deadline, trace: &attemptTrace)
+                self.attempt(seed: seed, backs: backs, owner: owner, deadline: deadline, trace: &attemptTrace, sprite: &lastSprite)
             }
             result.trace += attemptTrace
-            if let found { result.name = found; result.detail = "Two matching profile OCR reads with the owner header verified"; break }
+            if let found {
+                if let spriteURL, let img = lastSprite, let png = img.pngData() {
+                    try? png.write(to: spriteURL, options: .atomic)
+                    DispatchQueue.main.async { AppModel.current?.objectWillChange.send() }
+                }
+                result.name = found; result.detail = "Two matching profile OCR reads with the owner header verified"; break }
         }
         result.workMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
         result.trace = Array(result.trace.suffix(12))
@@ -79,7 +85,7 @@ final class ProfileNameReader {
         tg_name_probe_press(probe, key)
         return advance(probe, seconds: 0.55, deadline: deadline)
     }
-    private func attempt(seed: OpaquePointer, backs: Int, owner: String, deadline: Double, trace: inout [String]) -> String? {
+    private func attempt(seed: OpaquePointer, backs: Int, owner: String, deadline: Double, trace: inout [String], sprite: inout UIImage?) -> String? {
         guard let probe = tg_name_probe_from_seed(seed) else { trace.append("Clone creation failed"); return nil }
         defer { tg_name_probe_destroy(probe) }
         guard advance(probe, seconds: 0.35, deadline: deadline) else { return nil }
@@ -87,7 +93,38 @@ final class ProfileNameReader {
         guard advance(probe, seconds: 1.25, deadline: deadline) else { return nil }
         for key in [Int32(0), Int32(1), Int32(1)] { guard tap(probe, key: key, deadline: deadline) else { return nil } }
         guard advance(probe, seconds: 0.35, deadline: deadline) else { return nil }
-        return agreedProfile(probe, owner: owner, deadline: deadline, trace: &trace)
+        let name = agreedProfile(probe, owner: owner, deadline: deadline, trace: &trace)
+        if name != nil {
+            var rgb = [UInt8](repeating: 0, count: 128 * 128 * 3)
+            if rgb.withUnsafeMutableBufferPointer({ tg_name_probe_rgb(probe, $0.baseAddress, $0.count) }) == 1 { sprite = ProfileNameReader.cropSprite(rgb) }
+        }
+        return name
+    }
+    /// The Tama's picture on the profile page: the non-white part of the area above its name, on a transparent background.
+    static func cropSprite(_ rgb: [UInt8]) -> UIImage? {
+        let x0 = 14, x1 = 74, y0 = 34, y1 = 78
+        func ink(_ x: Int, _ y: Int) -> Bool {
+            let i = (y * 128 + x) * 3
+            return rgb[i] < 232 || rgb[i + 1] < 232 || rgb[i + 2] < 232
+        }
+        var minX = x1, maxX = x0, minY = y1, maxY = y0
+        for y in y0..<y1 { for x in x0..<x1 where ink(x, y) {
+            minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+        } }
+        guard maxX > minX, maxY > minY, maxX - minX < 60, maxY - minY < 44 else { return nil }
+        let w = maxX - minX + 1, h = maxY - minY + 1
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        for y in 0..<h { for x in 0..<w {
+            let sx = minX + x, sy = minY + y
+            let i = (sy * 128 + sx) * 3, o = (y * w + x) * 4
+            if ink(sx, sy) { px[o] = rgb[i]; px[o + 1] = rgb[i + 1]; px[o + 2] = rgb[i + 2]; px[o + 3] = 255 }
+        } }
+        guard let prov = CGDataProvider(data: Data(px) as CFData),
+              let cg = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                               space: CGColorSpaceCreateDeviceRGB(),
+                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                               provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
+        return UIImage(cgImage: cg)
     }
     private func agreedProfile(_ probe: OpaquePointer, owner: String, deadline: Double, trace: inout [String]) -> String? {
         guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }

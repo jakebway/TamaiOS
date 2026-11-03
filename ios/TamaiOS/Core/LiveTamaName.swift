@@ -81,7 +81,7 @@ final class LiveTamaName: ObservableObject {
             self.probeStatus = "Automatically reading a disposable copy; no live menu presses"
             let expectedDevice = self.deviceID, expectedStage = self.stage, expectedCharacter = self.character
             let expectedSignature = UInt32(self.signature, radix: 16) ?? 0
-            ProfileNameReader.shared.read(emu: emu, key: key) { result in
+            ProfileNameReader.shared.read(emu: emu, key: key, spriteURL: ToyStore.spriteURL(self.deviceID)) { result in
                 self.running = false
                 self.captureMS = result.captureMS; self.workMS = result.workMS; self.trace = result.trace
                 let matches = emu.withCore { tg_name_identity_matches($0, Int32(expectedStage), UInt32(clamping: expectedCharacter), expectedSignature) } ?? 0

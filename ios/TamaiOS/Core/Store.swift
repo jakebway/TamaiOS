@@ -71,6 +71,7 @@ enum ToyStore {
 
     static func dir(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
     static func romURL(_ id: String) -> URL { dir(id).appendingPathComponent("rom.bin") }
+    static func spriteURL(_ id: String) -> URL { dir(id).appendingPathComponent("sprite.png") }
     static func snapURL(_ id: String) -> URL { dir(id).appendingPathComponent("autosave.t18s") }
     static func flashURL(_ id: String) -> URL { dir(id).appendingPathComponent("game.flash") }
     static func flashMetaURL(_ id: String) -> URL { dir(id).appendingPathComponent("game.flash.json") }

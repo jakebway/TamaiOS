@@ -244,7 +244,7 @@ struct DevicesSection: View {
                 dismiss()
             } label: {
                 HStack(spacing: 14) {
-                    EggBadge(theme: theme).frame(width: 38, height: 48)
+                    portrait(t, theme)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(tamaName(t) ?? t.name)
                             .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
@@ -287,6 +287,20 @@ struct DevicesSection: View {
                 .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .stroke(current ? theme.bottom.opacity(0.9) : Color.clear, lineWidth: 2))
         )
+    }
+
+    /// The Tama's own picture (taken from its profile page and kept up to date), or the egg until it is known.
+    @ViewBuilder private func portrait(_ t: Toy, _ theme: Theme) -> some View {
+        if let img = UIImage(contentsOfFile: ToyStore.spriteURL(t.id).path) {
+            Image(uiImage: img)
+                .interpolation(.none).resizable().scaledToFit()
+                .padding(7)
+                .frame(width: 58, height: 58)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(LinearGradient(colors: [theme.top, theme.bottom.opacity(0.75)], startPoint: .top, endPoint: .bottom)))
+        } else {
+            EggBadge(theme: theme).frame(width: 38, height: 48).frame(width: 58, height: 58)
+        }
     }
 
     private func pill(_ title: String, _ icon: String, tint: Color, action: @escaping () -> Void) -> some View {

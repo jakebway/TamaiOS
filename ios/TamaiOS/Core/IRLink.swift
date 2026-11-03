@@ -448,7 +448,7 @@ extension IRLink {
         // memory, off the main thread) and the name is read when that changes. A device whose name is
         // already known and whose identity hasn't changed since is left alone.
         func poll() {
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.5) {
                 guard activeNameLoop == token else { return }
                 polls += 1
                 let now = identity()
@@ -456,9 +456,9 @@ extension IRLink {
                 let known = Prefs.d.string(forKey: "tamaIdentity.v1." + toyID)
                 if !now.isEmpty, now != lastIdentity {
                     lastIdentity = now
-                    if known != now || LiveTamaName.savedName(toyID) == nil {
+                    if known != now || LiveTamaName.savedName(toyID) == nil || !FileManager.default.fileExists(atPath: ToyStore.spriteURL(toyID).path) {
                         // read when it has settled; try again a little later only if there was no name yet
-                        for (i, d) in [6.0, 25.0, 80.0].enumerated() {
+                        for (i, d) in [2.5, 20.0, 70.0].enumerated() {
                             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + d) {
                                 guard activeNameLoop == token, identity() == now else { return }
                                 if i > 0, Prefs.d.string(forKey: "tamaIdentity.v1." + toyID) == now { return }
@@ -466,7 +466,7 @@ extension IRLink {
                             }
                         }
                     }
-                } else if polls % 100 == 0 {      // about every five minutes as a safety net
+                } else if polls % 200 == 0 {      // about every five minutes as a safety net
                     refreshActiveName(identity: now)
                 }
                 poll()
@@ -482,7 +482,7 @@ extension IRLink {
         guard let model = AppModel.current, let toy = model.emu.toy, toy.id != BathroomEventPolicy.supportedDeviceID,
               !model.emu.loading, !shared.active, !shared.starting, !model.emu.holdForApp, !model.emu.appWaiting,
               UIApplication.shared.applicationState == .active else { return }
-        ProfileNameReader.shared.read(emu: model.emu, key: nil) { r in
+        ProfileNameReader.shared.read(emu: model.emu, key: nil, spriteURL: ToyStore.spriteURL(toy.id)) { r in
             guard model.emu.toy?.id == toy.id else { return }
             if let n = r.name, !n.isEmpty {
                 if !identity.isEmpty { Prefs.d.set(identity, forKey: "tamaIdentity.v1." + toy.id) }
@@ -534,7 +534,7 @@ extension IRLink {
             tg_set_never_sleep(v, 0)
             tg_wake(v)
             tickAll(v, 40, audio)
-            let r = ProfileNameReader.shared.readNow(handle: v)
+            let r = ProfileNameReader.shared.readNow(handle: v, spriteURL: ToyStore.spriteURL(toy.id))
             tg_destroy(v)
             for t in r.trace { log("profile: " + t) }
             if let n = r.name { log("name from the PROFILE page"); return n }

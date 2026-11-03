@@ -232,7 +232,12 @@ final class IRLink {
     }
 
     fileprivate func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {
-        for _ in 0..<n { _ = tg_tick(p, 0.02); _ = tg_take_audio(p, audio, 44100) }
+        for _ in 0..<n {
+            _ = tg_tick(p, 0.02); _ = tg_take_audio(p, audio, 44100)
+            // let the device you're playing take its turn: the cores share one lock while ticking, and a
+            // tight loop here would otherwise make its frames wait (visible as stutter during a link)
+            usleep(600)
+        }
     }
 
     private func run(emu: Emulator, me: Toy, partner: Toy, mode: Int, role: Int) {

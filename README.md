@@ -27,8 +27,8 @@ Names, sprites and the clock are obtained by looking at the running toy: reading
 
 ## What is not included
 
-- **No firmware or game data is in this repository.** The firmware is Bandai's copyrighted software. The author builds the app with firmware dumped from toys they own, kept privately. If you build it yourself you need your own dump (an 8 MB flash read from your own Tamagotchi ON or Meets).
-- **The MyMeets / WebMeets item pack** is third-party data and is also not distributed here.
+- **Firmware belongs to Bandai.** TamaiOS does not support or encourage piracy. The firmware is Bandai's copyrighted software, and this project is meant for people who own the real toy and dumped the firmware from their own device. Please only use dumps you made yourself from a toy you own. Copies of firmware files may currently sit in this repository as part of the author's personal build setup; they are not offered for download, are not licensed to you, and may be removed at any time. If you build it yourself, use your own dump (an 8 MB flash read from your own Tamagotchi ON or Meets).
+- **The MyMeets / WebMeets item pack** is third-party data. The same applies: it is not offered or licensed here, so please get your own copy from its original source.
 
 If a build has no firmware bundled, the app opens a welcome screen that asks you to choose your own ROM file (`.bin`, or a `.zip` containing one). Builds that include firmware skip that and show a device picker, with a small "Use my own ROM file…" link.
 

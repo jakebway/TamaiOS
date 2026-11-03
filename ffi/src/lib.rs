@@ -740,6 +740,9 @@ fn change_clock(e: &mut Emu, ticks: impl Fn(&Machine) -> i64) -> bool {
     m.press(now, Key::B);
     let limit = m.executed + CPU_HZ as u64;
     m.power_cycle(limit);
+    // whatever the buzzer did while the clock was being moved is not played (it would be one long beep)
+    m.sys.sound.events.clear();
+    e.audio.clear();
     reset_timing(e);
     true
 }
@@ -760,6 +763,8 @@ pub extern "C" fn tg_force_sleep(e: *mut Emu) -> i32 {
             e.m.never_sleep = false;
         }
         e.was_asleep = e.m.sys.powered_off;
+        e.m.sys.sound.events.clear();
+        e.audio.clear();
         reset_timing(e);
         r as i32
     })

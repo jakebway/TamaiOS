@@ -399,6 +399,7 @@ final class Emulator: ObservableObject {
                 nextClockFix = now + 4
                 let off = tg_clock_drift(h)
                 if tg_sync_clock(h, w) == 1 {
+                    discardAudio(h)
                     note("clock matched to selected time mode (was off by \(Int(off)) s)")
                     say(DaytimeClock.enabled(currentID) ? "Daytime Mode clock restored. ☀️" : "Clock matched to your iPhone. 🕒")
                 }
@@ -406,6 +407,7 @@ final class Emulator: ObservableObject {
             if dt > lp.gap {
                 // iOS paused the app: move the toy's clock on like the real one
                 tg_advance_clock(h, dt)
+                discardAudio(h)
                 note("gap of \(String(format: "%.1f", dt)) s, clock advanced")
                 dt = 0
             }
@@ -679,6 +681,15 @@ final class Emulator: ObservableObject {
         }
     }
 
+    /// Throw away any sound the toy produced while its clock was being moved (a fast-forward through sleep
+    /// otherwise comes out as one long beep when the app is opened again).
+    private func discardAudio(_ h: OpaquePointer) {
+        let buf = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
+        defer { buf.deallocate() }
+        for _ in 0..<20 { if tg_take_audio(h, buf, 44100) == 0 { break } }
+        audio.flush()
+    }
+
     func enterForeground() {
         visible = true
         CareAlerts.shared.cancelAll()
@@ -687,7 +698,7 @@ final class Emulator: ObservableObject {
         if paused {
             let away = backgroundAt.map { Date().timeIntervalSince($0) } ?? 0
             if away > 30 {
-                withCore { tg_advance_clock($0, away) }
+                withCore { h in tg_advance_clock(h, away); discardAudio(h) }
                 say("Welcome back! Your device's clock moved ahead \(describeDuration(away)).")
             } else {
                 withCore { tg_wake($0) }

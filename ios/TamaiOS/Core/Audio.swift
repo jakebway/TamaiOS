@@ -96,6 +96,13 @@ final class AudioOut {
         os_unfair_lock_unlock(lock)
     }
 
+    /// Drop whatever is waiting to be played.
+    func flush() {
+        os_unfair_lock_lock(lock)
+        head = 0; count = 0; priming = true
+        os_unfair_lock_unlock(lock)
+    }
+
     var queued: Int {
         os_unfair_lock_lock(lock); defer { os_unfair_lock_unlock(lock) }
         return count

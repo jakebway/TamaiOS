@@ -305,18 +305,20 @@ struct CustomItemMaker: View {
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
                 Text("Capital letters, numbers and . ! ? & - + — just like the device shows them.")
                     .font(.caption2).foregroundStyle(.secondary)
-                Text("Price in the shop").font(.headline).padding(.top, 4)
-                HStack(spacing: 8) {
-                    ForEach([0, 10, 50, 100, 300, 500], id: \.self) { p in
-                        Button { price = p } label: {
-                            Text(p == 0 ? "Free" : "\(p) G")
-                                .font(.system(.subheadline, design: .rounded).weight(.semibold))
-                                .padding(.horizontal, 10).padding(.vertical, 8)
-                                .frame(maxWidth: .infinity)
-                                .background(Capsule().fill(price == p ? Color.purple : Color(.secondarySystemBackground)))
-                                .foregroundStyle(price == p ? .white : .primary)
+                if kind == .wallpaper {      // only wallpapers are bought in the in-game shop; food goes straight to the bag
+                    Text("Price in the shop").font(.headline).padding(.top, 4)
+                    HStack(spacing: 8) {
+                        ForEach([0, 10, 50, 100, 300, 500], id: \.self) { p in
+                            Button { price = p } label: {
+                                Text(p == 0 ? "Free" : "\(p) G")
+                                    .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                    .padding(.horizontal, 10).padding(.vertical, 8)
+                                    .frame(maxWidth: .infinity)
+                                    .background(Capsule().fill(price == p ? Color.purple : Color(.secondarySystemBackground)))
+                                    .foregroundStyle(price == p ? .white : .primary)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -350,7 +352,7 @@ struct CustomItemMaker: View {
         let ok = argb.withUnsafeBufferPointer { buf in
             kindName.withCString { k in
                 label.withCString { nm in
-                    tg_mm_custom_item(k, nm, UInt16(max(0, min(price, 9999))), buf.baseAddress, n, n,
+                    tg_mm_custom_item(k, nm, UInt16(kind == .wallpaper ? max(0, min(price, 9999)) : 0), buf.baseAddress, n, n,
                                       UInt64.random(in: 1...UInt64.max), 0, &p, &len)
                 }
             }

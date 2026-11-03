@@ -295,7 +295,7 @@ final class Emulator: ObservableObject {
         var nextAutosave = last + lp.autosave
         var nextWall = last
         var lastInput = last
-        var nextClockFix = last + 8          // give the toy a moment after loading
+        var nextClockFix = last + 3          // give the toy a moment after loading
         let audioBuf = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
         defer { audioBuf.deallocate() }
         var pixels = [UInt32](repeating: 0, count: 128 * 128)

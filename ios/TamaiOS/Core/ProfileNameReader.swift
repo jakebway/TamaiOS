@@ -44,11 +44,13 @@ final class ProfileNameReader {
         // Every strategy starts from the SAME seed, not the previous strategy's changed state.
         // C backs out toward Home on the disposable copy; OCR rejects incorrect destination pages.
         var lastSprite: UIImage?
-        for backs in backsList {
+        // The best strategy first at a quick pace; if that doesn't produce a name, everything again at the careful pace.
+        let plan: [(Int, Bool)] = (backsList.first.map { [($0, true)] } ?? []) + backsList.map { ($0, false) }
+        for (backs, fast) in plan {
             if ProcessInfo.processInfo.systemUptime >= deadline { result.detail = "Probe reached its time budget"; break }
             var attemptTrace: [String] = []
             let found = autoreleasepool {
-                self.attempt(seed: seed, backs: backs, owner: owner, deadline: deadline, trace: &attemptTrace, sprite: &lastSprite)
+                self.attempt(seed: seed, backs: backs, fast: fast, owner: owner, deadline: deadline, trace: &attemptTrace, sprite: &lastSprite)
             }
             result.trace += attemptTrace
             if let found {
@@ -81,18 +83,18 @@ final class ProfileNameReader {
         }
         return true
     }
-    private func tap(_ probe: OpaquePointer, key: Int32, deadline: Double) -> Bool {
+    private func tap(_ probe: OpaquePointer, key: Int32, fast: Bool, deadline: Double) -> Bool {
         tg_name_probe_press(probe, key)
-        return advance(probe, seconds: 0.55, deadline: deadline)
+        return advance(probe, seconds: fast ? 0.3 : 0.55, deadline: deadline)
     }
-    private func attempt(seed: OpaquePointer, backs: Int, owner: String, deadline: Double, trace: inout [String], sprite: inout UIImage?) -> String? {
+    private func attempt(seed: OpaquePointer, backs: Int, fast: Bool, owner: String, deadline: Double, trace: inout [String], sprite: inout UIImage?) -> String? {
         guard let probe = tg_name_probe_from_seed(seed) else { trace.append("Clone creation failed"); return nil }
         defer { tg_name_probe_destroy(probe) }
-        guard advance(probe, seconds: backs >= 12 || backs == 1 ? 3.0 : 0.35, deadline: deadline) else { return nil }
-        for _ in 0..<backs { guard tap(probe, key: 2, deadline: deadline) else { return nil } }
-        guard advance(probe, seconds: 1.25, deadline: deadline) else { return nil }
-        for key in [Int32(0), Int32(1), Int32(1)] { guard tap(probe, key: key, deadline: deadline) else { return nil } }
-        guard advance(probe, seconds: 0.35, deadline: deadline) else { return nil }
+        guard advance(probe, seconds: backs >= 12 || backs == 1 ? 3.0 : (fast ? 0.2 : 0.35), deadline: deadline) else { return nil }
+        for _ in 0..<backs { guard tap(probe, key: 2, fast: fast, deadline: deadline) else { return nil } }
+        guard advance(probe, seconds: fast ? 0.8 : 1.25, deadline: deadline) else { return nil }
+        for key in [Int32(0), Int32(1), Int32(1)] { guard tap(probe, key: key, fast: fast, deadline: deadline) else { return nil } }
+        guard advance(probe, seconds: fast ? 0.25 : 0.35, deadline: deadline) else { return nil }
         let name = agreedProfile(probe, owner: owner, deadline: deadline, trace: &trace)
         if name != nil {
             var rgb = [UInt8](repeating: 0, count: 128 * 128 * 3)

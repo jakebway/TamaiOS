@@ -448,7 +448,7 @@ extension IRLink {
         // memory, off the main thread) and the name is read when that changes. A device whose name is
         // already known and whose identity hasn't changed since is left alone.
         func poll() {
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.5) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
                 guard activeNameLoop == token else { return }
                 polls += 1
                 let now = identity()
@@ -458,7 +458,7 @@ extension IRLink {
                     lastIdentity = now
                     if known != now || LiveTamaName.savedName(toyID) == nil || !FileManager.default.fileExists(atPath: ToyStore.spriteURL(toyID).path) {
                         // read when it has settled; try again a little later only if there was no name yet
-                        for (i, d) in [2.5, 20.0, 70.0].enumerated() {
+                        for (i, d) in [0.4, 15.0, 60.0].enumerated() {
                             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + d) {
                                 guard activeNameLoop == token, identity() == now else { return }
                                 if i > 0, Prefs.d.string(forKey: "tamaIdentity.v1." + toyID) == now { return }
@@ -475,7 +475,11 @@ extension IRLink {
         poll()
     }
     static func refreshActiveName(identity: String = "") {
-        if let m = AppModel.current { waitForQuiet(m.emu, maxWait: 20) }
+        if let m = AppModel.current {
+            let id = m.emu.toy?.id ?? ""
+            let haveAll = LiveTamaName.savedName(id) != nil && FileManager.default.fileExists(atPath: ToyStore.spriteURL(id).path)
+            if haveAll { waitForQuiet(m.emu, maxWait: 20) }     // only an update waits for a pause; a first fill goes straight away
+        }
         DispatchQueue.main.async { startActiveNameRead(identity: identity) }
     }
     private static func startActiveNameRead(identity: String) {
@@ -495,33 +499,59 @@ extension IRLink {
         }
     }
     private static var namesChecked = Set<String>()
-    static func refreshNames(note: ((String) -> Void)? = nil) {
+    static func refreshNames(note: ((String) -> Void)? = nil, recheck: Bool = true) {
         guard let model = AppModel.current else { return }
-        // Devices with no known name are read now; known names are re-checked once per launch
-        // (a Tama may have hatched or been renamed while you played another device).
         let current = model.emu.toy?.id
-        let toys = model.toys.filter {
-            !Town.shared.state($0).away && ($0.id != current || LiveTamaName.savedName($0.id) == nil)
-                && (LiveTamaName.savedName($0.id) == nil || !namesChecked.contains($0.id))
+        func missing(_ t: Toy) -> Bool {
+            LiveTamaName.savedName(t.id) == nil || !FileManager.default.fileExists(atPath: ToyStore.spriteURL(t.id).path)
         }
-        guard !toys.isEmpty else { return }
-        nameQueue.async {
-            guard !probing, !shared.active, !shared.starting else { return }
-            probing = true
-            defer { probing = false }
-            for t in toys {
-                if let m = AppModel.current { waitForQuiet(m.emu) }
-                if shared.active || shared.starting { break }
-                namesChecked.insert(t.id)
-                let log: (String) -> Void = { m in (note ?? { AppModel.current?.emu.note($0) })("name reader: \(t.name): \(m)") }
-                if let n = shared.readName(t, log: log) {
-                    log("found \(n)")
-                    Prefs.d.set(n, forKey: "tamaName.v1." + t.id)
-                    DispatchQueue.main.async { AppModel.current?.objectWillChange.send() }
+        // Devices with no name or picture yet are read right away, side by side, without waiting for a quiet
+        // moment (you're usually looking at them). Known ones are re-checked once per launch, politely
+        // (a Tama may have hatched or been renamed while you played another device).
+        let todo = model.toys.filter { !Town.shared.state($0).away && ($0.id != current || LiveTamaName.savedName($0.id) == nil) }
+        let urgent = todo.filter { missing($0) }
+        let later = recheck ? todo.filter { !missing($0) && !namesChecked.contains($0.id) } : []
+        guard !urgent.isEmpty || !later.isEmpty else { return }
+        func read(_ t: Toy) {
+            namesChecked.insert(t.id)
+            let log: (String) -> Void = { m in
+                let line = "name reader: \(t.name): \(m)"
+                if let note = note { note(line) } else { DispatchQueue.main.async { AppModel.current?.emu.note(line) } }
+            }
+            if let n = shared.readName(t, log: log) {
+                log("found \(n)")
+                Prefs.d.set(n, forKey: "tamaName.v1." + t.id)
+                DispatchQueue.main.async { AppModel.current?.objectWillChange.send() }
+            }
+        }
+        if !urgent.isEmpty && !shared.active && !shared.starting {
+            let group = DispatchGroup()
+            for t in urgent {
+                nameLock.lock(); let fresh = reading.insert(t.id).inserted; nameLock.unlock()
+                if !fresh { continue }
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    read(t)
+                    nameLock.lock(); reading.remove(t.id); nameLock.unlock()
+                    group.leave()
+                }
+            }
+        }
+        if !later.isEmpty {
+            nameQueue.async {
+                guard !probing, !shared.active, !shared.starting else { return }
+                probing = true
+                defer { probing = false }
+                for t in later {
+                    if let m = AppModel.current { waitForQuiet(m.emu) }
+                    if shared.active || shared.starting { break }
+                    read(t)
                 }
             }
         }
     }
+    private static var reading = Set<String>()
+    private static let nameLock = NSLock()
 
     fileprivate func readName(_ toy: Toy, log: (String) -> Void) -> String? {
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)

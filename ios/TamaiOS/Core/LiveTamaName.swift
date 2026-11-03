@@ -30,7 +30,7 @@ final class LiveTamaName: ObservableObject {
     private init() {
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, let key = self.identity, ProcessInfo.processInfo.systemUptime - self.lastStart >= 15 else { return }
-            self.beginCycle(key: key, delay: 3)
+            self.beginCycle(key: key, delay: 0.8)
         }
     }
     func observe(deviceID: String, stage: Int, character: Int, signature: String) {
@@ -42,18 +42,18 @@ final class LiveTamaName: ObservableObject {
             probeName = key.flatMap { Prefs.d.string(forKey: "notification.probeName.v1." + $0) } ?? ""
             probeStatus = key == nil ? "Waiting for hatch" : "State changed: verifying the displayed profile name"
             resolve()
-            if let key { beginCycle(key: key, delay: 3) }
+            if let key { beginCycle(key: key, delay: 0.8) }
         } else {
             resolve()
             if let key, UIApplication.shared.applicationState == .active,
                ProcessInfo.processInfo.systemUptime >= (nextCheck[key] ?? 0) {
-                beginCycle(key: key, delay: 3)
+                beginCycle(key: key, delay: 0.8)
             }
         }
     }
     func requestCheck() {
         guard let identity else { return }
-        beginCycle(key: identity, delay: 3)
+        beginCycle(key: identity, delay: 0.8)
     }
     private func beginCycle(key: String, delay: Double) {
         guard identity == key, scheduled == nil, !running,
@@ -87,7 +87,7 @@ final class LiveTamaName: ObservableObject {
                 let matches = emu.withCore { tg_name_identity_matches($0, Int32(expectedStage), UInt32(clamping: expectedCharacter), expectedSignature) } ?? 0
                 guard self.identity == key, emu.toy?.id == expectedDevice, matches == 1 else {
                     self.probeStatus = "Discarded stale name result"
-                    if let current = self.identity { self.beginCycle(key: current, delay: 3) }; return
+                    if let current = self.identity { self.beginCycle(key: current, delay: 0.8) }; return
                 }
                 if let value = result.name, !value.isEmpty {
                     self.probeName = value

@@ -204,6 +204,7 @@ struct DevicesSection: View {
             ForEach(model.toys) { t in card(t) }
             addButton
         }
+        .onAppear { IRLink.refreshNames(recheck: false) }      // fill in any name or picture that's still missing
         .confirmationDialog("Delete \(deleting.map { tamaName($0) ?? $0.name } ?? "")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
             Button("Delete Device and Saves", role: .destructive) {
                 if let d = deleting { model.remove(d) }

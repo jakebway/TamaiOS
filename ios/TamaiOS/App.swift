@@ -79,6 +79,7 @@ final class AppModel: ObservableObject {
         AppModel.current = self
         Town.shared.loadIfPresent()
         if let t = currentToy { emu.load(t) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { IRLink.refreshNames(recheck: false) }   // first fill: right away
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { IRLink.refreshNames() }
         IRLink.watchActiveName()
     }
@@ -92,6 +93,7 @@ final class AppModel: ObservableObject {
         Prefs.d.set(toy.id, forKey: "currentToy")
         emu.load(toy)
         objectWillChange.send()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { IRLink.refreshNames(recheck: false) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { IRLink.refreshNames() }
         IRLink.watchActiveName()
     }

@@ -376,9 +376,9 @@ final class Emulator: ObservableObject {
             if !inputs.isEmpty { lastInput = now }
             // Keep the toy on iPhone time even when it never sleeps: if it is more
             // than a minute off, re-set it while nobody is pressing buttons.
-            if let w = wallNow, now >= nextClockFix, now - lastInput > 15, !radioReady, tg_is_asleep(h) == 0,
+            if let w = wallNow, now >= nextClockFix, now - lastInput > 5, !radioReady, tg_is_asleep(h) == 0,
                abs(tg_clock_drift(h)) > 60 {
-                nextClockFix = now + 15
+                nextClockFix = now + 4
                 let off = tg_clock_drift(h)
                 if tg_sync_clock(h, w) == 1 {
                     note("clock matched to selected time mode (was off by \(Int(off)) s)")

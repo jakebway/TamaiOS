@@ -282,10 +282,7 @@ final class IRLink {
         // after choosing GIFT (GIVE / RECEIVE), so try the likely endings until one reaches WAITING.
         let head: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b] + Array(repeating: .a, count: mode)
         var tails: [[TGKey]] = [[.b]]
-        if mode == 3 {
-            // the visitor takes the opposite side: you invite → it VISITs; you visit → it INVITEs (first location)
-            tails = role == 1 ? [[.b, .b]] : role == 0 ? [[.b, .a, .b, .b]] : [[.b, .b], [.b, .a, .b, .b]]
-        }
+        if mode == 3 { tails = [[.b, .b]] }      // TRAVEL: the other device always picks VISIT, whichever you chose
         if mode == 1 {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
             tails = role == 1 ? [[.b, .b, .b], [.b, .b]] : [[.b, .a, .b], [.b, .b], [.b, .a, .a, .b]]

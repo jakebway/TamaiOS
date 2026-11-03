@@ -9,7 +9,7 @@ enum Prefs {
         d.register(defaults: [
             "soundOn": true, "volume": 0.6, "haptics": true, "liveInBackground": true,
             "callAlerts": true, "keepAwake": true, "neverSleep": true, "showHints": true,
-            "p.tick_ms": 4.0, "p.sleep_tick_ms": 20.0, "p.audio_min_ms": 30.0, "p.audio_max_ms": 80.0,
+            "p.tick_ms": 8.0, "p.sleep_tick_ms": 40.0, "p.audio_min_ms": 30.0, "p.audio_max_ms": 80.0,
             "p.gap_s": 2.0, "p.autosave_s": 180.0, "p.fps": 60.0, "p.call_gap_s": 600.0,
         ])
     }
@@ -283,6 +283,14 @@ final class Emulator: ObservableObject {
     private struct LoopPrefs {
         var tick = 0.004, sleepTick = 0.02, gap = 2.0, autosave = 180.0, fps = 60.0
         static func read() -> LoopPrefs {
+            var p = readRaw()
+            // Low Power Mode: half the frame rate and fewer wake-ups
+            if ProcessInfo.processInfo.isLowPowerModeEnabled {
+                p.fps = min(p.fps, 30); p.tick = max(p.tick, 0.016); p.sleepTick = max(p.sleepTick, 0.08)
+            }
+            return p
+        }
+        private static func readRaw() -> LoopPrefs {
             LoopPrefs(tick: max(1, Prefs.num("p.tick_ms")) / 1000,
                       sleepTick: max(1, Prefs.num("p.sleep_tick_ms")) / 1000,
                       gap: max(0.5, Prefs.num("p.gap_s")),

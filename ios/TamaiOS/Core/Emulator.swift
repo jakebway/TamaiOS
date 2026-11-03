@@ -299,6 +299,7 @@ final class Emulator: ObservableObject {
         let audioBuf = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
         defer { audioBuf.deallocate() }
         var pixels = [UInt32](repeating: 0, count: 128 * 128)
+        var lastPixels = [UInt32](repeating: 1, count: 128 * 128)
         var needFrame = true
         var lastPublish = 0.0
         var asleep = false
@@ -407,7 +408,7 @@ final class Emulator: ObservableObject {
                 if let id = toyID { IRLink.shared.watch(emu: self, handle: h, deviceID: id, now: now) }
             }
             if flags & 1 != 0 { needFrame = true }
-            if needFrame && visible && now - lastPublish >= 1.0 / lp.fps {
+            if needFrame && visible && now - lastPublish >= 0.7 / lp.fps {
                 isDark = pixels.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) } != 0
                 needFrame = false
                 published = true
@@ -436,7 +437,9 @@ final class Emulator: ObservableObject {
                 }
             }
             audio.push(audioBuf, n)
-            if published { publish(pixels, dark: isDark) }
+            // skip frames identical to the one on screen: saves an image allocation per redraw
+            if published, isDark == lastDark, pixels == lastPixels { published = false }
+            if published { lastPixels = pixels; publish(pixels, dark: isDark) }
             if radioChanged {
                 let r = radioReady
                 note(r ? "device is waiting for the app" : "device stopped waiting for the app")
@@ -452,6 +455,9 @@ final class Emulator: ObservableObject {
             // a button press wakes the loop at once; otherwise run at the tick
             // rate (slower while the toy sleeps, to save battery)
             _ = wake.wait(timeout: .now() + (asleep && !needFrame ? lp.sleepTick : lp.tick))
+            // a burst of button presses leaves many wake-ups queued: take them all at once
+            // instead of spinning the loop once per press
+            while wake.wait(timeout: .now()) == .success {}
         }
     }
 

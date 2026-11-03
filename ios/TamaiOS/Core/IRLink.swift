@@ -403,23 +403,40 @@ extension IRLink {
     }
 
     fileprivate func readName(_ toy: Toy, log: (String) -> Void) -> String? {
-        guard let p = Emulator.makeHandle(toy).0 else { log("could not start"); return nil }
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
-        defer { audio.deallocate(); tg_destroy(p) }
-        tg_set_volume(p, 0)
-        tg_set_never_sleep(p, 0)
-        tg_wake(p)
-        tickAll(p, 25, audio)
-        // C backs out home; A×5 walks the menu to Connection; B opens it; A,A picks APP; B enters it
-        let keys: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .a, .a, .b]
-        for k in keys {
-            tg_press(p, k.rawValue, CACurrentMediaTime())
-            tickAll(p, 8, audio)
-            tg_release(p, k.rawValue)
-            tickAll(p, 22, audio)
+        defer { audio.deallocate() }
+        // Connection › (the APP entry, tried at the third and then second place) — or, if the Tama is
+        // out in town, GO BACK? › YES leads to the same app screen
+        let endings: [[TGKey]] = [[.a, .a, .b], [.a, .b], []]
+        var found: OpaquePointer?
+        for (i, ending) in endings.enumerated() {
+            guard let v = Emulator.makeHandle(toy).0 else { log("could not start"); return nil }
+            tg_set_volume(v, 0)
+            tg_set_never_sleep(v, 0)
+            tg_wake(v)
+            tickAll(v, 25, audio)
+            if ending.isEmpty {
+                if case .home(let n) = bringHome(v, audio, rounds: 3), (1...12).contains(n.filter { $0.isLetter }.count) {
+                    tg_destroy(v)
+                    log("name came from the come-home hello")
+                    return n
+                }
+                tg_destroy(v)
+                break
+            }
+            let keys: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b] + ending
+            for k in keys {
+                tg_press(v, k.rawValue, CACurrentMediaTime())
+                tickAll(v, 8, audio)
+                tg_release(v, k.rawValue)
+                tickAll(v, 22, audio)
+            }
+            for _ in 0..<100 where tg_radio_ready(v) == 0 { tickAll(v, 1, audio) }
+            if tg_radio_ready(v) != 0 { found = v; log("reached the app screen with ending \(i)"); break }
+            tg_destroy(v)
         }
-        for _ in 0..<100 where tg_radio_ready(p) == 0 { tickAll(p, 1, audio) }
-        guard tg_radio_ready(p) != 0 else { log("never reached WAITING FOR APP"); return nil }
+        guard let p = found else { log("never reached WAITING FOR APP"); return nil }
+        defer { tg_destroy(p) }
         tg_radio_connect(p, 1)
         defer { tickAll(p, 5, audio); tg_radio_connect(p, 0) }
         guard radioSend(p, TamaLink.packet(op: 0x17, cmd: 0), audio), let hello = radioAnswer(p, audio) else { log("no answer to hello"); return nil }

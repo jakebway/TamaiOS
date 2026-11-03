@@ -536,7 +536,10 @@ final class Emulator: ObservableObject {
     func press(_ k: TGKey) { queue(k, down: true) }
     func release(_ k: TGKey) { queue(k, down: false) }
 
+    /// When a button was last pressed (background work waits until you pause).
+    var lastKeyTime = 0.0
     private func queue(_ k: TGKey, down: Bool) {
+        lastKeyTime = CACurrentMediaTime()
         inputLock.lock()
         inputQ.append((k.rawValue, down, CACurrentMediaTime()))
         inputLock.unlock()

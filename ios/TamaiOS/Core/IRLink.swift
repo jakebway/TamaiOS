@@ -404,7 +404,7 @@ final class IRLink {
 // MARK: reading a Tama's name from any device
 
 extension IRLink {
-    private static let nameQueue = DispatchQueue(label: "TamaiOS name probe", qos: .utility)
+    private static let nameQueue = DispatchQueue(label: "TamaiOS name probe", qos: .background)
     private static var probing = false
 
     /// Find out the names of Tamas whose name isn't known yet (the on-screen reader only knows Wonder
@@ -414,6 +414,13 @@ extension IRLink {
     private static var activeNameLoop = UUID()
     /// Names for the device you're playing when it isn't the one with the live name sync (the same
     /// PROFILE-page reading, on a hidden copy): a first check soon after it opens, then every few minutes.
+    /// Background name work waits for a quiet moment so it never competes with play.
+    fileprivate static func waitForQuiet(_ emu: Emulator, maxWait: Double = 60) {
+        let end = CACurrentMediaTime() + maxWait
+        while CACurrentMediaTime() < end, CACurrentMediaTime() - emu.lastKeyTime < 8 || shared.active || shared.starting {
+            Thread.sleep(forTimeInterval: 1)
+        }
+    }
     static func watchActiveName() {
         let token = UUID(); activeNameLoop = token
         var lastIdentity = ""
@@ -429,37 +436,48 @@ extension IRLink {
             } ?? ""
         }
         // A name can only change when the Tama does: a new egg hatching, a new game, growing up.
-        // So the Tama's identity (its id, life stage and look) is checked every couple of seconds (it is
-        // a few bytes of memory), and the name is read the moment that changes: right away, then
-        // again a little later in case the name is only filled in after the hatch scene.
+        // So the Tama's identity (id, life stage, look) is checked every few seconds (a few bytes of
+        // memory, off the main thread) and the name is read when that changes. A device whose name is
+        // already known and whose identity hasn't changed since is left alone.
         func poll() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
                 guard activeNameLoop == token else { return }
                 polls += 1
                 let now = identity()
+                let toyID = AppModel.current?.emu.toy?.id ?? ""
+                let known = Prefs.d.string(forKey: "tamaIdentity.v1." + toyID)
                 if !now.isEmpty, now != lastIdentity {
                     lastIdentity = now
-                    for d in [3.0, 9.0, 20.0, 45.0, 90.0] {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + d) {
-                            guard activeNameLoop == token, identity() == now else { return }
-                            refreshActiveName()
+                    if known != now || LiveTamaName.savedName(toyID) == nil {
+                        // read when it has settled; try again a little later only if there was no name yet
+                        for (i, d) in [6.0, 25.0, 80.0].enumerated() {
+                            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + d) {
+                                guard activeNameLoop == token, identity() == now else { return }
+                                if i > 0, Prefs.d.string(forKey: "tamaIdentity.v1." + toyID) == now { return }
+                                refreshActiveName(identity: now)
+                            }
                         }
                     }
-                } else if polls % 150 == 0 {      // every five minutes as a safety net
-                    refreshActiveName()
+                } else if polls % 100 == 0 {      // about every five minutes as a safety net
+                    refreshActiveName(identity: now)
                 }
                 poll()
             }
         }
         poll()
     }
-    static func refreshActiveName() {
+    static func refreshActiveName(identity: String = "") {
+        if let m = AppModel.current { waitForQuiet(m.emu, maxWait: 20) }
+        DispatchQueue.main.async { startActiveNameRead(identity: identity) }
+    }
+    private static func startActiveNameRead(identity: String) {
         guard let model = AppModel.current, let toy = model.emu.toy, toy.id != BathroomEventPolicy.supportedDeviceID,
               !model.emu.loading, !shared.active, !shared.starting, !model.emu.holdForApp, !model.emu.appWaiting,
               UIApplication.shared.applicationState == .active else { return }
         ProfileNameReader.shared.read(emu: model.emu, key: nil) { r in
             guard model.emu.toy?.id == toy.id else { return }
             if let n = r.name, !n.isEmpty {
+                if !identity.isEmpty { Prefs.d.set(identity, forKey: "tamaIdentity.v1." + toy.id) }
                 if LiveTamaName.savedName(toy.id) != n {
                     Prefs.d.set(n, forKey: "tamaName.v1." + toy.id)
                     model.emu.note("name sync: \(toy.name) is \(n)")
@@ -484,6 +502,7 @@ extension IRLink {
             probing = true
             defer { probing = false }
             for t in toys {
+                if let m = AppModel.current { waitForQuiet(m.emu) }
                 if shared.active || shared.starting { break }
                 namesChecked.insert(t.id)
                 let log: (String) -> Void = { m in (note ?? { AppModel.current?.emu.note($0) })("name reader: \(t.name): \(m)") }

@@ -26,6 +26,7 @@ struct TamatownView: View {
         } else if inTown && !downloadOnly {
             TownSquare(path: $path, onHome: { leave() }).navigationTitle("Tamatown")
                 .toolbarColorScheme(.light, for: .navigationBar)   // the town is always a light pastel scene: dark title and buttons
+                .toolbar { ToolbarItem(placement: .principal) { TownTitle() } }
         } else {
             TamaDepaView()
                 .toolbar {
@@ -617,5 +618,24 @@ struct ArrivalView: View {
                     .foregroundStyle(Color(red: 0.35, green: 0.2, blue: 0.45))
             }
         }
+    }
+}
+
+/// The town is always a light pastel scene, so its title is drawn in its own colours (a plain navigation title
+/// turns white in dark mode and disappears into the pink).
+struct TownTitle: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "sparkle").font(.system(size: 11, weight: .heavy))
+            Text("Tamatown")
+                .font(.system(size: 21, weight: .heavy, design: .rounded))
+                .tracking(0.6)
+            Image(systemName: "sparkle").font(.system(size: 11, weight: .heavy))
+        }
+        .foregroundStyle(LinearGradient(colors: [Color(red: 0.88, green: 0.18, blue: 0.50), Color(red: 0.50, green: 0.22, blue: 0.86)],
+                                        startPoint: .leading, endPoint: .trailing))
+        .shadow(color: .white.opacity(0.9), radius: 0, x: 0, y: 1)
+        .shadow(color: Color(red: 0.88, green: 0.18, blue: 0.50).opacity(0.18), radius: 6, y: 2)
+        .accessibilityAddTraits(.isHeader)
     }
 }

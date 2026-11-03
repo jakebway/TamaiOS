@@ -54,11 +54,20 @@ struct HatchEventPolicy {
     private(set) var lastStages: [String: Int]
     private var until: [String: Double] = [:]
     init(lastStages: [String: Int] = [:]) { self.lastStages = lastStages }
+    /// A real egg stays an egg for minutes. The stage byte also reads 0 for a moment when the toy wakes or resumes,
+    /// so a hatch only counts after the egg has been seen continuously for this long.
+    static let minEggSeconds = 30.0
+    private var zeroSince: [String: Double] = [:]
     mutating func observe(stage: Int, deviceID: String, now: Double) -> Bool {
         guard CareSupport.supports(deviceID), (0...255).contains(stage) else { return false }
         let previous = lastStages[deviceID]; lastStages[deviceID] = stage
-        if stage == 0 { until.removeValue(forKey: deviceID) }
-        guard previous == 0, stage == 1 else { return false }
+        if stage == 0 {
+            until.removeValue(forKey: deviceID)
+            if zeroSince[deviceID] == nil { zeroSince[deviceID] = now }
+            return false
+        }
+        let since = zeroSince.removeValue(forKey: deviceID)
+        guard previous == 0, stage == 1, let since, now - since >= Self.minEggSeconds else { return false }
         until[deviceID] = now + Self.mergeWindow
         return true
     }

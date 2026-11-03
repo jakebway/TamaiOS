@@ -331,9 +331,17 @@ final class IRLink {
         let who = IRLink.tamaLabel(partner)
         if finished {
             switch outcome {
-            case .home: emu.say("Gift delivered, and \(who) is back home. 💕", seconds: 5)
-            case .notOut: emu.say("Done. \(who) is home. 💕", seconds: 5)
-            case .stuck: emu.say("Done, but \(who) didn't make it home. On that device choose GO BACK › YES.", seconds: 8)
+            case .stuck:
+                emu.say("Done, but \(who) didn't make it home. On that device choose GO BACK › YES.", seconds: 8)
+            default:
+                // Your device is still playing the visit scene (about 25 s: the guest plays, says
+                // goodbye and leaves). Say it when that's over, not when the infrared stops.
+                let text = mode == 1 ? "Gift delivered! \(who) is back home. 💕" : "\(who) has gone back home. 💕"
+                emu.note("infrared link: message due when the visit scene ends")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+                    guard emu.toy?.id == me.id, !emu.loading else { return }
+                    emu.say(text, seconds: 5)
+                }
             }
         } else if sawTraffic {
             emu.say("The infrared link stopped early, so nothing was exchanged. \(who) is unchanged. Try again.", seconds: 7)

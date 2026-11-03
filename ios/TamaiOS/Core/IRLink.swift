@@ -12,6 +12,7 @@ final class IRLink {
     fileprivate(set) var active = false
     fileprivate var starting = false
     private var cooldownUntil = 0.0
+    private var lastEnd = 0.0
 
     /// The device's infrared is on (its serial speed was set for infrared).
     static func waiting(_ h: OpaquePointer) -> Bool {
@@ -43,8 +44,13 @@ final class IRLink {
 
     /// Called from the run loop (core locked) whenever the radio state is polled.
     func watch(emu: Emulator, handle h: OpaquePointer, deviceID: String, now: Double) {
-        guard !active, !starting, now >= cooldownUntil, IRLink.waiting(h),
-              !emu.holdForApp, !emu.appWaiting else { return }
+        guard !active, !starting else { return }
+        guard IRLink.waiting(h) else {
+            // you backed out of the WAITING screen: the next time you open it, try again right away
+            if now >= lastEnd + 3 { cooldownUntil = 0 }
+            return
+        }
+        guard now >= cooldownUntil, !emu.holdForApp, !emu.appWaiting else { return }
         guard let model = AppModel.current, let me = emu.toy else { return }
         let others = model.toys.filter { $0.id != me.id && !Town.shared.state($0).away }.sorted(by: { a, b in
             let last = Prefs.d.string(forKey: "ir.lastPartner")
@@ -63,6 +69,7 @@ final class IRLink {
                 run(emu: emu, me: me, partner: partner, mode: mode, role: role)
                 starting = false
                 cooldownUntil = max(cooldownUntil, CACurrentMediaTime() + 1.5)
+                lastEnd = CACurrentMediaTime()
             }
             t.name = "TamaiOS infrared link"
             t.qualityOfService = .userInitiated

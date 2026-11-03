@@ -406,6 +406,7 @@ final class IRLink {
         tg_ir_link(p, 0)
         active = false
         quietUntil = CACurrentMediaTime() + 32
+        Emulator.clockHoldUntil = CACurrentMediaTime() + 240
         // let the visitor settle (it shows its result), then save it where it was kept
         // let it finish whatever it was doing (a half-finished connection times out), show the
         // result, then press C until it is back on its home screen, so it is saved at home

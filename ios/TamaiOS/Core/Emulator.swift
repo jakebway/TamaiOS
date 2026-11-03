@@ -53,6 +53,9 @@ final class Emulator: ObservableObject {
     @Published var calling = false
     /// The toy is on "WAITING FOR APP CONNECT" (Connection › App).
     @Published var appWaiting = false
+    /// Setting the toy's clock while it is playing a long sound or scene can leave the buzzer stuck, so the automatic
+    /// clock fix stays off for a while after a link or an app session.
+    static var clockHoldUntil = 0.0
 
     let audio = AudioOut()
     private let lock = NSLock()
@@ -394,7 +397,7 @@ final class Emulator: ObservableObject {
             if !inputs.isEmpty { lastInput = now }
             // Keep the toy on iPhone time even when it never sleeps: if it is more
             // than a minute off, re-set it while nobody is pressing buttons.
-            if let w = wallNow, now >= nextClockFix, now - lastInput > 5, !radioReady, !IRLink.shared.busy, !IRLink.waiting(h), tg_is_asleep(h) == 0,
+            if let w = wallNow, now >= nextClockFix, now - lastInput > 5, now >= Emulator.clockHoldUntil, !radioReady, !IRLink.shared.busy, !IRLink.waiting(h), tg_is_asleep(h) == 0,
                abs(tg_clock_drift(h)) > 60 {
                 nextClockFix = now + 4
                 let off = tg_clock_drift(h)
@@ -463,6 +466,7 @@ final class Emulator: ObservableObject {
             if radioChanged {
                 let r = radioReady
                 note(r ? "device is waiting for the app" : "device stopped waiting for the app")
+                if !r { Emulator.clockHoldUntil = CACurrentMediaTime() + 240 }      // an app session just ended (unboxing, sounds, scenes)
                 DispatchQueue.main.async { self.appWaiting = r }
             }
             if flags & 2 != 0 { careCall() }

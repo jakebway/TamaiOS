@@ -147,7 +147,16 @@ final class IRLink {
         tg_ir_link(p, 0)
         active = false
         // let the visitor settle (it shows its result), then save it where it was kept
-        tickAll(p, 150, audio)
+        // let it finish whatever it was doing (a half-finished connection times out), show the
+        // result, then press C until it is back on its home screen, so it is saved at home
+        tickAll(p, 500, audio)
+        for _ in 0..<8 {
+            tg_press(p, TGKey.c.rawValue, CACurrentMediaTime())
+            tickAll(p, 8, audio)
+            tg_release(p, TGKey.c.rawValue)
+            tickAll(p, 40, audio)
+        }
+        tickAll(p, 100, audio)
         var out: UnsafeMutablePointer<UInt8>? = nil
         var n = 0
         if tg_snapshot(p, &out, &n) == 1, let out {

@@ -72,7 +72,7 @@ final class LiveTamaName: ObservableObject {
             guard let emu = AppModel.current?.emu, emu.toy?.id == self.deviceID, !emu.loading else {
                 self.probeStatus = "Waiting for emulator availability"; self.schedule(key: key, delay: 5); return
             }
-            if self.running || emu.linkBusy || emu.holdForApp || emu.appWaiting || ArcadeDiagnostics.shared.report().contains("state: active") {
+            if self.running || emu.linkBusy || IRLink.shared.busy || emu.holdForApp || emu.appWaiting || ArcadeDiagnostics.shared.report().contains("state: active") {
                 self.probeStatus = "Deferred during a probe, connection, or arcade round"
                 self.schedule(key: key, delay: 5); return
             }

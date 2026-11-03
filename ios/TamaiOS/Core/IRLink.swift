@@ -12,7 +12,8 @@ final class IRLink {
     fileprivate(set) var active = false
     fileprivate var starting = false
     /// A link is being set up or running: nothing may change the toy's clock or state meanwhile.
-    var busy: Bool { active || starting }
+    var busy: Bool { active || starting || CACurrentMediaTime() < quietUntil }
+    fileprivate var quietUntil = 0.0      // the visit scene keeps playing after the infrared stops: no background reading then
     private var cooldownUntil = 0.0
     private var lastEnd = 0.0
 
@@ -404,6 +405,7 @@ final class IRLink {
         _ = emu.withCore { tg_ir_link($0, 0) }
         tg_ir_link(p, 0)
         active = false
+        quietUntil = CACurrentMediaTime() + 32
         // let the visitor settle (it shows its result), then save it where it was kept
         // let it finish whatever it was doing (a half-finished connection times out), show the
         // result, then press C until it is back on its home screen, so it is saved at home
@@ -468,7 +470,7 @@ extension IRLink {
     /// Background name work waits for a quiet moment so it never competes with play.
     fileprivate static func waitForQuiet(_ emu: Emulator, maxWait: Double = 60) {
         let end = CACurrentMediaTime() + maxWait
-        while CACurrentMediaTime() < end, CACurrentMediaTime() - emu.lastKeyTime < 8 || shared.active || shared.starting {
+        while CACurrentMediaTime() < end, CACurrentMediaTime() - emu.lastKeyTime < 8 || shared.busy {
             Thread.sleep(forTimeInterval: 1)
         }
     }
@@ -532,7 +534,7 @@ extension IRLink {
     }
     private static func startActiveNameRead(identity: String) {
         guard let model = AppModel.current, let toy = model.emu.toy,
-              !model.emu.loading, !shared.active, !shared.starting, !model.emu.holdForApp, !model.emu.appWaiting,
+              !model.emu.loading, !shared.busy, !model.emu.holdForApp, !model.emu.appWaiting,
               UIApplication.shared.applicationState == .active else { return }
         ProfileNameReader.shared.read(emu: model.emu, key: nil, spriteURL: ToyStore.spriteURL(toy.id)) { r in
             guard model.emu.toy?.id == toy.id else { return }

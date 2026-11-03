@@ -98,17 +98,11 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Button { makeBackup() } label: { Label("Back Up", systemImage: "square.and.arrow.up") }
-                    Button { sheet = .picker } label: { Label("Restore from Backup", systemImage: "square.and.arrow.down") }
-                } header: { Text("Backup") } footer: {
-                    Text("TamaiOS saves automatically. Backups are .tamaios files you can keep in Files or iCloud Drive.")
-                }
-
-                Section("Devices") {
-                    NavigationLink { ToysView() } label: { Label("Devices (\(model.toys.count))", systemImage: "square.grid.2x2.fill") }
-                    Button { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.showAdd = true } } label: {
-                        Label("Add Device", systemImage: "plus.circle.fill")
-                    }
+                    DevicesSection()
+                        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                        .listRowBackground(Color.clear)
+                } header: { Text("Devices") } footer: {
+                    Text("Each device has its own Tama, save and clock. Back Up makes a .tamaios file you can keep in Files or iCloud Drive; TamaiOS also saves automatically.")
                 }
 
                 Section {
@@ -130,15 +124,7 @@ struct SettingsView: View {
                     Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
-
-                Section {
-                    Button(role: .destructive) { showReset = true } label: { Label("Reset Device…", systemImage: "exclamationmark.triangle.fill") }
-                        .disabled(emu.toy == nil || emu.loading || AppLink.shared.busy)
-                } header: { Text("Danger Zone") } footer: {
-                    Text("Erase this Tama and start fresh. Its variant, other devices, and exported backups are kept.")
-                }
             }
-            .sheet(isPresented: $showReset) { ResetDeviceView().environmentObject(model).environmentObject(emu) }
             .buttonStyle(SettingsRowButtonStyle())
             .environment(\.defaultMinListRowHeight, 52)
             .navigationTitle("Settings")
@@ -200,7 +186,8 @@ struct ActivityView: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
 
-struct ToysView: View {
+/// Every device as a card: its Tama, which game it is, and its own Back Up / Restore / Reset.
+struct DevicesSection: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var emu: Emulator
     @Environment(\.dismiss) private var dismiss
@@ -210,62 +197,35 @@ struct ToysView: View {
     @State private var shareURL: ShareItem?
     @State private var message: String?
 
+    private func tamaName(_ t: Toy) -> String? { LiveTamaName.savedName(t.id) }
+
     var body: some View {
-        List {
-            ForEach(model.toys) { t in
-                HStack(spacing: 10) {
-                    Button {
-                        model.play(t)
-                        dismiss()
-                    } label: {
-                        HStack(spacing: 14) {
-                            EggBadge(theme: Theme.of(t.color)).frame(width: 34, height: 42)
-                            VStack(alignment: .leading) {
-                                Text(LiveTamaName.savedName(t.id) ?? t.name).font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
-                                Text(t.romName).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if emu.toy?.id == t.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    Menu {
-                        Button { backUp(t) } label: { Label("Back Up", systemImage: "square.and.arrow.up") }
-                        Button { restoring = t } label: { Label("Restore from Backup…", systemImage: "square.and.arrow.down") }
-                        Button(role: .destructive) { resetting = t } label: { Label("Reset…", systemImage: "arrow.counterclockwise") }
-                    } label: {
-                        Image(systemName: "ellipsis.circle").font(.title3).frame(width: 36, height: 36)
-                    }
-                }
-                .swipeActions {
-                    Button(role: .destructive) { deleting = t } label: { Label("Delete", systemImage: "trash") }
-                }
-            }
+        VStack(spacing: 12) {
+            ForEach(model.toys) { t in card(t) }
+            addButton
         }
-        .navigationTitle("Devices")
-        .confirmationDialog("Delete \(deleting?.name ?? "")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+        .confirmationDialog("Delete \(deleting.map { tamaName($0) ?? $0.name } ?? "")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
             Button("Delete Device and Saves", role: .destructive) {
                 if let d = deleting { model.remove(d) }
                 deleting = nil
             }
         } message: { Text("This removes the ROM and all saves for it from this iPhone. Make a backup first if you might want it back.") }
-        .confirmationDialog("Reset \(resetting.map { LiveTamaName.savedName($0.id) ?? $0.name } ?? "")?", isPresented: Binding(get: { resetting != nil }, set: { if !$0 { resetting = nil } }), titleVisibility: .visible) {
+        .confirmationDialog("Reset \(resetting.map { tamaName($0) ?? $0.name } ?? "")?", isPresented: Binding(get: { resetting != nil }, set: { if !$0 { resetting = nil } }), titleVisibility: .visible) {
             Button("Erase This Tama and Start Fresh", role: .destructive) {
                 if let t = resetting {
                     do { try model.reset(t) } catch { message = error.localizedDescription }
                 }
                 resetting = nil
             }
-        } message: { Text("Only this device is erased: its Tama, saves and pickup queue. Other devices and your exported backups are kept. Back it up first if you might want it back.") }
+        } message: { Text("Only this device is erased: its Tama, saves and pickup queue. Your other devices and exported backups are kept. Back it up first if you might want it back.") }
         .sheet(item: $shareURL) { ActivityView(items: [$0.url]) }
         .sheet(item: $restoring) { t in
             DocumentPicker { u in
                 restoring = nil
                 if let d = try? ToyStore.readPicked(u), model.restoreBackup(d, into: t) {
-                    message = "Restored \(t.name)."
+                    message = "Restored \(tamaName(t) ?? t.name)."
                 } else {
-                    message = "That backup doesn't fit \(t.name). Pick a .tamaios backup made from this same device (same ROM version)."
+                    message = "That backup doesn't fit \(tamaName(t) ?? t.name). Pick a .tamaios backup made from this same game (same ROM version)."
                 }
             }
             .ignoresSafeArea()
@@ -275,11 +235,107 @@ struct ToysView: View {
         }
     }
 
+    private func card(_ t: Toy) -> some View {
+        let theme = Theme.of(t.color)
+        let current = emu.toy?.id == t.id
+        return VStack(spacing: 12) {
+            Button {
+                model.play(t)
+                dismiss()
+            } label: {
+                HStack(spacing: 14) {
+                    EggBadge(theme: theme).frame(width: 38, height: 48)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(tamaName(t) ?? t.name)
+                            .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
+                        Text(tamaName(t) == nil ? t.romName : "\(t.name) · \(t.romName)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    if current {
+                        Text("Playing")
+                            .font(.system(.caption2, design: .rounded).weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(Capsule().fill(Color.green.gradient))
+                    } else {
+                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 8) {
+                pill("Back Up", "square.and.arrow.up", tint: theme.bottom) { backUp(t) }
+                pill("Restore", "square.and.arrow.down", tint: theme.bottom) { restoring = t }
+                pill("Reset", "arrow.counterclockwise", tint: .red) { resetting = t }
+                Menu {
+                    Button(role: .destructive) { deleting = t } label: { Label("Delete Device…", systemImage: "trash") }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.footnote.weight(.bold)).foregroundStyle(.secondary)
+                        .frame(width: 38, height: 34)
+                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(current ? theme.bottom.opacity(0.9) : Color.clear, lineWidth: 2))
+        )
+    }
+
+    private func pill(_ title: String, _ icon: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.caption.weight(.bold))
+                Text(title).font(.system(.footnote, design: .rounded).weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(tint == .red ? Color.red : Color.primary)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .background(Capsule().fill(tint.opacity(tint == .red ? 0.12 : 0.22)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var addButton: some View {
+        Button {
+            dismiss()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.showAdd = true }
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "plus")
+                    .font(.title3.weight(.bold))
+                    .frame(width: 42, height: 42)
+                    .background(Circle().fill(Color.white.opacity(0.25)))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Add a device").font(.system(.headline, design: .rounded))
+                    Text("Wonder Garden, Fairy or Magic").font(.caption).opacity(0.85)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).opacity(0.7)
+            }
+            .foregroundStyle(.white)
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(red: 0.98, green: 0.45, blue: 0.66), Color(red: 0.62, green: 0.48, blue: 0.96)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+            )
+            .shadow(color: Color(red: 0.62, green: 0.48, blue: 0.96).opacity(0.35), radius: 8, y: 4)
+        }
+        .buttonStyle(.plain)
+    }
+
     private func backUp(_ t: Toy) {
         DispatchQueue.global(qos: .userInitiated).async {
             let u = model.backupFile(for: t)
             DispatchQueue.main.async {
-                if let u { shareURL = ShareItem(url: u) } else { message = "Couldn't make a backup of \(t.name)." }
+                if let u { shareURL = ShareItem(url: u) } else { message = "Couldn't make a backup of \(tamaName(t) ?? t.name)." }
             }
         }
     }

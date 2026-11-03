@@ -55,6 +55,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 }
 
 /// The toys and which one is in play.
+struct IRChoice {
+    let candidates: [Toy]
+    let pick: (Toy) -> Void
+    let cancel: () -> Void
+}
+
 final class AppModel: ObservableObject {
     static weak var current: AppModel?
     let emu = Emulator()
@@ -65,6 +71,8 @@ final class AppModel: ObservableObject {
     /// Ask the toy screen to open Tamatown.
     @Published var openTown = false
     @Published var openPickup = false
+    /// Several other devices could answer an infrared connection: ask which one.
+    @Published var irChoice: IRChoice?
 
     init() {
         toys = ToyStore.list()
@@ -181,6 +189,16 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(nil)
+        .confirmationDialog("Link with which device?", isPresented: Binding(get: { model.irChoice != nil }, set: { _ in }), titleVisibility: .visible) {
+            if let c = model.irChoice {
+                ForEach(c.candidates) { t in
+                    Button(t.name) { model.irChoice = nil; c.pick(t) }
+                }
+                Button("Cancel", role: .cancel) { model.irChoice = nil; c.cancel() }
+            }
+        } message: {
+            Text("It wakes up, joins your connection, and goes back to sleep afterwards.")
+        }
     }
 }
 struct BundledDevicePicker: View {

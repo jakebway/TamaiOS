@@ -31,24 +31,31 @@ final class IRLink {
     func watch(emu: Emulator, handle h: OpaquePointer, deviceID: String, now: Double) {
         guard !active, !starting, now >= cooldownUntil, IRLink.waiting(h),
               !emu.holdForApp, !emu.appWaiting else { return }
-        guard let model = AppModel.current,
-              let me = emu.toy,
-              let partner = model.toys.filter({ $0.id != me.id }).sorted(by: { a, b in
-                  (a.romName == me.romName ? 0 : 1, a.name) < (b.romName == me.romName ? 0 : 1, b.name)
-              }).first else {
-            cooldownUntil = now + 5
-            return
-        }
+        guard let model = AppModel.current, let me = emu.toy else { return }
+        let others = model.toys.filter { $0.id != me.id }.sorted(by: { a, b in
+            (a.romName == me.romName ? 0 : 1, a.name) < (b.romName == me.romName ? 0 : 1, b.name)
+        })
+        guard !others.isEmpty else { cooldownUntil = now + 5; return }
         starting = true
         let mode = IRLink.mode(h, deviceID: deviceID)
-        let t = Thread { [self] in
-            run(emu: emu, me: me, partner: partner, mode: mode)
-            starting = false
-            cooldownUntil = CACurrentMediaTime() + 5
+        let begin: (Toy) -> Void = { [self] partner in
+            let t = Thread { [self] in
+                run(emu: emu, me: me, partner: partner, mode: mode)
+                starting = false
+                cooldownUntil = CACurrentMediaTime() + 5
+            }
+            t.name = "TamaiOS infrared link"
+            t.qualityOfService = .userInitiated
+            t.start()
         }
-        t.name = "TamaiOS infrared link"
-        t.qualityOfService = .userInitiated
-        t.start()
+        if others.count == 1 { begin(others[0]); return }
+        // more than one other device: ask which one to link with
+        DispatchQueue.main.async {
+            model.irChoice = IRChoice(candidates: others, pick: begin, cancel: { [self] in
+                starting = false
+                cooldownUntil = CACurrentMediaTime() + 20
+            })
+        }
     }
 
     private func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {

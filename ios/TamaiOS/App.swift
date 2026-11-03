@@ -80,6 +80,7 @@ final class AppModel: ObservableObject {
         Town.shared.loadIfPresent()
         if let t = currentToy { emu.load(t) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { IRLink.refreshNames() }
+        IRLink.watchActiveName()
     }
 
     var currentToy: Toy? {
@@ -92,6 +93,7 @@ final class AppModel: ObservableObject {
         emu.load(toy)
         objectWillChange.send()
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { IRLink.refreshNames() }
+        IRLink.watchActiveName()
     }
 
     func added(_ toy: Toy) {

@@ -1,5 +1,6 @@
 import Foundation
 import QuartzCore
+import UIKit
 
 /// Infrared between two of your own devices. When the device you're playing reaches the
 /// "WAITING…" screen of Connection › Tamagotchi (PLAYDATE, GIFT or MARRY), another device of
@@ -403,6 +404,35 @@ extension IRLink {
     /// Garden). Each device is started from its save as a disposable copy, taken to Connection › App,
     /// and asked hello like the phone app does; the answer carries the Tama's name. Nothing is saved
     /// back, so the real device isn't touched and its clock isn't moved.
+    private static var activeNameLoop = UUID()
+    /// Names for the device you're playing when it isn't the one with the live name sync (the same
+    /// PROFILE-page reading, on a hidden copy): a first check soon after it opens, then every few minutes.
+    static func watchActiveName() {
+        let token = UUID(); activeNameLoop = token
+        func tick(_ delay: Double) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard activeNameLoop == token else { return }
+                refreshActiveName()
+                tick(240)
+            }
+        }
+        tick(20)
+    }
+    static func refreshActiveName() {
+        guard let model = AppModel.current, let toy = model.emu.toy, toy.id != BathroomEventPolicy.supportedDeviceID,
+              !model.emu.loading, !shared.active, !shared.starting, !model.emu.holdForApp, !model.emu.appWaiting,
+              UIApplication.shared.applicationState == .active else { return }
+        ProfileNameReader.shared.read(emu: model.emu, key: nil) { r in
+            guard model.emu.toy?.id == toy.id else { return }
+            if let n = r.name, !n.isEmpty {
+                if LiveTamaName.savedName(toy.id) != n {
+                    Prefs.d.set(n, forKey: "tamaName.v1." + toy.id)
+                    model.emu.note("name sync: \(toy.name) is \(n)")
+                    model.objectWillChange.send()
+                }
+            }
+        }
+    }
     private static var namesChecked = Set<String>()
     static func refreshNames(note: ((String) -> Void)? = nil) {
         guard let model = AppModel.current else { return }

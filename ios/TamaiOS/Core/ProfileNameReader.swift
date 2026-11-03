@@ -12,7 +12,7 @@ struct NameProbeResult {
 final class ProfileNameReader {
     static let shared = ProfileNameReader()
     private let queue = DispatchQueue(label: "TamaiOS.disposable-name-reader", qos: .utility)
-    func read(emu: Emulator, key: String, completion: @escaping (NameProbeResult) -> Void) {
+    func read(emu: Emulator, key: String?, completion: @escaping (NameProbeResult) -> Void) {
         queue.async {
             let start = ProcessInfo.processInfo.systemUptime
             guard let seed = emu.withCore({ tg_name_seed_capture($0) }) ?? nil else {

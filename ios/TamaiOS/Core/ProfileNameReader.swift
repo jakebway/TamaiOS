@@ -15,37 +15,44 @@ final class ProfileNameReader {
     func read(emu: Emulator, key: String, completion: @escaping (NameProbeResult) -> Void) {
         queue.async {
             let start = ProcessInfo.processInfo.systemUptime
-            let captureStart = start
             guard let seed = emu.withCore({ tg_name_seed_capture($0) }) ?? nil else {
                 DispatchQueue.main.async { completion(NameProbeResult(name: nil, detail: "Could not capture live snapshot")) }; return
             }
-            let captureMS = (ProcessInfo.processInfo.systemUptime - captureStart) * 1000
-            defer { tg_name_seed_destroy(seed) }
-            let owner = self.text(seed, kind: 0)
-            let identity = self.text(seed, kind: 1)
-            var result = NameProbeResult(name: nil, detail: "Profile name could not be verified", captureMS: captureMS)
-            guard key.hasSuffix("." + identity), NameRecognitionPolicy.normalized(owner).count >= 2 else {
-                result.detail = "Snapshot identity changed or owner header was unavailable"
-                let finished = result
-                DispatchQueue.main.async { completion(finished) }; return
-            }
-            let deadline = ProcessInfo.processInfo.systemUptime + 12
-            // Every strategy starts from the SAME seed, not the previous strategy's changed state.
-            // C backs out toward Home on the disposable copy; OCR rejects incorrect destination pages.
-            for backs in [8, 4, 2, 1, 0] {
-                if ProcessInfo.processInfo.systemUptime >= deadline { result.detail = "Probe reached its time budget"; break }
-                var attemptTrace: [String] = []
-                let found = autoreleasepool {
-                    self.attempt(seed: seed, backs: backs, owner: owner, deadline: deadline, trace: &attemptTrace)
-                }
-                result.trace += attemptTrace
-                if let found { result.name = found; result.detail = "Two matching profile OCR reads with the owner header verified"; break }
-            }
-            result.workMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
-            result.trace = Array(result.trace.suffix(12))
-            let finished = result
+            let captureMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
+            let finished = self.process(seed: seed, key: key, start: start, captureMS: captureMS)
             DispatchQueue.main.async { completion(finished) }
         }
+    }
+    /// Same as `read`, for a device that isn't the one on screen: reads a headless core you own.
+    func readNow(handle: OpaquePointer) -> NameProbeResult {
+        let start = ProcessInfo.processInfo.systemUptime
+        guard let seed = tg_name_seed_capture(handle) else { return NameProbeResult(name: nil, detail: "Could not capture a snapshot") }
+        return process(seed: seed, key: nil, start: start, captureMS: 0)
+    }
+    private func process(seed: OpaquePointer, key: String?, start: Double, captureMS: Double) -> NameProbeResult {
+        defer { tg_name_seed_destroy(seed) }
+        let owner = self.text(seed, kind: 0)
+        let identity = self.text(seed, kind: 1)
+        var result = NameProbeResult(name: nil, detail: "Profile name could not be verified", captureMS: captureMS)
+        guard key.map({ $0.hasSuffix("." + identity) }) ?? true, NameRecognitionPolicy.normalized(owner).count >= 2 else {
+            result.detail = "Snapshot identity changed or owner header was unavailable"
+            return result
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 12
+        // Every strategy starts from the SAME seed, not the previous strategy's changed state.
+        // C backs out toward Home on the disposable copy; OCR rejects incorrect destination pages.
+        for backs in [8, 4, 2, 1, 0] {
+            if ProcessInfo.processInfo.systemUptime >= deadline { result.detail = "Probe reached its time budget"; break }
+            var attemptTrace: [String] = []
+            let found = autoreleasepool {
+                self.attempt(seed: seed, backs: backs, owner: owner, deadline: deadline, trace: &attemptTrace)
+            }
+            result.trace += attemptTrace
+            if let found { result.name = found; result.detail = "Two matching profile OCR reads with the owner header verified"; break }
+        }
+        result.workMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
+        result.trace = Array(result.trace.suffix(12))
+        return result
     }
     private func text(_ seed: OpaquePointer, kind: Int32) -> String {
         var p: UnsafeMutablePointer<UInt8>? = nil

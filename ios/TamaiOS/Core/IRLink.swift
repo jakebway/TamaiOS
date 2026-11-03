@@ -51,7 +51,7 @@ final class IRLink {
             let t = Thread { [self] in
                 run(emu: emu, me: me, partner: partner, mode: mode, role: role)
                 starting = false
-                cooldownUntil = CACurrentMediaTime() + 5
+                cooldownUntil = max(cooldownUntil, CACurrentMediaTime() + 5)
             }
             t.name = "TamaiOS infrared link"
             t.qualityOfService = .userInitiated
@@ -72,32 +72,39 @@ final class IRLink {
     }
 
     private func run(emu: Emulator, me: Toy, partner: Toy, mode: Int, role: Int) {
-        let (maybe, _) = Emulator.makeHandle(partner)
-        guard let p = maybe else { return }
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
-        defer { audio.deallocate(); tg_destroy(p) }
-        tg_set_volume(p, 0)
-        tg_set_never_sleep(p, 0)
-        tg_wake(p)
-        tickAll(p, 50, audio)
+        var visitor: OpaquePointer?
+        defer { audio.deallocate(); if let v = visitor { tg_destroy(v) } }
         // C backs out to the home screen; A opens the menu (PROFILE) and walks to Connection;
-        // B, B enters Connection › Tamagotchi; A picks the mode; for GIFT the visitor receives.
-        var keys: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b]
-        keys += Array(repeating: .a, count: mode)
-        // GIFT asks GIVE or RECEIVE: the visitor takes the opposite of what you chose
-        // (RECEIVE when you give or when unsure; GIVE then picks the first thing in the BOX).
-        if mode == 1 { keys += role == 1 ? [.b, .b, .b] : [.b, .a] }
-        keys += [.b]
-        for k in keys {
-            tg_press(p, k.rawValue, CACurrentMediaTime())
-            tickAll(p, 8, audio)
-            tg_release(p, k.rawValue)
-            tickAll(p, 40, audio)
+        // B, B enters Connection › Tamagotchi; A picks the mode. Devices differ in what comes
+        // after choosing GIFT (GIVE / RECEIVE), so try the likely endings until one reaches WAITING.
+        let head: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b] + Array(repeating: .a, count: mode)
+        var tails: [[TGKey]] = [[.b]]
+        if mode == 1 {
+            // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
+            tails = role == 1 ? [[.b, .b, .b], [.b, .b]] : [[.b, .a, .b], [.b, .b], [.b, .a, .a, .b]]
         }
-        tickAll(p, 25, audio)
-        guard IRLink.waiting(p) else {
-            emu.note("infrared link: \(partner.name) didn't reach the waiting screen")
+        for tail in tails {
+            if let v = visitor { tg_destroy(v); visitor = nil }
+            guard let v = Emulator.makeHandle(partner).0 else { return }
+            visitor = v
+            tg_set_volume(v, 0)
+            tg_set_never_sleep(v, 0)
+            tg_wake(v)
+            tickAll(v, 50, audio)
+            for k in head + tail {
+                tg_press(v, k.rawValue, CACurrentMediaTime())
+                tickAll(v, 8, audio)
+                tg_release(v, k.rawValue)
+                tickAll(v, 40, audio)
+            }
+            tickAll(v, 25, audio)
+            if IRLink.waiting(v) { break }
+            emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })")
+        }
+        guard let p = visitor, IRLink.waiting(p) else {
             emu.say("The other device couldn't get ready (is its Tama home and awake?). Nothing was changed.", seconds: 6)
+            cooldownUntil = CACurrentMediaTime() + 60
             return
         }
         guard emu.withCore({ h -> Bool in
@@ -155,7 +162,7 @@ final class IRLink {
                 if now - lastTraffic > 8 { break }
             } else if !stillOn {
                 if idleSince == nil { idleSince = now }
-                if now - idleSince! > 3 { break }
+                if now - idleSince! > 20 { break }
             } else { idleSince = nil }
             if !sawTraffic && now - began > 180 { break }
             if now - began > 600 { break }

@@ -8,12 +8,11 @@ It is not affiliated with, endorsed by, or connected to Bandai or the Tamagotchi
 
 - **Runs the real toy firmware.** The app does not reimplement the game. It emulates the toy's ARM processor, memory and screen, and runs the firmware dumped from a real device, so the pet behaves like the real thing.
 - **Several devices at once.** You can keep up to 6 saved devices (for example Fairy, Magic and Wonder Garden) and switch between them. Only the device you are looking at runs and notifies you; the others are paused and their clocks are kept correct for you.
-- **Real names and sprites.** Each saved device shows its Tama's actual name and picture, read from the device itself, so you see "Billytchi" rather than a device label.
 - **Playdates, gifts and marriage.** These use the toy's own menus. The app plays the part of the other toy over the emulated infrared link, waking another saved device in the background when it is needed.
 - **Tamatown / TamaDepa.** Browse and send items and characters from the MyMeets and WebMeets collections to your Tama using the same download protocol the real toy uses.
 - **Saves you can trust.** Flash and state are saved and validated against the firmware they came from, so a bad save never gets loaded into the wrong ROM.
 
-## How it works (the honest version)
+## How it works
 
 | Part | What it is |
 |---|---|
@@ -57,4 +56,4 @@ There is no Mac required. Everything is built by GitHub Actions on a macOS runne
 
 ## Status
 
-A personal project, shared openly so others can see how it works. It comes with no warranty and no support promise.
+A personal project, shared openly so others can see how it works. Support is not guaranteed.

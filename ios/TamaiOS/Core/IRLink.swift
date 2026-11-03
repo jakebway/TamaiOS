@@ -103,6 +103,7 @@ final class IRLink {
         let began = last
         var idleSince: Double? = nil
         var sawTraffic = false
+        var lastTraffic = CACurrentMediaTime()
         while true {
             let now = CACurrentMediaTime()
             let dt = min(now - last, 0.1)
@@ -114,7 +115,7 @@ final class IRLink {
                 moved = false
                 let n = tg_ir_take(p, &buf, buf.count)
                 if n > 0 {
-                    moved = true; sawTraffic = true
+                    moved = true; sawTraffic = true; lastTraffic = CACurrentMediaTime()
                     buf.withUnsafeBufferPointer { bp in
                         _ = emu.withCore { h in tg_ir_deliver(h, bp.baseAddress, n) }
                     }
@@ -125,13 +126,16 @@ final class IRLink {
                 } ?? -1
                 if m < 0 { break }
                 if m > 0 {
-                    moved = true; sawTraffic = true
+                    moved = true; sawTraffic = true; lastTraffic = CACurrentMediaTime()
                     buf.withUnsafeBufferPointer { bp in tg_ir_deliver(p, bp.baseAddress, m) }
                 }
             }
-            // is it over? (your toy left the infrared screen, or the app switched devices)
+            // is it over? Once data has flowed, only silence ends it (the infrared speed changes
+            // during a connection, so "waiting" can't be trusted); before that, leaving the screen does.
             guard let stillOn = emu.withCore({ IRLink.waiting($0) }), emu.toy?.id == me.id else { break }
-            if !stillOn {
+            if sawTraffic {
+                if now - lastTraffic > 8 { break }
+            } else if !stillOn {
                 if idleSince == nil { idleSince = now }
                 if now - idleSince! > 3 { break }
             } else { idleSince = nil }
@@ -151,7 +155,10 @@ final class IRLink {
             tg_free(out, n)
             try? d.write(to: ToyStore.snapURL(partner.id), options: .atomic)
         }
-        emu.say("Infrared visit finished. \(partner.name) is back home. 💕", seconds: 5)
+        if sawTraffic {
+            let who = LiveTamaName.savedName(partner.id) ?? "Your other Tama"
+            emu.say("\(who) has returned home. 💕", seconds: 5)
+        }
         emu.note("infrared link ended")
     }
 }

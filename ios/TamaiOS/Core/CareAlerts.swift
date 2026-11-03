@@ -46,7 +46,7 @@ final class CareAlerts: ObservableObject {
     private struct Event {
         let id: String
         let deviceID: String
-        let name: String
+        var name: String
         let source: Source
         let mask: Int
         let raw: Int
@@ -210,7 +210,20 @@ final class CareAlerts: ObservableObject {
         let event = Event(id: token, deviceID: deviceID, name: LiveTamaName.shared.name, source: .hatch,
                           mask: mask, raw: raw, stage: stage, observedAt: observedAt, generation: generation, episode: 0)
         guard !inFlight.contains(event.key) else { count("hatch skipped: care request in progress"); return }
-        inFlight.insert(event.key); attempt(event, pass: 0)
+        inFlight.insert(event.key); waitForHatchName(event, passes: 0)
+    }
+    /// The name isn't known the instant the egg hatches; the profile reader finds it a few seconds
+    /// later (it runs in the background too). Hold the notification up to ~45 s so it says the name.
+    private func waitForHatchName(_ event: Event, passes: Int) {
+        guard event.generation == generation, enabled, isCurrent(event) else { skip(event, "hatch superseded while waiting for the name"); return }
+        if let n = LiveTamaName.shared.verifiedName, !n.isEmpty {
+            var e = event; e.name = n
+            record("HATCH name known: \(n)")
+            attempt(e, pass: 0); return
+        }
+        if passes >= 30 { record("HATCH name still unknown; sending without it"); attempt(event, pass: 0); return }
+        if passes % 5 == 4 { LiveTamaName.shared.requestCheck() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.waitForHatchName(event, passes: passes + 1) }
     }
     func observeBathroom(raw: Int, deviceID: String, observedAt: Double) {
         DispatchQueue.main.async {

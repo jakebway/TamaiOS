@@ -21,6 +21,11 @@ final class LiveTamaName: ObservableObject {
     private var captureMS = 0.0
     private var workMS = 0.0
     private var trace: [String] = []
+    /// The last verified Tama name seen on a device (also for devices that aren't running now).
+    static func savedName(_ deviceID: String) -> String? {
+        let n = Prefs.d.string(forKey: "tamaName.v1." + deviceID) ?? ""
+        return n.isEmpty ? nil : n
+    }
     var verifiedName: String? { probeName.isEmpty ? nil : probeName }
     private init() {
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -106,6 +111,7 @@ final class LiveTamaName: ObservableObject {
         else if let observed = LiveNamePolicy.observedName(deviceID: deviceID, stage: stage, character: character) {
             next = observed; detail = "Observed baby mapping fallback while automatic profile verification is pending"
         } else { next = "Your Tama"; detail = "Waiting for a verified profile name; no owner or old-visitor substitution" }
+        if !probeName.isEmpty, !deviceID.isEmpty { Prefs.d.set(probeName, forKey: "tamaName.v1." + deviceID) }
         if name != next { name = next }; if source != detail { source = detail }
     }
     func diagnostics() -> String {

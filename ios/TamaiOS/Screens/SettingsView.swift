@@ -27,6 +27,7 @@ struct SettingsView: View {
     @ObservedObject private var careAlerts = CareAlerts.shared
     @ObservedObject private var liveName = LiveTamaName.shared
     @State private var name = ""
+    @State private var nameFor = ""
     @State private var confirmRestart = false
     @State private var showReset = false
     enum SettingsSheet: Identifiable {
@@ -143,7 +144,8 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button { if let t = emu.toy { rename(t) }; dismiss() } label: { Text("Done").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) } } }
-            .onAppear { name = emu.toy?.name ?? ""; careAlerts.prepare() }
+            .onAppear { name = emu.toy?.name ?? ""; nameFor = emu.toy?.id ?? ""; careAlerts.prepare() }
+            .onChange(of: emu.toy?.id) { _ in name = emu.toy?.name ?? ""; nameFor = emu.toy?.id ?? "" }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in careAlerts.refresh() }
             .onChange(of: soundOn) { _ in emu.applySettings() }
             .onChange(of: volume) { _ in emu.applySettings() }
@@ -173,7 +175,7 @@ struct SettingsView: View {
 
     private func rename(_ toy: Toy) {
         let n = name.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty, n != toy.name else { return }
+        guard toy.id == nameFor, !n.isEmpty, n != toy.name else { return }
         var t = toy; t.name = n; model.update(t)
     }
 

@@ -61,6 +61,9 @@ final class Console: ObservableObject {
             return CareAlerts.shared.diagnostics()
         case "namelog":
             return LiveTamaName.shared.diagnostics()
+        case "names":
+            IRLink.refreshNames(note: { emu.note($0) })
+            return "Reading Tama names from your other devices. Run applog in about 20 seconds."
         case "namecheck":
             LiveTamaName.shared.requestCheck()
             return "Scheduled a disposable-copy name check; no live menu presses. Run namelog after it finishes."

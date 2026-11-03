@@ -382,7 +382,7 @@ extension IRLink {
     /// Garden). Each device is started from its save as a disposable copy, taken to Connection › App,
     /// and asked hello like the phone app does; the answer carries the Tama's name. Nothing is saved
     /// back, so the real device isn't touched and its clock isn't moved.
-    static func refreshNames() {
+    static func refreshNames(note: ((String) -> Void)? = nil) {
         guard let model = AppModel.current else { return }
         let toys = model.toys.filter { LiveTamaName.savedName($0.id) == nil && !Town.shared.state($0).away }
         guard !toys.isEmpty else { return }
@@ -392,7 +392,9 @@ extension IRLink {
             defer { probing = false }
             for t in toys {
                 if shared.active || shared.starting { break }
-                if let n = shared.readName(t) {
+                let log: (String) -> Void = { m in (note ?? { AppModel.current?.emu.note($0) })("name reader: \(t.name): \(m)") }
+                if let n = shared.readName(t, log: log) {
+                    log("found \(n)")
                     Prefs.d.set(n, forKey: "tamaName.v1." + t.id)
                     DispatchQueue.main.async { AppModel.current?.objectWillChange.send() }
                 }
@@ -400,8 +402,8 @@ extension IRLink {
         }
     }
 
-    fileprivate func readName(_ toy: Toy) -> String? {
-        guard let p = Emulator.makeHandle(toy).0 else { return nil }
+    fileprivate func readName(_ toy: Toy, log: (String) -> Void) -> String? {
+        guard let p = Emulator.makeHandle(toy).0 else { log("could not start"); return nil }
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
         defer { audio.deallocate(); tg_destroy(p) }
         tg_set_volume(p, 0)
@@ -417,13 +419,14 @@ extension IRLink {
             tickAll(p, 22, audio)
         }
         for _ in 0..<100 where tg_radio_ready(p) == 0 { tickAll(p, 1, audio) }
-        guard tg_radio_ready(p) != 0 else { return nil }
+        guard tg_radio_ready(p) != 0 else { log("never reached WAITING FOR APP"); return nil }
         tg_radio_connect(p, 1)
         defer { tickAll(p, 5, audio); tg_radio_connect(p, 0) }
-        guard radioSend(p, TamaLink.packet(op: 0x17, cmd: 0), audio), let hello = radioAnswer(p, audio) else { return nil }
+        guard radioSend(p, TamaLink.packet(op: 0x17, cmd: 0), audio), let hello = radioAnswer(p, audio) else { log("no answer to hello"); return nil }
         let name = Town.decodeName(hello)
+        log("hello \(hello.count) bytes, name '\(name)'")
         let letters = name.filter { $0.isLetter }
-        guard (1...12).contains(letters.count), letters.count == name.filter({ !$0.isWhitespace }).count else { return nil }
+        guard (1...12).contains(letters.count), letters.count == name.filter({ !$0.isWhitespace }).count else { log("no usable name yet (egg?)"); return nil }
         return name
     }
 }

@@ -437,11 +437,11 @@ final class IRLink {
             default:
                 // Your device is still playing the visit scene (about 25 s: the guest plays, says
                 // goodbye and leaves). Say it when that's over, not when the infrared stops.
-                let text = mode == 1 ? "Gift delivered! \(who) is back home. 💕" : (mode == 3 ? "Travel is over. \(who) is back home. ✈️" : "\(who) has gone back home. 💕")
+                let text = mode == 1 ? "Gift delivered! \(who) is back home. 💕" : (mode == 3 ? "Travel is over. \(who) is heading home. ✈️" : "\(who) is heading home. 💕")
                 emu.note("infrared link: message due when the visit scene ends")
                 // counted from the last infrared traffic (not from when the link thread finished, which is
                 // some 10 s later: it waits out 8 s of silence first)
-                let wait = max(0.5, lastTraffic + 28 - CACurrentMediaTime())
+                let wait = max(0.5, lastTraffic + 33 - CACurrentMediaTime())
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
                     guard emu.toy?.id == me.id, !emu.loading else { return }
                     emu.say(text, seconds: 5)

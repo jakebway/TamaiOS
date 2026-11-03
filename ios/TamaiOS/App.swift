@@ -116,6 +116,69 @@ final class AppModel: ObservableObject {
         if let t = currentToy { play(t) }
     }
 
+    // MARK: per-device backup / restore / reset (any device in the list, without switching to it)
+
+    private func forgetName(_ id: String) {
+        Prefs.d.removeObject(forKey: "tamaName.v1." + id)
+        Prefs.d.removeObject(forKey: "tamaIdentity.v1." + id)
+    }
+
+    /// A backup file for `toy`: its live state if it's the one running, otherwise its last save.
+    func backupFile(for toy: Toy) -> URL? {
+        if emu.toy?.id == toy.id { return emu.backupFile() }
+        guard let d = try? Data(contentsOf: ToyStore.snapURL(toy.id)) else { return nil }
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd-HHmm"
+        let u = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(toy.name.replacingOccurrences(of: "/", with: "-")) \(f.string(from: Date())).tamaios")
+        do { try d.write(to: u, options: .atomic) } catch { return nil }
+        return u
+    }
+
+    /// Restore a backup into `toy`; false if it doesn't fit that device's ROM.
+    func restoreBackup(_ data: Data, into toy: Toy) -> Bool {
+        if emu.toy?.id == toy.id { let ok = emu.restoreBackup(data); if ok { forgetName(toy.id) }; return ok }
+        guard let rom = try? Data(contentsOf: ToyStore.romURL(toy.id)) else { return false }
+        let fits = rom.withUnsafeBytes { r in data.withUnsafeBytes { s in
+            tg_check_snapshot(r.bindMemory(to: UInt8.self).baseAddress, r.count, s.bindMemory(to: UInt8.self).baseAddress, s.count)
+        } } == 1
+        guard fits else { return false }
+        let fm = FileManager.default
+        let snap = ToyStore.snapURL(toy.id)
+        try? fm.removeItem(at: snap.appendingPathExtension("bak"))
+        try? fm.copyItem(at: snap, to: snap.appendingPathExtension("bak"))
+        guard (try? data.write(to: snap, options: .atomic)) != nil else { return false }
+        for u in [ToyStore.flashURL(toy.id), ToyStore.flashMetaURL(toy.id)] {
+            try? fm.removeItem(at: u.appendingPathExtension("bak"))
+            try? fm.moveItem(at: u, to: u.appendingPathExtension("bak"))
+        }
+        forgetName(toy.id)
+        return true
+    }
+
+    /// Erase `toy` and start it fresh, whichever device is running.
+    func reset(_ toy: Toy) throws {
+        if emu.toy?.id == toy.id { try resetCurrentDevice(); return }
+        guard !IRLink.shared.active else { throw ImportError.unreadable("Finish the infrared link first.") }
+        let fm = FileManager.default
+        let working = ToyStore.dir(toy.id)
+        let staging = ToyStore.root.appendingPathComponent(".reset-" + UUID().uuidString, isDirectory: true)
+        let previous = ToyStore.root.appendingPathComponent(".previous-" + UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: staging) }
+        try fm.copyItem(at: ToyStore.romURL(toy.id), to: staging.appendingPathComponent("rom.bin"))
+        var fresh = toy
+        fresh.created = Date()
+        try JSONEncoder().encode(fresh).write(to: staging.appendingPathComponent("toy.json"), options: .atomic)
+        try fm.moveItem(at: working, to: previous)
+        do { try fm.moveItem(at: staging, to: working) }
+        catch { try fm.moveItem(at: previous, to: working); throw error }
+        Town.shared.invalidateDeviceCache(toy)
+        DaytimeClock.disable(toy.id)
+        forgetName(toy.id)
+        try? fm.removeItem(at: previous)
+        toys = ToyStore.list()
+    }
+
     func resetCurrentDevice() throws {
         guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else { throw ImportError.unreadable("Finish the current operation before resetting.") }
         let fm = FileManager.default
@@ -135,6 +198,7 @@ final class AppModel: ObservableObject {
             catch { try fm.moveItem(at: previous, to: working); throw error }
             Town.shared.invalidateDeviceCache(toy)
             DaytimeClock.disable(toy.id)
+            forgetName(toy.id)
             CareAlerts.shared.cancelAll()
             emu.appWaiting = false
             emu.holdForApp = false

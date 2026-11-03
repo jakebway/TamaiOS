@@ -205,22 +205,37 @@ struct ToysView: View {
     @EnvironmentObject var emu: Emulator
     @Environment(\.dismiss) private var dismiss
     @State private var deleting: Toy?
+    @State private var resetting: Toy?
+    @State private var restoring: Toy?
+    @State private var shareURL: ShareItem?
+    @State private var message: String?
 
     var body: some View {
         List {
             ForEach(model.toys) { t in
-                Button {
-                    model.play(t)
-                    dismiss()
-                } label: {
-                    HStack(spacing: 14) {
-                        EggBadge(theme: Theme.of(t.color)).frame(width: 34, height: 42)
-                        VStack(alignment: .leading) {
-                            Text(t.name).font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
-                            Text(t.romName).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button {
+                        model.play(t)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 14) {
+                            EggBadge(theme: Theme.of(t.color)).frame(width: 34, height: 42)
+                            VStack(alignment: .leading) {
+                                Text(LiveTamaName.savedName(t.id) ?? t.name).font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
+                                Text(t.romName).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if emu.toy?.id == t.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
                         }
-                        Spacer()
-                        if emu.toy?.id == t.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Menu {
+                        Button { backUp(t) } label: { Label("Back Up", systemImage: "square.and.arrow.up") }
+                        Button { restoring = t } label: { Label("Restore from Backup…", systemImage: "square.and.arrow.down") }
+                        Button(role: .destructive) { resetting = t } label: { Label("Reset…", systemImage: "arrow.counterclockwise") }
+                    } label: {
+                        Image(systemName: "ellipsis.circle").font(.title3).frame(width: 36, height: 36)
                     }
                 }
                 .swipeActions {
@@ -235,6 +250,38 @@ struct ToysView: View {
                 deleting = nil
             }
         } message: { Text("This removes the ROM and all saves for it from this iPhone. Make a backup first if you might want it back.") }
+        .confirmationDialog("Reset \(resetting.map { LiveTamaName.savedName($0.id) ?? $0.name } ?? "")?", isPresented: Binding(get: { resetting != nil }, set: { if !$0 { resetting = nil } }), titleVisibility: .visible) {
+            Button("Erase This Tama and Start Fresh", role: .destructive) {
+                if let t = resetting {
+                    do { try model.reset(t) } catch { message = error.localizedDescription }
+                }
+                resetting = nil
+            }
+        } message: { Text("Only this device is erased: its Tama, saves and pickup queue. Other devices and your exported backups are kept. Back it up first if you might want it back.") }
+        .sheet(item: $shareURL) { ActivityView(items: [$0.url]) }
+        .sheet(item: $restoring) { t in
+            DocumentPicker { u in
+                restoring = nil
+                if let d = try? ToyStore.readPicked(u), model.restoreBackup(d, into: t) {
+                    message = "Restored \(t.name)."
+                } else {
+                    message = "That backup doesn't fit \(t.name). Pick a .tamaios backup made from this same device (same ROM version)."
+                }
+            }
+            .ignoresSafeArea()
+        }
+        .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+            Button("OK", role: .cancel) {}
+        }
+    }
+
+    private func backUp(_ t: Toy) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let u = model.backupFile(for: t)
+            DispatchQueue.main.async {
+                if let u { shareURL = ShareItem(url: u) } else { message = "Couldn't make a backup of \(t.name)." }
+            }
+        }
     }
 }
 

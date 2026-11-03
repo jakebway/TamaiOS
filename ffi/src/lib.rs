@@ -311,19 +311,16 @@ pub extern "C" fn tg_create(
 // slot size, first block, slot count. Stock: 2 slots of 64 KB at 0x710000, so the 3rd Place asks to
 // delete one. A Place file is at most ~34 KB, so the record is rewritten to 5 slots of 36 KB in the
 // unused flash 0x760000..0x78D000 (nothing else lives there; checked by delivering all 5 Places).
-// The change lives only in the running toy: whenever a save or snapshot is exported the original
-// record is put back (so the saves still match the ROM), and re-applied right after.
+// This is permanent: it is applied to every toy when it starts and stays in its saves and snapshots.
 const PLACES_STOCK: [u8; 8] = [0x00, 0x00, 0x01, 0x00, 0x72, 0x02, 0x00, 0x00];
 const PLACES_WIDE: [u8; 8] = [0x00, 0x90, 0x00, 0x00, 0x77, 0x05, 0x00, 0x00];
-const PLACES_RECORD_TAIL: [u8; 8] = [0; 8];
 
-fn places_record(m: &Machine) -> Option<(usize, bool)> {
-    let ram = &m.sys.ram;
+fn places_record(ram: &[u8]) -> Option<(usize, bool)> {
     let end = tg18::CODE_CHECK_LEN.min(ram.len()).saturating_sub(16);
     let mut i = 0x100000usize;
     while i < end {
         let w = &ram[i..i + 16];
-        if w[8..] == PLACES_RECORD_TAIL {
+        if w[8..] == [0u8; 8] {
             if w[..8] == PLACES_STOCK { return Some((i, false)); }
             if w[..8] == PLACES_WIDE { return Some((i, true)); }
         }
@@ -332,27 +329,28 @@ fn places_record(m: &Machine) -> Option<(usize, bool)> {
     None
 }
 
-/// Switch the Places storage record to the roomy layout (true) or back to the stock one (false).
-fn places_wide(m: &mut Machine, on: bool) {
-    let (at, wide) = match places_record(m) { Some(r) => r, None => return };
-    if wide == on { return; }
+/// Switch the Places storage record in a flash image to the roomy layout (true) or the stock one (false).
+fn places_wide_ram(ram: &mut [u8], on: bool) {
+    let (at, wide) = match places_record(ram) { Some(r) => r, None => return };
+    if wide == on || ram.len() < 0x790000 { return; }
     if on {
         // Places the toy already holds sit in the old 64 KB slots: copy them to the matching new slots.
         for slot in 0..2usize {
             let old = 0x710000 + slot * 0x10000;
             let new = 0x760000 + slot * 0x9000;
-            let have = &m.sys.ram[old..old + 6] == b"TAMAGO";
-            let free = m.sys.ram[new..new + 0x9000].iter().all(|&b| b == 0xFF);
+            let have = &ram[old..old + 6] == b"TAMAGO";
+            let free = ram[new..new + 0x9000].iter().all(|&b| b == 0xFF);
             if have && free {
-                let (a, b) = (old, new);
-                for k in 0..0x9000 { m.sys.ram[b + k] = m.sys.ram[a + k]; }
+                for k in 0..0x9000 { ram[new + k] = ram[old + k]; }
             }
         }
-        m.sys.ram[at..at + 8].copy_from_slice(&PLACES_WIDE);
+        ram[at..at + 8].copy_from_slice(&PLACES_WIDE);
     } else {
-        m.sys.ram[at..at + 8].copy_from_slice(&PLACES_STOCK);
+        ram[at..at + 8].copy_from_slice(&PLACES_STOCK);
     }
 }
+
+fn places_wide(m: &mut Machine, on: bool) { places_wide_ram(&mut m.sys.ram, on); }
 
 fn new_emu(m: Machine, image: Arc<Vec<u8>>) -> Emu {
     let mut m = m;
@@ -412,7 +410,13 @@ fn boot(rom: Vec<u8>, snap: Option<Vec<u8>>, flash: Option<Vec<u8>>, meta: Optio
     }
     // the toy's own flash save
     if let Some(f) = flash {
-        if f.len() == FLASH_SIZE && f[..tg18::CODE_CHECK_LEN] == image[..tg18::CODE_CHECK_LEN] {
+        let same = f.len() == FLASH_SIZE && {
+            // the Places storage record is the one thing allowed to differ from the stock ROM
+            let mut probe = f.clone();
+            places_wide_ram(&mut probe, false);
+            probe[..tg18::CODE_CHECK_LEN] == image[..tg18::CODE_CHECK_LEN]
+        };
+        if same {
             let mut m = Machine::new(image.clone(), &f, rtc_now);
             let mut moved = 0.0;
             if let Some(meta) = &meta {
@@ -737,10 +741,7 @@ pub extern "C" fn tg_set_never_sleep(e: *mut Emu, on: i32) {
 #[no_mangle]
 pub extern "C" fn tg_snapshot(e: *mut Emu, out: *mut *mut u8, out_len: *mut usize) -> i32 {
     with(e, |e| {
-        places_wide(&mut e.m, false);
-        let bytes = Snapshot::capture(&e.m).to_bytes();
-        places_wide(&mut e.m, true);
-        give(bytes, out, out_len);
+        give(Snapshot::capture(&e.m).to_bytes(), out, out_len);
         1
     })
 }
@@ -754,10 +755,7 @@ pub extern "C" fn tg_flash_save(e: *mut Emu, path: *const c_char) -> i32 {
     };
     with(e, |e| {
         let asleep = e.m.sys.powered_off;
-        places_wide(&mut e.m, false);
-        let ok = save::write_machine(&e.m, &path, asleep, asleep).is_ok() as i32;
-        places_wide(&mut e.m, true);
-        ok
+        save::write_machine(&e.m, &path, asleep, asleep).is_ok() as i32
     })
 }
 

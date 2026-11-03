@@ -101,7 +101,7 @@ final class IRLink {
                 if eligible.isEmpty {
                     cooldownUntil = CACurrentMediaTime() + 30
                     starting = false
-                    emu.say("None of your other devices is old enough to travel yet. Try again when they've grown.", seconds: 7)
+                    emu.say("None of your other devices can travel yet. They need to grow up a bit first.", seconds: 7)
                     return
                 }
                 if eligible.count == 1 { begin(eligible[0]) } else { choose(eligible, blocked) }

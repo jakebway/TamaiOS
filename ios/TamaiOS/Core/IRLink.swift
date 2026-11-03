@@ -72,7 +72,12 @@ final class IRLink {
         }
         starting = true
         let mode = IRLink.mode(h, deviceID: deviceID)
-        let role = IRLink.role(h, deviceID: deviceID)
+        // GIFT: GIVE / RECEIVE. TRAVEL: 0 = this device chose VISIT, 1 = INVITE (Wonder Garden EN)
+        var role = IRLink.role(h, deviceID: deviceID)
+        if mode == 3 {
+            var tb: UInt8 = 9
+            role = tg_peek(h, 0xF80178C4, &tb, 1) == 1 && tb <= 1 ? Int(tb) : -1
+        }
         let begin: (Toy) -> Void = { [self] partner in
             let t = Thread { [self] in
                 run(emu: emu, me: me, partner: partner, mode: mode, role: role)
@@ -277,7 +282,10 @@ final class IRLink {
         // after choosing GIFT (GIVE / RECEIVE), so try the likely endings until one reaches WAITING.
         let head: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b] + Array(repeating: .a, count: mode)
         var tails: [[TGKey]] = [[.b]]
-        if mode == 3 { tails = [[.b, .b]] }      // TRAVEL › VISIT
+        if mode == 3 {
+            // the visitor takes the opposite side: you invite → it VISITs; you visit → it INVITEs (first location)
+            tails = role == 1 ? [[.b, .b]] : role == 0 ? [[.b, .a, .b, .b]] : [[.b, .b], [.b, .a, .b, .b]]
+        }
         if mode == 1 {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
             tails = role == 1 ? [[.b, .b, .b], [.b, .b]] : [[.b, .a, .b], [.b, .b], [.b, .a, .a, .b]]

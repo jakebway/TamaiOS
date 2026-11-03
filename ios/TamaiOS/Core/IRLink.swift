@@ -8,8 +8,8 @@ import QuartzCore
 /// saved and put back to sleep; its clock catches up when you next switch to it.
 final class IRLink {
     static let shared = IRLink()
-    private(set) var active = false
-    private var starting = false
+    fileprivate(set) var active = false
+    fileprivate var starting = false
     private var cooldownUntil = 0.0
 
     /// The device's infrared is on (its serial speed was set for infrared).
@@ -80,7 +80,7 @@ final class IRLink {
     // MARK: bringing the visitor home
 
     /// One short radio write to the visitor's built-in app module, ticking it until it takes it.
-    private func radioWrite(_ p: OpaquePointer, _ d: [UInt8], _ audio: UnsafeMutablePointer<Int16>) -> Bool {
+    fileprivate func radioWrite(_ p: OpaquePointer, _ d: [UInt8], _ audio: UnsafeMutablePointer<Int16>) -> Bool {
         for _ in 0..<500 {
             if d.withUnsafeBufferPointer({ tg_radio_write(p, $0.baseAddress, $0.count) }) == 1 { return true }
             tickAll(p, 1, audio)
@@ -88,7 +88,7 @@ final class IRLink {
         return false
     }
 
-    private func radioSend(_ p: OpaquePointer, _ pkt: [UInt8], _ audio: UnsafeMutablePointer<Int16>) -> Bool {
+    fileprivate func radioSend(_ p: OpaquePointer, _ pkt: [UInt8], _ audio: UnsafeMutablePointer<Int16>) -> Bool {
         tickAll(p, 1, audio)
         guard radioWrite(p, [0xF0, 0x8D], audio) else { return false }
         var i = 0
@@ -100,7 +100,7 @@ final class IRLink {
         return radioWrite(p, [0xF0, 0xCD], audio)
     }
 
-    private func radioRead(_ p: OpaquePointer) -> [UInt8]? {
+    fileprivate func radioRead(_ p: OpaquePointer) -> [UInt8]? {
         var q: UnsafeMutablePointer<UInt8>? = nil
         var n = 0
         guard tg_radio_read(p, &q, &n) == 1, let q else { return nil }
@@ -109,7 +109,7 @@ final class IRLink {
     }
 
     /// The same listening the app does for a toy's answer (see TamaLink.answer), timed in toy ticks.
-    private func radioAnswer(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, firstTicks: Int = 200, idleTicks: Int = 200) -> [UInt8]? {
+    fileprivate func radioAnswer(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, firstTicks: Int = 200, idleTicks: Int = 200) -> [UInt8]? {
         var gotAny = false, acked = false
         var buffer: [UInt8] = [], expected = -1
         var waited = 0
@@ -173,11 +173,11 @@ final class IRLink {
     }
 
     /// How to call a device's Tama in messages: its read name, else a name the user gave the device.
-    static func tamaLabel(_ t: Toy) -> String {
+    static func tamaLabel(_ t: Toy, fallback: String = "your other Tama") -> String {
         if let n = LiveTamaName.savedName(t.id) { return n }
         if let n = Town.shared.state(t).petName, !n.isEmpty { return n }
         if !BundledVariant.all.contains(where: { $0.name == t.name }) { return t.name }
-        return "your other Tama"
+        return fallback
     }
 
     /// Whatever time the visitor spent being driven (menus, the exchange, coming home) is simulated
@@ -202,12 +202,12 @@ final class IRLink {
         }
     }
 
-    private func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {
+    fileprivate func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {
         for _ in 0..<n { _ = tg_tick(p, 0.02); _ = tg_take_audio(p, audio, 44100) }
     }
 
     private func run(emu: Emulator, me: Toy, partner: Toy, mode: Int, role: Int) {
-        emu.say("Getting \(IRLink.tamaLabel(partner)) ready…", seconds: 4)
+        emu.say("Getting \(IRLink.tamaLabel(partner)) ready for \(IRLink.tamaLabel(me, fallback: "your Tama"))…", seconds: 4)
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
         var visitor: OpaquePointer?
         defer { audio.deallocate(); if let v = visitor { tg_destroy(v) } }
@@ -264,7 +264,7 @@ final class IRLink {
         tg_ir_link(p, 1)
         active = true
         emu.note("infrared link: \(me.name) ⇄ \(partner.name) (mode \(mode))")
-        emu.say("Linked with \(IRLink.tamaLabel(partner)) — press B to start. 📡", seconds: 6)
+        emu.say("\(IRLink.tamaLabel(me, fallback: "Your Tama")) ⇄ \(IRLink.tamaLabel(partner)) are linked. Press B to start. 📡", seconds: 6)
 
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
@@ -369,5 +369,61 @@ final class IRLink {
             emu.say("The infrared link stopped early, so nothing was exchanged. \(who) is unchanged. Try again.", seconds: 7)
         }
         emu.note("infrared link ended")
+    }
+}
+
+// MARK: reading a Tama's name from any device
+
+extension IRLink {
+    private static let nameQueue = DispatchQueue(label: "TamaiOS name probe", qos: .utility)
+    private static var probing = false
+
+    /// Find out the names of Tamas whose name isn't known yet (the on-screen reader only knows Wonder
+    /// Garden). Each device is started from its save as a disposable copy, taken to Connection › App,
+    /// and asked hello like the phone app does; the answer carries the Tama's name. Nothing is saved
+    /// back, so the real device isn't touched and its clock isn't moved.
+    static func refreshNames() {
+        guard let model = AppModel.current else { return }
+        let toys = model.toys.filter { LiveTamaName.savedName($0.id) == nil && !Town.shared.state($0).away }
+        guard !toys.isEmpty else { return }
+        nameQueue.async {
+            guard !probing, !shared.active, !shared.starting else { return }
+            probing = true
+            defer { probing = false }
+            for t in toys {
+                if shared.active || shared.starting { break }
+                if let n = shared.readName(t) {
+                    Prefs.d.set(n, forKey: "tamaName.v1." + t.id)
+                    DispatchQueue.main.async { AppModel.current?.objectWillChange.send() }
+                }
+            }
+        }
+    }
+
+    fileprivate func readName(_ toy: Toy) -> String? {
+        guard let p = Emulator.makeHandle(toy).0 else { return nil }
+        let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
+        defer { audio.deallocate(); tg_destroy(p) }
+        tg_set_volume(p, 0)
+        tg_set_never_sleep(p, 0)
+        tg_wake(p)
+        tickAll(p, 25, audio)
+        // C backs out home; A×5 walks the menu to Connection; B opens it; A,A picks APP; B enters it
+        let keys: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .a, .a, .b]
+        for k in keys {
+            tg_press(p, k.rawValue, CACurrentMediaTime())
+            tickAll(p, 8, audio)
+            tg_release(p, k.rawValue)
+            tickAll(p, 22, audio)
+        }
+        for _ in 0..<100 where tg_radio_ready(p) == 0 { tickAll(p, 1, audio) }
+        guard tg_radio_ready(p) != 0 else { return nil }
+        tg_radio_connect(p, 1)
+        defer { tickAll(p, 5, audio); tg_radio_connect(p, 0) }
+        guard radioSend(p, TamaLink.packet(op: 0x17, cmd: 0), audio), let hello = radioAnswer(p, audio) else { return nil }
+        let name = Town.decodeName(hello)
+        let letters = name.filter { $0.isLetter }
+        guard (1...12).contains(letters.count), letters.count == name.filter({ !$0.isWhitespace }).count else { return nil }
+        return name
     }
 }

@@ -255,7 +255,7 @@ struct DeviceView: View {
                         Button {
                             if t.id != emu.toy?.id { model.play(t) }
                         } label: {
-                            Label((LiveTamaName.savedName(t.id).map { $0 + " · " } ?? "") + t.name + " (" + t.romName + ")",
+                            Label((LiveTamaName.savedName(t.id) ?? t.name) + " · " + t.romName,
                                   systemImage: t.id == emu.toy?.id ? "checkmark.circle.fill" : "circle")
                         }
                     }

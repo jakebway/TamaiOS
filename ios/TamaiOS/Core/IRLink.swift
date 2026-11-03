@@ -282,30 +282,33 @@ final class IRLink {
             // the visitor waits on its WAITING screen, frozen, until your device first speaks, so it
             // can't time out while you get ready to press B
             if dt > 0 && sawTraffic { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
-            // frames from the visitor go to the toy you're playing, and back
-            var moved = true
-            while moved {
-                moved = false
+            // frames from the visitor go to the toy you're playing, and back; your toy's core is
+            // locked once per pass (not per frame) so this doesn't get in the way of its own loop
+            var toYou: [[UInt8]] = []
+            while true {
                 let n = tg_ir_take(p, &buf, buf.count)
-                if n > 0 {
-                    bytes += n; trace.append("visitor→you \(n)B " + buf[0..<min(n, 6)].map { String(format: "%02x", $0) }.joined())
-                    moved = true; sawTraffic = true; lastTraffic = CACurrentMediaTime()
-                    buf.withUnsafeBufferPointer { bp in
-                        _ = emu.withCore { h in tg_ir_deliver(h, bp.baseAddress, n) }
-                    }
-                }
-                let m: Int = emu.withCore { h -> Int in
-                    let n = tg_ir_take(h, &buf, buf.count)
-                    return n
-                } ?? -1
-                if m < 0 { break }
-                if m > 0 {
-                    if m == 2 && buf[1] == 0x53 { sawDisc = true }
-                    bytes += m; trace.append("you→visitor \(m)B " + buf[0..<min(m, 6)].map { String(format: "%02x", $0) }.joined())
-                    moved = true; sawTraffic = true; lastTraffic = CACurrentMediaTime()
-                    buf.withUnsafeBufferPointer { bp in tg_ir_deliver(p, bp.baseAddress, m) }
-                }
+                if n <= 0 { break }
+                toYou.append(Array(buf[0..<n]))
             }
+            var toVisitor: [[UInt8]] = []
+            if emu.withCore({ h in
+                for f in toYou { f.withUnsafeBufferPointer { tg_ir_deliver(h, $0.baseAddress, f.count) } }
+                while true {
+                    let m = tg_ir_take(h, &buf, buf.count)
+                    if m <= 0 { break }
+                    toVisitor.append(Array(buf[0..<m]))
+                }
+            }) == nil { break }
+            for f in toVisitor { f.withUnsafeBufferPointer { tg_ir_deliver(p, $0.baseAddress, f.count) } }
+            for f in toYou {
+                bytes += f.count; trace.append("visitor→you \(f.count)B " + f.prefix(6).map { String(format: "%02x", $0) }.joined())
+            }
+            for f in toVisitor {
+                if f.count == 2 && f[1] == 0x53 { sawDisc = true }
+                bytes += f.count; trace.append("you→visitor \(f.count)B " + f.prefix(6).map { String(format: "%02x", $0) }.joined())
+            }
+            let moved = !toYou.isEmpty || !toVisitor.isEmpty
+            if moved { sawTraffic = true; lastTraffic = CACurrentMediaTime() }
             // is it over? Once data has flowed, only silence ends it (the infrared speed changes
             // during a connection, so "waiting" can't be trusted); before that, leaving the screen does.
             guard let stillOn = emu.withCore({ IRLink.waiting($0) }), emu.toy?.id == me.id else { break }
@@ -317,7 +320,7 @@ final class IRLink {
             } else { idleSince = nil }
             if !sawTraffic && now - began > 180 { break }
             if now - began > 600 { break }
-            Thread.sleep(forTimeInterval: 0.001)
+            Thread.sleep(forTimeInterval: moved ? 0.002 : 0.004)
         }
         _ = emu.withCore { tg_ir_link($0, 0) }
         tg_ir_link(p, 0)

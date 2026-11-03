@@ -291,14 +291,16 @@ final class IRLink {
                 toYou.append(Array(buf[0..<n]))
             }
             var toVisitor: [[UInt8]] = []
-            if emu.withCore({ h in
+            let ran: Bool? = emu.withCore { h -> Bool in
                 for f in toYou { f.withUnsafeBufferPointer { tg_ir_deliver(h, $0.baseAddress, f.count) } }
                 while true {
                     let m = tg_ir_take(h, &buf, buf.count)
                     if m <= 0 { break }
                     toVisitor.append(Array(buf[0..<m]))
                 }
-            }) == nil { break }
+                return true
+            }
+            if ran == nil { break }
             for f in toVisitor { f.withUnsafeBufferPointer { tg_ir_deliver(p, $0.baseAddress, f.count) } }
             for f in toYou {
                 bytes += f.count; trace.append("visitor→you \(f.count)B " + f.prefix(6).map { String(format: "%02x", $0) }.joined())

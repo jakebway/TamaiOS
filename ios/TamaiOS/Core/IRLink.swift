@@ -210,17 +210,15 @@ final class IRLink {
         let lo = px.map { Int(($0 >> 16) & 255) + Int(($0 >> 8) & 255) + Int($0 & 255) }.min() ?? 0
         let hi = px.map { Int(($0 >> 16) & 255) + Int(($0 >> 8) & 255) + Int($0 & 255) }.max() ?? 0
         let mid = (lo + hi) / 2
-        for y in stride(from: 0, to: 128, by: 4) {
+        var blank = false
+        for y in 4..<124 {
             var r = ""
-            for x in stride(from: 0, to: 128, by: 2) {
-                var dark = 0
-                for dy in 0..<4 { for dx in 0..<2 {
-                    let c = px[(y + dy) * 128 + x + dx]
-                    if Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255) < mid { dark += 1 }
-                } }
-                r += dark >= 3 ? "#" : dark >= 1 ? "+" : " "
+            for x in 4..<124 {
+                let c = px[y * 128 + x]
+                r += Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255) < mid ? "#" : " "
             }
-            rows.append(r)
+            while r.hasSuffix(" ") { r.removeLast() }
+            if r.isEmpty { if !blank { rows.append("") }; blank = true } else { rows.append(r); blank = false }
         }
         return rows.joined(separator: "\n")
     }

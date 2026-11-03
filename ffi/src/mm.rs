@@ -1021,8 +1021,11 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
     if replaced == 0 {
         return None;
     }
-    // new id so it never replaces a real item the device already has
-    let num = 40000 + (seed % 20000) as u16;
+    // The device files an item by its kind byte (0x4F: 01 food, 07 wallpaper) AND
+    // its number range (wallpapers live at 50000+), so keep both right for the kind,
+    // with a number no real item uses so it never replaces one you own.
+    d[0x4F] = if kind == "wallpaper" { 0x07 } else { 0x01 };
+    let num: u16 = if kind == "wallpaper" { 50900 + (seed % 90) as u16 } else { 9000 + (seed % 900) as u16 };
     let id_old: String = d[0x34..0x48].iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
     let prefix_end = id_old.find(want_prefix).map(|i| i + want_prefix.len()).unwrap_or(0);
     let suffix = if id_old.ends_with("_1") { "_1" } else { "" };
@@ -1041,9 +1044,10 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
     for (i, u) in format!("DL_T18d_{}.jpg", num).encode_utf16().take(22).enumerate() {
         d[6 + i * 2..8 + i * 2].copy_from_slice(&u.to_be_bytes());
     }
-    // name (toy text, up to 12 characters) and price
-    for b in &mut d[0x5E..0x76] {
-        *b = 0;
+    // name (toy text, 12 slots, padded with spaces — zeros show as stray symbols) and price
+    for i in 0..12 {
+        d[0x5E + i * 2] = 4;
+        d[0x5F + i * 2] = 0;
     }
     let enc = encode_name(name, 4);
     for (i, b) in enc.iter().take(24).enumerate() {

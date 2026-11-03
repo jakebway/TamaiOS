@@ -88,7 +88,7 @@ struct CustomItemMaker: View {
     @State private var sending = false
     @State private var resultText: String?
     @State private var kind: Kind = .wallpaper
-    @State private var name = "My Room"
+    @State private var name = "MY ROOM"
     @State private var price = 10
     @State private var bitmap = PixelBitmap(size: 128)
     @State private var history: [[UInt32]] = []
@@ -139,7 +139,7 @@ struct CustomItemMaker: View {
             .overlay { if sending { BusyOverlay(text: "Sending…") } }
             .onAppear { if image == nil { resetCanvas() } }
             .onChange(of: kind) { _ in
-                name = kind == .wallpaper ? "My Room" : "Snack"
+                name = kind == .wallpaper ? "MY ROOM" : "SNACK"
                 brush = kind == .wallpaper ? 2 : 1
                 resetCanvas()
             }
@@ -148,11 +148,30 @@ struct CustomItemMaker: View {
         .interactiveDismissDisabled()
     }
 
+    /// Big, clear choice of what you're making (it decides how the device files it).
     private var kindPicker: some View {
-        Picker("Kind", selection: $kind) {
-            ForEach(Kind.allCases) { k in Text(k.rawValue).tag(k) }
+        HStack(spacing: 10) {
+            ForEach(Kind.allCases) { k in
+                Button { kind = k } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: k == .food ? "fork.knife" : "photo.fill").font(.title2)
+                        Text(k.rawValue).font(.system(.headline, design: .rounded))
+                        Text(k == .food ? "Your Tama can eat it" : "A room background")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 78)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(kind == k ? Color.purple.opacity(0.18) : Color(.secondarySystemBackground)))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(kind == k ? Color.purple : .clear, lineWidth: 2))
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .pickerStyle(.segmented)
+    }
+
+    /// Letters the device can show, in capitals, 12 at most.
+    private static func deviceText(_ s: String) -> String {
+        let ok = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .!?&-+")
+        return String(s.uppercased().filter { ok.contains($0) }.prefix(12))
     }
 
     private var canvasView: some View {
@@ -272,13 +291,34 @@ struct CustomItemMaker: View {
 
     private var finishBar: some View {
         VStack(spacing: 10) {
-            HStack {
-                TextField("Name", text: $name)
-                    .textFieldStyle(.roundedBorder)
-                Stepper(value: $price, in: 0...999) {
-                    Text("\(price) G")
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Name").font(.headline)
+                    Spacer()
+                    Text("\(name.count)/12").font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 }
-                .fixedSize()
+                TextField("NAME", text: Binding(get: { name }, set: { name = CustomItemMaker.deviceText($0) }))
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+                Text("Capital letters, numbers and . ! ? & - + — just like the device shows them.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text("Price in the shop").font(.headline).padding(.top, 4)
+                HStack(spacing: 8) {
+                    ForEach([0, 10, 50, 100, 300, 500], id: \.self) { p in
+                        Button { price = p } label: {
+                            Text(p == 0 ? "Free" : "\(p) G")
+                                .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                .padding(.horizontal, 10).padding(.vertical, 8)
+                                .frame(maxWidth: .infinity)
+                                .background(Capsule().fill(price == p ? Color.purple : Color(.secondarySystemBackground)))
+                                .foregroundStyle(price == p ? .white : .primary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
             Button {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()

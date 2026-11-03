@@ -107,6 +107,21 @@ struct TamaDepaView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 walletCard
+                Button { drawing = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "paintbrush.pointed.fill").font(.title2).foregroundStyle(.white)
+                            .frame(width: 44, height: 44).background(Circle().fill(Color.purple.gradient))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Make your own").font(.system(.headline, design: .rounded))
+                            Text("Draw a food or a wallpaper and send it").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.purple.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
                 connectionCard
                 bagCard
                 ScrollView(.horizontal, showsIndicators: false) {

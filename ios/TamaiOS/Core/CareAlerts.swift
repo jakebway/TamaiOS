@@ -149,7 +149,7 @@ final class CareAlerts: ObservableObject {
             let careMask = SicknessEventPolicy.careMask(mask: mask, deviceID: deviceID)
             // Route an illness-only sound to the independently debounced sickness channel.
             // Mixed masks still retain their OTHER generic-care bits (e.g. 0x0A -> 0x02).
-            if deviceID == SicknessEventPolicy.supportedDeviceID, mask >= 0,
+            if CareSupport.supports(deviceID), mask >= 0,
                mask & SicknessEventPolicy.illnessBit != 0, careMask == 0, source == .sound {
                 self.count("illness sound merged into sickness")
                 self.record("DETECTED illness-only sound; routed to sickness channel")
@@ -189,7 +189,7 @@ final class CareAlerts: ObservableObject {
         }
     }
     private func observeHatch(stage: Int, mask: Int, raw: Int, deviceID: String, observedAt: Double) {
-        guard deviceID == HatchEventPolicy.supportedDeviceID, (0...255).contains(stage) else { return }
+        guard CareSupport.supports(deviceID), (0...255).contains(stage) else { return }
         let previous = hatchPolicy.lastStages[deviceID]
         let hatched = hatchPolicy.observe(stage: stage, deviceID: deviceID, now: ProcessInfo.processInfo.systemUptime)
         if previous != stage {
@@ -227,7 +227,7 @@ final class CareAlerts: ObservableObject {
     }
     func observeBathroom(raw: Int, deviceID: String, observedAt: Double) {
         DispatchQueue.main.async {
-            guard deviceID == BathroomEventPolicy.supportedDeviceID else { return }
+            guard CareSupport.supports(deviceID) else { return }
             self.count("bathroom samples")
             let previous = self.bathroomRaw[deviceID]; self.bathroomRaw[deviceID] = raw
             self.samples[deviceID + ".bathroom"] = "observed=\(String(format: "%.3f", observedAt)) address=F800D888 raw=\(raw) app=\(self.appState())"
@@ -250,7 +250,7 @@ final class CareAlerts: ObservableObject {
         }
     }
     private func observeSickness(mask: Int, raw: Int, stage: Int, deviceID: String, observedAt: Double) {
-        guard deviceID == SicknessEventPolicy.supportedDeviceID else { return }
+        guard CareSupport.supports(deviceID) else { return }
         count("sickness samples")
         samples[deviceID + ".sickness"] = "observed=\(String(format: "%.3f", observedAt)) attention=\(mask) bit08=\(mask >= 0 && mask & 8 != 0) app=\(appState())"
         guard let transition = sicknessPolicy.observe(mask: mask, deviceID: deviceID) else { return }
@@ -273,7 +273,7 @@ final class CareAlerts: ObservableObject {
     }
 
     private func observeGrowth(stage: Int, deviceID: String, signature: String, previousName: String?, observedAt: Double) {
-        guard deviceID == GrowthEventPolicy.supportedDeviceID, !signature.isEmpty else { return }
+        guard CareSupport.supports(deviceID), !signature.isEmpty else { return }
         if growthProfiles[deviceID] != signature {
             growthProfiles[deviceID] = signature; growthPolicy.reset(deviceID: deviceID)
             growthNames.removeValue(forKey: deviceID)

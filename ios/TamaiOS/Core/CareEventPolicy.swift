@@ -20,6 +20,14 @@ struct CareEventPolicy {
     }
     mutating func foregroundReset() { notifiedEpisodes.removeAll() }
 }
+/// The three English firmwares (Fairy v057, Magic v058, Wonder Garden v063) keep the Tama's state in the
+/// same memory layout (checked against the firmware code: same base, same field offsets), so the care,
+/// bathroom, sickness, hatch and growth alerts and the live name read work the same on all of them.
+enum CareSupport {
+    static func supports(_ deviceID: String) -> Bool {
+        BundledVariant.all.contains { $0.filename == deviceID }
+    }
+}
 struct BathroomEventPolicy {
     static let supportedDeviceID = "fw_tg18_en_v063_2020-02-13_wondergarden"
     enum Transition: Equatable { case appeared, cleared }
@@ -28,7 +36,7 @@ struct BathroomEventPolicy {
     private var candidates: [String: Bool] = [:]
     private var confirmations: [String: Int] = [:]
     mutating func observe(raw: Int, deviceID: String) -> Transition? {
-        guard deviceID == Self.supportedDeviceID else { return nil }
+        guard CareSupport.supports(deviceID) else { return nil }
         guard raw == 0 || raw == 1 else { candidates.removeValue(forKey: deviceID); confirmations.removeValue(forKey: deviceID); return nil }
         let next = raw == 1
         if candidates[deviceID] == next { confirmations[deviceID] = min(2, (confirmations[deviceID] ?? 0) + 1) }
@@ -47,7 +55,7 @@ struct HatchEventPolicy {
     private var until: [String: Double] = [:]
     init(lastStages: [String: Int] = [:]) { self.lastStages = lastStages }
     mutating func observe(stage: Int, deviceID: String, now: Double) -> Bool {
-        guard deviceID == Self.supportedDeviceID, (0...255).contains(stage) else { return false }
+        guard CareSupport.supports(deviceID), (0...255).contains(stage) else { return false }
         let previous = lastStages[deviceID]; lastStages[deviceID] = stage
         if stage == 0 { until.removeValue(forKey: deviceID) }
         guard previous == 0, stage == 1 else { return false }
@@ -122,11 +130,11 @@ struct SicknessEventPolicy {
     private var confirmations: [String: Int] = [:]
     private(set) var episodes: [String: Int] = [:]
     static func careMask(mask: Int, deviceID: String) -> Int {
-        guard deviceID == supportedDeviceID, mask >= 0 else { return mask }
+        guard CareSupport.supports(deviceID), mask >= 0 else { return mask }
         return mask & ~illnessBit
     }
     mutating func observe(mask: Int, deviceID: String) -> Transition? {
-        guard deviceID == Self.supportedDeviceID, mask >= 0 else {
+        guard CareSupport.supports(deviceID), mask >= 0 else {
             candidates.removeValue(forKey: deviceID)
             confirmations.removeValue(forKey: deviceID)
             return nil
@@ -152,7 +160,7 @@ struct GrowthEventPolicy {
     private var counts: [String: Int] = [:]
     private(set) var episodes: [String: Int] = [:]
     mutating func observe(stage: Int, deviceID: String) -> Int? {
-        guard deviceID == Self.supportedDeviceID, (0...4).contains(stage) else {
+        guard CareSupport.supports(deviceID), (0...4).contains(stage) else {
             candidates.removeValue(forKey: deviceID); counts.removeValue(forKey: deviceID); return nil
         }
         if candidates[deviceID] == stage { counts[deviceID] = min(2, (counts[deviceID] ?? 0) + 1) }

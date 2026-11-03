@@ -342,6 +342,7 @@ final class Town: ObservableObject {
         }
         var base = ""
         if let n = visitInfo(toy)?.name, !n.isEmpty { base = n.capitalized }
+        else if let n = LiveTamaName.savedName(toy.id), !n.isEmpty { base = n }
         else if let n = state(toy).petName, !n.isEmpty { base = n }
         guard !base.isEmpty else { return "Your Tama" }
         return Town.withSuffix(base, japanese: toy.romName.contains("(JP"))

@@ -57,13 +57,13 @@ final class LiveTamaName: ObservableObject {
     }
     private func beginCycle(key: String, delay: Double) {
         guard identity == key, scheduled == nil, !running,
-              deviceID == BathroomEventPolicy.supportedDeviceID else { return }
+              CareSupport.supports(deviceID) else { return }
         attempts[key] = 0
         nextCheck[key] = ProcessInfo.processInfo.systemUptime + 60
         schedule(key: key, delay: delay)
     }
     private func schedule(key: String, delay: Double) {
-        guard deviceID == BathroomEventPolicy.supportedDeviceID, identity == key,
+        guard CareSupport.supports(deviceID), identity == key,
               scheduled == nil, (attempts[key] ?? 0) < 3 else { return }
         let token = UUID(); scheduled = token
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {

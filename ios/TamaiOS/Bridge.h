@@ -98,5 +98,6 @@ int32_t tg_name_probe_step(NameProbe *p, double seconds);
 void tg_name_probe_press(NameProbe *p, int32_t key);
 int32_t tg_name_probe_rgb(NameProbe *p, uint8_t *out, size_t n);
 int32_t tg_name_identity_matches(Emu *e, int32_t stage, uint32_t character, uint32_t signature);
+int32_t tg_mm_custom_item(const char *kind, const char *name, uint16_t price, const uint32_t *px, size_t w, size_t h, uint64_t seed, uint32_t points, uint8_t **out, size_t *out_len);
 
 #endif

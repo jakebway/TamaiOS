@@ -162,7 +162,7 @@ struct TamaDepaView: View {
                 custom = (n.isEmpty ? u.deletingPathExtension().lastPathComponent : n, d)
             }.ignoresSafeArea()
         }
-        .background(Color.clear.fullScreenCover(isPresented: $drawing) { CustomItemMaker() })
+        .background(Color.clear.fullScreenCover(isPresented: $drawing) { CustomItemMaker().environmentObject(emu) })
         .alert(result?.ok == true ? "TamaDepa" : "Not delivered", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
             Button("OK") {}
         } message: { Text(result?.text ?? "") }

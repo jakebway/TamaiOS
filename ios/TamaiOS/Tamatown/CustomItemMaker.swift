@@ -82,6 +82,11 @@ struct CustomItemMaker: View {
     enum Tool { case pencil, eraser, fill }
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var emu: Emulator
+    @ObservedObject private var link = AppLink.shared
+    @State private var custom = Color.pink
+    @State private var sending = false
+    @State private var resultText: String?
     @State private var kind: Kind = .wallpaper
     @State private var name = "My Room"
     @State private var price = 10
@@ -92,6 +97,7 @@ struct CustomItemMaker: View {
     @State private var brush = 2
     @State private var selected = 3
     @State private var showSent = false
+    @State private var sentOK = false
     @State private var lastCell: (Int, Int)?
 
     private static let paletteColors: [UIColor] = [
@@ -127,11 +133,10 @@ struct CustomItemMaker: View {
                     Button("Close") { dismiss() }
                 }
             }
-            .alert("Sent!", isPresented: $showSent) {
-                Button("OK") { dismiss() }
-            } message: {
-                Text("Your \(kind.rawValue.lowercased()) is on its way to your Tama.")
+            .alert(resultText ?? "", isPresented: $showSent) {
+                Button("OK") { if sentOK { dismiss() } }
             }
+            .overlay { if sending { BusyOverlay(text: "Sending…") } }
             .onAppear { if image == nil { resetCanvas() } }
             .onChange(of: kind) { _ in
                 name = kind == .wallpaper ? "My Room" : "Snack"
@@ -179,7 +184,7 @@ struct CustomItemMaker: View {
                 let cell = side / CGFloat(n)
                 let x = min(n - 1, max(0, Int(value.location.x / cell)))
                 let y = min(n - 1, max(0, Int(value.location.y / cell)))
-                let v: UInt32 = tool == .eraser ? 0 : packed[selected]
+                let v: UInt32 = tool == .eraser ? 0 : currentColor
                 if lastCell == nil {
                     pushHistory()
                     if tool == .fill {
@@ -236,9 +241,20 @@ struct CustomItemMaker: View {
         .foregroundStyle(tool == t ? .purple : .primary)
     }
 
+    /// The colour being drawn with: a palette swatch, or the colour wheel (selected == -1).
+    private var currentColor: UInt32 {
+        selected >= 0 ? packed[selected] : PixelBitmap.pack(UIColor(custom))
+    }
+
     /// Wraps onto rows instead of scrolling sideways, so nothing is ever cut off.
     private var paletteGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 6)], spacing: 6) {
+            // colour wheel: any colour you like
+            ColorPicker("", selection: Binding(get: { custom }, set: { custom = $0; selected = -1; if tool == .eraser { tool = .pencil } }), supportsOpacity: false)
+                .labelsHidden()
+                .scaleEffect(1.5)
+                .frame(width: 48, height: 48)
+                .overlay(Circle().strokeBorder(Color.purple, lineWidth: selected == -1 ? 4 : 0).frame(width: 46, height: 46))
             ForEach(packed.indices, id: \.self) { i in
                 Button { selected = i; if tool == .eraser { tool = .pencil } } label: {
                     Circle()
@@ -266,7 +282,7 @@ struct CustomItemMaker: View {
             }
             Button {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                showSent = true
+                send()
             } label: {
                 Label("Send to my Tama", systemImage: "paperplane.fill")
                     .frame(maxWidth: .infinity, minHeight: 28)
@@ -274,6 +290,65 @@ struct CustomItemMaker: View {
             .buttonStyle(.borderedProminent)
             .tint(.purple)
             .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+    }
+
+    /// Turn the drawing into a real item file (like WebMeets' custom items) and
+    /// send it: straight to the device if it's connected with Download, otherwise
+    /// into the bag so it arrives with the next Download or when your Tama comes home.
+    private func send() {
+        guard let toy = emu.toy else { return }
+        let n = kind.size
+        // PixelBitmap is RGBA in memory; the item builder wants 0xAARRGGBB
+        let argb: [UInt32] = bitmap.px.map { v in
+            (v & 0xFF00_0000) | ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF)
+        }
+        let label = name.trimmingCharacters(in: .whitespaces)
+        let kindName = kind == .wallpaper ? "wallpaper" : "food"
+        var p: UnsafeMutablePointer<UInt8>? = nil
+        var len = 0
+        let ok = argb.withUnsafeBufferPointer { buf in
+            kindName.withCString { k in
+                label.withCString { nm in
+                    tg_mm_custom_item(k, nm, UInt16(max(0, min(price, 9999))), buf.baseAddress, n, n,
+                                      UInt64.random(in: 1...UInt64.max), 0, &p, &len)
+                }
+            }
+        }
+        guard ok == 1, let p else {
+            sentOK = false
+            resultText = "Couldn't make the item. Download the character pack in Tamatown › Settings first."
+            showSent = true
+            return
+        }
+        let pkt = Array(UnsafeBufferPointer(start: p, count: len))
+        tg_free(p, len)
+        let town = Town.shared
+        let tama = town.name(toy)
+        if link.openForDownload {
+            link.openForDownload = false
+            sending = true
+            let tl = TamaLink(emu: emu)
+            Task {
+                do {
+                    try await Task.detached(priority: .userInitiated) { try tl.finishItem(pkt) }.value
+                    sending = false
+                    link.closeWith = "\(tama) got \(label)! 🎁"
+                    dismiss()
+                } catch {
+                    sending = false
+                    sentOK = false
+                    resultText = error.localizedDescription
+                    showSent = true
+                }
+            }
+        } else {
+            town.addToBag(toy, name: label, kind: kindName, packet: pkt)
+            sentOK = true
+            resultText = town.state(toy).away
+                ? "\(label) is in the bag. It goes home with \(tama)."
+                : "\(label) is in the bag. It arrives the next time your device connects with Download."
+            showSent = true
         }
     }
 

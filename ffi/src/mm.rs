@@ -902,3 +902,156 @@ pub fn back_packet(item_or_packet: Option<&[u8]>, gotchi_points: u32) -> Vec<u8>
         None => packet(0x15, 0x36, 258, gotchi_points, None, None),
     }
 }
+
+// ---- custom items (draw your own wallpaper / food, like WebMeets) ---------------
+
+/// Reduce RGBA pixels (0xAARRGGBB) to exactly `n` palette colours (nearest colour
+/// for the rest). With `key` set, index 0 is the transparent key colour.
+fn quantize(px: &[u32], n: usize, key: bool) -> (Vec<u32>, Vec<u8>) {
+    use std::collections::HashMap;
+    let opaque = |c: u32| (c >> 24) >= 128;
+    let mut count: HashMap<u32, usize> = HashMap::new();
+    for &c in px {
+        if opaque(c) {
+            *count.entry(c | 0xFF00_0000).or_insert(0) += 1;
+        }
+    }
+    let mut colors: Vec<(u32, usize)> = count.into_iter().collect();
+    colors.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let room = if key { n - 1 } else { n };
+    let mut pal: Vec<u32> = Vec::new();
+    if key {
+        pal.push(0xFFFF_00FF); // magenta key: the device treats pixel (0,0)'s colour as see-through
+    }
+    for (c, _) in colors.iter().take(room) {
+        pal.push(*c);
+    }
+    if pal.is_empty() {
+        pal.push(0xFFFF_FFFF);
+    }
+    while pal.len() < n {
+        let last = *pal.last().unwrap();
+        pal.push(last);
+    }
+    let dist = |a: u32, b: u32| {
+        let d = |s: u32| (((a >> s) & 255) as i32 - ((b >> s) & 255) as i32).pow(2);
+        d(16) + d(8) + d(0)
+    };
+    let first = if key { 1 } else { 0 };
+    let idx: Vec<u8> = px
+        .iter()
+        .map(|&c| {
+            if !opaque(c) {
+                return 0;
+            }
+            let c = c | 0xFF00_0000;
+            (first..pal.len()).min_by_key(|&i| dist(pal[i], c)).unwrap_or(0) as u8
+        })
+        .collect();
+    (pal, idx)
+}
+
+/// One picture in the toy's format with exactly `n` (<= 16) colours.
+fn encode_fixed(w: usize, h: usize, n: usize, pal: &[u32], idx: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; 6 + n * 2 + w * h / 2];
+    out[0] = w as u8;
+    out[1] = h as u8;
+    out[2] = n as u8;
+    out[3..5].copy_from_slice(&1u16.to_le_bytes());
+    out[5] = 0xFF;
+    for i in 0..n {
+        out[6 + i * 2..8 + i * 2].copy_from_slice(&argb_to_565(pal[i]).to_be_bytes());
+    }
+    let start = 6 + n * 2;
+    for i in 0..w * h / 2 {
+        out[start + i] = (idx[i * 2] & 15) | (idx[i * 2 + 1] & 15) << 4;
+    }
+    out
+}
+
+/// Scale RGBA pixels (sw x sh) to w x h, nearest neighbour.
+fn scale(px: &[u32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<u32> {
+    let mut out = vec![0u32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            out[y * w + x] = px[(y * sh / h) * sw + (x * sw / w)];
+        }
+    }
+    out
+}
+
+/// Build a brand-new item file (like WebMeets' custom items) from a drawing:
+/// a real item of the same kind from the pack is the template; its pictures,
+/// name, price and id are replaced and the checksum is redone.
+/// kind: "wallpaper" or "food". Pixels are 0xAARRGGBB, row by row.
+pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32], sw: usize, sh: usize, seed: u64) -> Option<Vec<u8>> {
+    if px.len() < sw * sh || sw == 0 || sh == 0 {
+        return None;
+    }
+    let want_prefix = if kind == "wallpaper" { "_bg" } else { "_oy" };
+    let template = lib.items.iter().find(|it| {
+        it.lang == "en" && it.id.contains(want_prefix) && !it.name.chars().any(|c| ('\u{3040}'..'\u{3100}').contains(&c))
+            && it.data.len() > 0x210 && image_size(&it.data[0x204..]) > 0
+    })?;
+    let mut d = template.data.clone();
+    let end = d.len() - 2;
+    // replace every picture in the file with the drawing (same size and colour count)
+    let mut off = 0x204;
+    let mut replaced = 0;
+    while off + 6 <= end {
+        let size = image_size(&d[off..]);
+        if size == 0 || off + size > end {
+            break;
+        }
+        let (w, h, n) = (d[off] as usize, d[off + 1] as usize, d[off + 2] as usize);
+        if n > 16 || w * h % 2 != 0 {
+            break;
+        }
+        let scaled = scale(px, sw, sh, w, h);
+        let key = kind != "wallpaper";
+        let (pal, mut idx) = quantize(&scaled, n, key);
+        if key {
+            idx[0] = 0; // pixel (0,0) is the see-through key
+        }
+        let pic = encode_fixed(w, h, n, &pal, &idx);
+        d[off..off + pic.len()].copy_from_slice(&pic);
+        off += size;
+        replaced += 1;
+    }
+    if replaced == 0 {
+        return None;
+    }
+    // new id so it never replaces a real item the device already has
+    let num = 40000 + (seed % 20000) as u16;
+    let id_old: String = d[0x34..0x48].iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
+    let prefix_end = id_old.find(want_prefix).map(|i| i + want_prefix.len()).unwrap_or(0);
+    let suffix = if id_old.ends_with("_1") { "_1" } else { "" };
+    let id_new = format!("{}{:05}{}", &id_old[..prefix_end], num, suffix);
+    for b in &mut d[0x34..0x48] {
+        *b = 0;
+    }
+    for (i, b) in id_new.bytes().take(19).enumerate() {
+        d[0x34 + i] = b;
+    }
+    d[0x5A..0x5C].copy_from_slice(&num.to_be_bytes());
+    // file name (UTF-16BE) "DL_T18d_<num>.jpg"
+    for b in &mut d[6..0x32] {
+        *b = 0;
+    }
+    for (i, u) in format!("DL_T18d_{}.jpg", num).encode_utf16().take(22).enumerate() {
+        d[6 + i * 2..8 + i * 2].copy_from_slice(&u.to_be_bytes());
+    }
+    // name (toy text, up to 12 characters) and price
+    for b in &mut d[0x5E..0x76] {
+        *b = 0;
+    }
+    let enc = encode_name(name, 4);
+    for (i, b) in enc.iter().take(24).enumerate() {
+        d[0x5E + i] = *b;
+    }
+    d[0x76..0x78].copy_from_slice(&price.to_be_bytes());
+    // checksum: big-endian sum of every byte before it
+    let sum = d[..end].iter().fold(0u16, |a, &b| a.wrapping_add(b as u16));
+    d[end..].copy_from_slice(&sum.to_be_bytes());
+    Some(d)
+}

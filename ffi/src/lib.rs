@@ -1433,3 +1433,25 @@ mod bundled_mymeets_asset_tests {
         println!("Bundled MyMeets parser verified: {} characters, {} IDs", count, read);
     }
 }
+/// A brand-new item from a drawing: kind "wallpaper" or "food", pixels 0xAARRGGBB.
+/// Returns the delivery packet (with Gotchi Points), or 0 if the pack isn't loaded.
+#[no_mangle]
+pub extern "C" fn tg_mm_custom_item(kind: *const c_char, name: *const c_char, price: u16,
+                                    px: *const u32, w: usize, h: usize, seed: u64, points: u32,
+                                    out: *mut *mut u8, out_len: *mut usize) -> i32 {
+    if px.is_null() || w == 0 || h == 0 {
+        return 0;
+    }
+    let kind = unsafe { cstr(kind) }.unwrap_or_default();
+    let name = unsafe { cstr(name) }.unwrap_or_default();
+    let pixels = unsafe { std::slice::from_raw_parts(px, w * h) };
+    let g = TOWN.lock().unwrap();
+    let Some(lib) = g.as_ref() else { return 0 };
+    match mm::custom_item(lib, &kind, &name, price, pixels, w, h, seed) {
+        Some(item) => {
+            give(mm::item_packet(&item, points), out, out_len);
+            1
+        }
+        None => 0,
+    }
+}

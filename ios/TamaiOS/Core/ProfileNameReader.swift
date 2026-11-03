@@ -27,9 +27,11 @@ final class ProfileNameReader {
     func readNow(handle: OpaquePointer) -> NameProbeResult {
         let start = ProcessInfo.processInfo.systemUptime
         guard let seed = tg_name_seed_capture(handle) else { return NameProbeResult(name: nil, detail: "Could not capture a snapshot") }
-        return process(seed: seed, key: nil, start: start, captureMS: 0)
+        // a fresh headless copy starts on the home screen, so no backing out is needed (it is tried first)
+        return process(seed: seed, key: nil, start: start, captureMS: 0, backsList: [0, 2, 8], budget: 45)
     }
-    private func process(seed: OpaquePointer, key: String?, start: Double, captureMS: Double) -> NameProbeResult {
+    private func process(seed: OpaquePointer, key: String?, start: Double, captureMS: Double,
+                         backsList: [Int] = [8, 4, 2, 1, 0], budget: Double = 12) -> NameProbeResult {
         defer { tg_name_seed_destroy(seed) }
         let owner = self.text(seed, kind: 0)
         let identity = self.text(seed, kind: 1)
@@ -38,10 +40,10 @@ final class ProfileNameReader {
             result.detail = "Snapshot identity changed or owner header was unavailable"
             return result
         }
-        let deadline = ProcessInfo.processInfo.systemUptime + 12
+        let deadline = ProcessInfo.processInfo.systemUptime + budget
         // Every strategy starts from the SAME seed, not the previous strategy's changed state.
         // C backs out toward Home on the disposable copy; OCR rejects incorrect destination pages.
-        for backs in [8, 4, 2, 1, 0] {
+        for backs in backsList {
             if ProcessInfo.processInfo.systemUptime >= deadline { result.detail = "Probe reached its time budget"; break }
             var attemptTrace: [String] = []
             let found = autoreleasepool {

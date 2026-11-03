@@ -251,8 +251,8 @@ struct DumpHelpContent: View {
                     Text("Tamagotchi Meets: Fairy, Magical, Pastel, Sanrio, Sweets, Fantasy (JP)")
                 }
                 Section("Infrared (Connection › Tamagotchi)") {
-                    Text("TamaiOS plays the other device for you. Choose PLAYDATE, and when the screen says WAITING… press B (the middle button). Your Tama meets a copy of itself.")
-                    Text("GIFT and MARRY use the same connection and are experimental: they may not finish yet.")
+                    Text("PLAYDATE, GIFT and MARRY work with your other devices. On the device you're playing choose Connection › Tamagotchi and a mode. When it says WAITING… TamaiOS wakes another of your devices, takes it to the same screen and links them; then press B (the middle button). Both sides use their real data.")
+                    Text("The other device sleeps again afterwards and catches up on its time when you switch to it. With only one device, it meets a copy of itself (PLAYDATE only). GIFT and MARRY need a device that's grown enough, like the real thing.")
                 }
                 Section("Bluetooth") {
                     Text("Connection › App works with TamaiOS's built-in Tamatown: Visit to date, marry, shop and play; Download to get new items.")

@@ -73,6 +73,8 @@ pub struct Emu {
     last_drift: f64,
     /// Put to sleep from the app: "never sleep" waits until a button is pressed.
     sleep_hold: Option<bool>,
+    /// This toy's own infrared line (swapped into the core while it runs).
+    ir: tg18::sys::IrCtx,
 }
 
 fn log_line(e: &mut Emu, s: String) {
@@ -330,6 +332,7 @@ fn new_emu(m: Machine, image: Arc<Vec<u8>>) -> Emu {
         auto_sync: true,
         last_drift: 0.0,
         sleep_hold: None,
+        ir: Default::default(),
     }
 }
 
@@ -404,7 +407,13 @@ pub extern "C" fn tg_tick(e: *mut Emu, real_dt: f64) -> i32 {
         return TG_PANIC;
     }
     let em = unsafe { &mut *e };
-    match catch_unwind(AssertUnwindSafe(|| tick(em, real_dt))) {
+    // the infrared line lives in process-wide state: only one toy runs at a time
+    static TICK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = TICK.lock().unwrap_or_else(|p| p.into_inner());
+    tg18::sys::ir_ctx_swap(&mut em.ir);
+    let r = catch_unwind(AssertUnwindSafe(|| tick(em, real_dt)));
+    tg18::sys::ir_ctx_swap(&mut em.ir);
+    match r {
         Ok(c) => c,
         Err(_) => {
             em.stopped = Some(TG_PANIC);
@@ -1468,4 +1477,40 @@ pub extern "C" fn tg_mm_custom_item(kind: *const c_char, name: *const c_char, pr
         }
         None => 0,
     }
+}
+
+// --- infrared link between two toys ---------------------------------------------
+
+/// Turn the link on: this toy's infrared goes to the other toy instead of the built-in partner.
+#[no_mangle]
+pub extern "C" fn tg_ir_link(e: *mut Emu, on: i32) {
+    with(e, |em| {
+        em.ir.bridge = on != 0;
+        if on == 0 {
+            em.ir.outbox.clear();
+        }
+    })
+}
+
+/// Take the next frame this toy sent (copied into `out`, up to `max`). Returns its length, or 0.
+#[no_mangle]
+pub extern "C" fn tg_ir_take(e: *mut Emu, out: *mut u8, max: usize) -> usize {
+    with(e, |em| match em.ir.outbox.pop_front() {
+        Some(f) if f.len() <= max && !out.is_null() => {
+            unsafe { std::ptr::copy_nonoverlapping(f.as_ptr(), out, f.len()) };
+            f.len()
+        }
+        _ => 0,
+    })
+}
+
+/// Hand this toy a frame from the other toy; it arrives 2 ms of toy time from now.
+#[no_mangle]
+pub extern "C" fn tg_ir_deliver(e: *mut Emu, data: *const u8, n: usize) {
+    with(e, |em| {
+        if let Some(d) = unsafe { bytes(data, n) } {
+            let due = em.m.now() + 0.002;
+            em.ir.deliver(d, due);
+        }
+    })
 }

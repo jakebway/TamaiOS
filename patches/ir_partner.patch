@@ -1,9 +1,113 @@
+diff --git a/core/src/bin/irlink.rs b/core/src/bin/irlink.rs
+new file mode 100644
+index 0000000..726d79e
+--- /dev/null
++++ b/core/src/bin/irlink.rs
+@@ -0,0 +1,62 @@
++//! Two toys in one process, their infrared lines joined: irlink <rom> <snapA> <snapB> <seconds>
++//! Both start from a snapshot (e.g. at the PLAYDATE menu). Presses: A and B choose the first
++//! menu entry at 0.3 s, then A presses B again at 6 s to start the connection.
++use std::sync::Arc;
++use tg18::snapshot::Snapshot;
++use tg18::sys::{ir_ctx_swap, IrCtx};
++use tg18::{Key, Machine, CPU_HZ};
++
++fn load(image: &Arc<Vec<u8>>, p: &str) -> Machine {
++    let mut m = Machine::new(image.clone(), image, 0.0);
++    Snapshot::load(p).and_then(|s| s.restore(&mut m)).expect("snapshot");
++    m
++}
++
++fn main() {
++    std::env::set_var("TG18_IR_TRACE", "/dev/null");
++    let a: Vec<String> = std::env::args().skip(1).collect();
++    let image = Arc::new(std::fs::read(&a[0]).unwrap());
++    let secs: f64 = a[3].parse().unwrap();
++    let mut m = [load(&image, &a[1]), load(&image, &a[2])];
++    let mut ctx = [IrCtx::default(), IrCtx::default()];
++    ctx[0].bridge = true;
++    ctx[1].bridge = true;
++    let t0 = [m[0].now(), m[1].now()];
++    for i in 0..2 {
++        m[i].press(t0[i] + 0.3, Key::B);
++    }
++    m[0].press(t0[0] + 6.0, Key::B);
++    let slice = (0.005 * CPU_HZ) as u64;
++    let mut frames = [0usize; 2];
++    let mut step = 0u64;
++    loop {
++        let el = m[0].now() - t0[0];
++        if el >= secs {
++            break;
++        }
++        for i in 0..2 {
++            ir_ctx_swap(&mut ctx[i]);
++            let end = m[i].executed + slice;
++            m[i].run_with_sleep(end);
++            ir_ctx_swap(&mut ctx[i]);
++        }
++        for i in 0..2 {
++            while let Some(f) = ctx[i].outbox.pop_front() {
++                frames[i] += 1;
++                let j = 1 - i;
++                let due = m[j].now() + 0.002;
++                if step % 1 == 0 {
++                    println!("t={:.3} toy {} -> toy {}: {} bytes {:02x?}", el, i, j, f.len(), &f[..f.len().min(6)]);
++                }
++                ctx[j].deliver(&f, due);
++            }
++        }
++        step += 1;
++    }
++    println!("frames A->B {} B->A {}", frames[0], frames[1]);
++    for i in 0..2 {
++        let rgb = m[i].lcd_rgb();
++        let (w, h) = Machine::screen_size();
++        let _ = tg18::png::write(&format!("link_{}.png", i), w, h, &rgb, 2);
++    }
++}
+diff --git a/core/src/bin/tg18cli.rs b/core/src/bin/tg18cli.rs
+index 58c97c5..764aef1 100644
+--- a/core/src/bin/tg18cli.rs
++++ b/core/src/bin/tg18cli.rs
+@@ -35,6 +35,7 @@ fn main() {
+     let mut trace = false;
+     let mut quiet = false;
+     let mut dumps: Vec<(u32, u32)> = Vec::new();
++    let mut pokes: Vec<(u32, Vec<u8>)> = Vec::new();
+     let mut i = 0;
+     let next = |i: &mut usize| -> String {
+         *i += 1;
+@@ -69,6 +70,13 @@ fn main() {
+                 let a = u32::from_str_radix(a.trim_start_matches("0x"), 16).unwrap_or_else(|_| usage());
+                 dumps.push((a, n.parse().unwrap_or_else(|_| usage())));
+             }
++            "--poke" => {
++                let spec = next(&mut i);
++                let (a, h) = spec.split_once(':').unwrap_or_else(|| usage());
++                let a = u32::from_str_radix(a.trim_start_matches("0x"), 16).unwrap_or_else(|_| usage());
++                let b: Vec<u8> = (0..h.len() / 2).map(|k| u8::from_str_radix(&h[2 * k..2 * k + 2], 16).unwrap_or(0)).collect();
++                pokes.push((a, b));
++            }
+             "-h" | "--help" => usage(),
+             a if !a.starts_with("--") && image_path.is_none() => image_path = Some(a.to_string()),
+             _ => usage(),
+@@ -122,6 +130,9 @@ fn main() {
+         }
+         println!("resumed snapshot {} at {:.3} s", p, m.now());
+     }
++    for (a, b) in &pokes {
++        m.sys.poke(*a, b);
++    }
+     m.sys.turbo = turbo;
+     m.idle_skip = idle_skip;
+     m.never_sleep = never_sleep;
 diff --git a/core/src/irpartner.rs b/core/src/irpartner.rs
 new file mode 100644
-index 0000000..be4297b
+index 0000000..875ba1a
 --- /dev/null
 +++ b/core/src/irpartner.rs
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,408 @@
 +//! A pretend second Tamagotchi on the infrared link.
 +//!
 +//! The toy talks IrDA: IrLAP (link) > IrLMP (multiplexing) > TinyTP (flow control) > OBEX
@@ -39,6 +143,8 @@ index 0000000..be4297b
 +    pub files_out: HashMap<String, Vec<u8>>,
 +    /// Where to save every file the toy sends us (the folder must exist).
 +    pub dump_dir: Option<String>,
++    /// Byte patches for the files we hand out: (file name, offset, new bytes).
++    pub patches: Vec<(String, usize, Vec<u8>)>,
 +
 +    caddr: Option<u8>,
 +    ns: u8,
@@ -74,6 +180,17 @@ index 0000000..be4297b
 +impl Partner {
 +    pub fn new() -> Partner {
 +        Partner::default()
++    }
++
++    /// Parse "get1.jpg:72=1234,get1.jpg:8a=00" (offset in hex, bytes in hex).
++    pub fn set_patches(&mut self, spec: &str) {
++        for item in spec.split(',') {
++            let Some((name, rest)) = item.split_once(':') else { continue };
++            let Some((off, hex)) = rest.split_once('=') else { continue };
++            let Ok(off) = usize::from_str_radix(off.trim(), 16) else { continue };
++            let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
++            self.patches.push((name.trim().to_string(), off, bytes));
++        }
 +    }
 +
 +    /// One frame from the toy in, the frame to answer with out.
@@ -352,7 +469,17 @@ index 0000000..be4297b
 +                    let data = self.files_out.get(&n).cloned().or_else(|| self.files_in.get(&n.replacen("get", "put", 1)).cloned());
 +                    self.note(format!("OBEX get {} ({} bytes available)", n, data.as_ref().map_or(0, |d| d.len())));
 +                    match data {
-+                        Some(d) => {
++                        Some(mut d) => {
++                            for (pn, off, bytes) in &self.patches {
++                                if *pn == n && off + bytes.len() <= d.len() {
++                                    d[*off..*off + bytes.len()].copy_from_slice(bytes);
++                                }
++                            }
++                            if !self.patches.is_empty() && d.len() >= 258 && n == "get1.jpg" {
++                                // the 258-byte info packet ends in a 16-bit sum of the 256 bytes before it
++                                let sum = d[..256].iter().fold(0u16, |a, &b| a.wrapping_add(b as u16));
++                                d[256..258].copy_from_slice(&sum.to_le_bytes());
++                            }
 +                            self.get_data = d;
 +                            self.get_pos = 0;
 +                        }
@@ -401,36 +528,11 @@ index d0a2909..0c2d621 100644
  pub mod machine;
  pub mod png;
  pub mod radio;
-diff --git a/core/src/machine.rs b/core/src/machine.rs
-index f476e05..66354ee 100644
---- a/core/src/machine.rs
-+++ b/core/src/machine.rs
-@@ -418,6 +418,8 @@ impl Machine {
-                 }
-                 continue;
-             }
-+            self.sys.ir_pc = pc;
-+            self.sys.ir_thumb = self.cpu.cpsr & 0x20 != 0;
-             self.cpu.step(&mut self.sys);
-             done += 1;
-             if self.sys.stop || self.cpu.fault.is_some() {
-@@ -447,6 +449,11 @@ impl Machine {
-             let ran = self.exec(n, 1);
-             self.executed += ran + self.spin_skipped;
-             self.spin_skipped = 0;
-+            self.sys.ir_pc = self.cpu.r[15];
-+            self.sys.ir_thumb = self.cpu.cpsr & 0x20 != 0;
-+            if crate::sys::ir_take_dump_request() {
-+                self.sys.ir_dump_code();
-+            }
-             if let Some(out) = self.check_stop() {
-                 return out;
-             }
 diff --git a/core/src/sys.rs b/core/src/sys.rs
-index a4970c0..f22c0b2 100644
+index a4970c0..1d6a0ab 100644
 --- a/core/src/sys.rs
 +++ b/core/src/sys.rs
-@@ -9,6 +9,457 @@ use std::hash::{BuildHasherDefault, Hasher};
+@@ -9,6 +9,495 @@ use std::hash::{BuildHasherDefault, Hasher};
  use crate::cpu::Bus;
  use crate::*;
  
@@ -527,6 +629,9 @@ index a4970c0..f22c0b2 100644
 +            if std::env::var("TG18_IR_PARTNER").is_ok() {
 +                let mut p = crate::irpartner::Partner::new();
 +                p.dump_dir = std::env::var("TG18_IR_DUMP").ok();
++                if let Ok(v) = std::env::var("TG18_IR_PATCH") {
++                    p.set_patches(&v);
++                }
 +                *IR_PARTNER.lock().unwrap() = Some(p);
 +                let _ = writeln!(t.out, "# partner: built-in IR partner on");
 +            }
@@ -598,10 +703,41 @@ index a4970c0..f22c0b2 100644
 +/// TG18_IR_RX_GAP seconds after the toy's frame ends; `@N` copies byte N of the toy's frame,
 +/// `@N+K` copies K bytes from N. The first matching rule wins.
 +static IR_REACT: std::sync::Mutex<Vec<(Vec<Option<u8>>, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
++static IR_OUTBOX: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>> = std::sync::Mutex::new(std::collections::VecDeque::new());
++static IR_BRIDGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 +static IR_PARTNER: std::sync::Mutex<Option<crate::irpartner::Partner>> = std::sync::Mutex::new(None);
 +static IR_REACT_MAX: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
 +static IR_REACT_OUT: std::sync::Mutex<std::collections::VecDeque<(f64, Vec<u8>)>> = std::sync::Mutex::new(std::collections::VecDeque::new());
 +static IR_REACT_DEFRAME: std::sync::Mutex<(bool, bool, Vec<u8>)> = std::sync::Mutex::new((false, false, Vec::new()));
++
++/// One toy's infrared line, so two toys can run in one process and talk to each other.
++/// The core keeps the line in process-wide state; `ir_ctx_swap` moves a toy's own line in
++/// before it runs and out again after. With `bridge` on, every frame the toy sends is
++/// queued in `outbox` (address, control, data - no checksum) for the host to hand to the
++/// other toy with `deliver`, which plays it into this toy's receiver `due` seconds from now.
++#[derive(Default)]
++pub struct IrCtx {
++    pub rx: std::collections::VecDeque<u8>,
++    pub react_out: std::collections::VecDeque<(f64, Vec<u8>)>,
++    pub deframe: (bool, bool, Vec<u8>),
++    pub outbox: std::collections::VecDeque<Vec<u8>>,
++    pub bridge: bool,
++}
++
++impl IrCtx {
++    pub fn deliver(&mut self, body: &[u8], due: f64) {
++        self.react_out.push_back((due, ir_build_frame(body)));
++    }
++}
++
++pub fn ir_ctx_swap(c: &mut IrCtx) {
++    std::mem::swap(&mut *IR_RX.lock().unwrap(), &mut c.rx);
++    std::mem::swap(&mut *IR_REACT_OUT.lock().unwrap(), &mut c.react_out);
++    std::mem::swap(&mut *IR_REACT_DEFRAME.lock().unwrap(), &mut c.deframe);
++    std::mem::swap(&mut *IR_OUTBOX.lock().unwrap(), &mut c.outbox);
++    let b = IR_BRIDGE.swap(c.bridge, std::sync::atomic::Ordering::Relaxed);
++    c.bridge = b;
++}
 +
 +fn ir_fcs16(data: &[u8]) -> u16 {
 +    let mut fcs: u16 = 0xFFFF;
@@ -651,6 +787,10 @@ index a4970c0..f22c0b2 100644
 +}
 +
 +fn ir_react_match(now: f64, body: &[u8]) -> Option<(f64, Vec<u8>, String)> {
++    if IR_BRIDGE.load(std::sync::atomic::Ordering::Relaxed) {
++        IR_OUTBOX.lock().unwrap().push_back(body.to_vec());
++        return Some((f64::MAX, Vec::new(), format!("LINK frame of {} byte(s) to the other toy at t={:.1}", body.len(), now * 1e6)));
++    }
 +    if let Some(p) = IR_PARTNER.lock().unwrap().as_mut() {
 +        let (resp, note) = p.handle(body);
 +        let hex: String = body.iter().take(24).map(|x| format!("{:02x}", x)).collect();
@@ -685,7 +825,7 @@ index a4970c0..f22c0b2 100644
 +
 +/// Feed one byte the toy transmitted; returns a reaction once a whole frame has been seen.
 +fn ir_react_feed(now: f64, b: u8) -> Option<(f64, Vec<u8>, String)> {
-+    if IR_REACT.lock().unwrap().is_empty() && IR_PARTNER.lock().unwrap().is_none() {
++    if IR_REACT.lock().unwrap().is_empty() && IR_PARTNER.lock().unwrap().is_none() && !IR_BRIDGE.load(std::sync::atomic::Ordering::Relaxed) {
 +        return None;
 +    }
 +    let mut st = IR_REACT_DEFRAME.lock().unwrap();
@@ -888,7 +1028,7 @@ index a4970c0..f22c0b2 100644
  /// Identity-style hasher for register addresses (fast, keys are u32).
  #[derive(Default)]
  pub struct AddrHasher(u64);
-@@ -316,6 +767,9 @@ pub struct System {
+@@ -316,6 +805,9 @@ pub struct System {
      pub gpio: Vec<u8>,
      pub uart: Vec<u8>,
      pub uart_is_ram: bool,
@@ -898,7 +1038,7 @@ index a4970c0..f22c0b2 100644
      /// Zero pages mapped on demand for stray accesses (64 KiB each).
      pub extra: HashMap<u32, Vec<u8>>,
      pub unmapped: Vec<(u32, u32)>,
-@@ -366,12 +820,15 @@ impl System {
+@@ -366,12 +858,15 @@ impl System {
      pub fn new(image: &[u8]) -> System {
          let mut ram = vec![0u8; RAM_SIZE];
          ram[..image.len()].copy_from_slice(image);
@@ -914,7 +1054,7 @@ index a4970c0..f22c0b2 100644
              extra: HashMap::new(),
              unmapped: Vec::new(),
              regs: RegMap::default(),
-@@ -709,20 +1166,33 @@ impl System {
+@@ -709,20 +1204,33 @@ impl System {
  
      // --- interrupts, time, buttons ---
  
@@ -950,7 +1090,7 @@ index a4970c0..f22c0b2 100644
              if on && (mask >> (32 - n)) & 1 == 0 {
                  return *n;
              }
-@@ -738,6 +1208,7 @@ impl System {
+@@ -738,6 +1246,7 @@ impl System {
      pub fn advance(&mut self, now: f64) {
          self.game_time += (now - self.now) * self.turbo;
          self.now = now;
@@ -958,7 +1098,7 @@ index a4970c0..f22c0b2 100644
          for n in 0..TIMER_COUNT {
              self.timer_advance(n);
          }
-@@ -833,6 +1304,9 @@ impl System {
+@@ -833,6 +1342,9 @@ impl System {
      }
  
      fn uart_ir_access(&mut self, addr: u32) {
@@ -968,7 +1108,7 @@ index a4970c0..f22c0b2 100644
          if self.infrared_armed && (UART_BASE..UART_BASE + UART_SIZE as u32).contains(&addr)
              && UART_IR_REGS.contains(&((addr - UART_BASE) & !3))
          {
-@@ -879,6 +1353,14 @@ impl System {
+@@ -879,6 +1391,14 @@ impl System {
              0xC004_0000 | 0xC004_0004 | 0xC004_0008 => self.tod_read((word - RTC_IRQ_BASE) / 4),
              0xC009_0010 => 1,
              0xC009_0014 => self.rtc.data_out,
@@ -983,7 +1123,7 @@ index a4970c0..f22c0b2 100644
              _ => {
                  let off = word.wrapping_sub(TIMER_BASE);
                  if off < (TIMER_COUNT as u32) * 0x20 && off % 0x20 == 0 {
-@@ -892,6 +1374,11 @@ impl System {
+@@ -892,6 +1412,11 @@ impl System {
              }
          };
          let val = (val >> ((addr & 3) * 8)) & if size == 4 { u32::MAX } else { (1 << (size * 8)) - 1 };
@@ -995,7 +1135,7 @@ index a4970c0..f22c0b2 100644
          if self.trace_mmio {
              self.log_mmio(addr, false, val);
          }
-@@ -900,6 +1387,12 @@ impl System {
+@@ -900,6 +1425,12 @@ impl System {
  
      fn mmio_write(&mut self, addr: u32, size: u32, val: u32) {
          self.uart_ir_access(addr);
@@ -1008,7 +1148,7 @@ index a4970c0..f22c0b2 100644
          if self.trace_mmio {
              self.log_mmio(addr, true, val);
          }
-@@ -909,6 +1402,9 @@ impl System {
+@@ -909,6 +1440,9 @@ impl System {
          self.mmio_writes += 1;
          let old = self.reg(word);
          let new = (old & !mask) | ((val << sh) & mask);
@@ -1018,7 +1158,7 @@ index a4970c0..f22c0b2 100644
          let off = word.wrapping_sub(TIMER_BASE);
          if off < (TIMER_COUNT as u32) * 0x20 && off % 0x20 == 0 {
              let n = (off / 0x20) as usize;
-@@ -1032,6 +1528,20 @@ impl System {
+@@ -1032,6 +1566,20 @@ impl System {
          }
      }
  
@@ -1039,7 +1179,7 @@ index a4970c0..f22c0b2 100644
      /// Make the infrared port plain memory ("idle, nothing received").
      pub fn uart_to_ram(&mut self) {
          if self.uart_is_ram {
-@@ -1108,7 +1618,7 @@ const SRAM_END: u32 = SRAM_BASE + SRAM_SIZE as u32;
+@@ -1108,7 +1656,7 @@ const SRAM_END: u32 = SRAM_BASE + SRAM_SIZE as u32;
  impl System {
      #[inline(never)]
      fn slow_read(&mut self, addr: u32, size: u32) -> u32 {
@@ -1048,7 +1188,7 @@ index a4970c0..f22c0b2 100644
              Some((m, o)) if o + size as usize <= m.len() => {
                  let mut v = 0u32;
                  for i in (0..size as usize).rev() {
-@@ -1118,11 +1628,18 @@ impl System {
+@@ -1118,11 +1666,18 @@ impl System {
              }
              Some(_) => 0,
              None => self.mmio_read(addr, size),

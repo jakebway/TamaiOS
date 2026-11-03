@@ -178,11 +178,9 @@ final class Emulator: ObservableObject {
         }
     }
 
-    private func boot(_ toy: Toy) -> Bool {
-        guard let rom = try? Data(contentsOf: ToyStore.romURL(toy.id)) else {
-            say("Couldn't read this device's ROM file.")
-            return false
-        }
+    /// Start a core for `toy` from its newest save (also used for the visiting device in an infrared link).
+    static func makeHandle(_ toy: Toy) -> (OpaquePointer?, Double) {
+        guard let rom = try? Data(contentsOf: ToyStore.romURL(toy.id)) else { return (nil, 0) }
         let snap = try? Data(contentsOf: ToyStore.snapURL(toy.id))
         let flash = try? Data(contentsOf: ToyStore.flashURL(toy.id))
         let meta = (try? String(contentsOf: ToyStore.flashMetaURL(toy.id), encoding: .utf8)) ?? ""
@@ -200,6 +198,15 @@ final class Emulator: ObservableObject {
                 }
             }
         }
+        return (h, elapsed)
+    }
+
+    private func boot(_ toy: Toy) -> Bool {
+        guard (try? Data(contentsOf: ToyStore.romURL(toy.id))) != nil else {
+            say("Couldn't read this device's ROM file.")
+            return false
+        }
+        let (h, elapsed) = Emulator.makeHandle(toy)
         guard let h else {
             say("This device couldn't start. Open Settings › Console and run \"diag\".", seconds: 8)
             note("tg_create returned null for \(toy.id)")
@@ -397,6 +404,7 @@ final class Emulator: ObservableObject {
                 radioStale = false
                 let r = tg_radio_ready(h) != 0
                 if r != radioReady { radioReady = r; radioChanged = true }
+                if let id = toyID { IRLink.shared.watch(emu: self, handle: h, deviceID: id, now: now) }
             }
             if flags & 1 != 0 { needFrame = true }
             if needFrame && visible && now - lastPublish >= 1.0 / lp.fps {

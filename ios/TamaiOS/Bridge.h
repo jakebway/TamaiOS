@@ -62,6 +62,9 @@ void tg_radio_trace(Emu *e, uint8_t **out, size_t *out_len);
 
 /* Tama Town: marriage */
 double tg_clock_drift(Emu *e);
+void tg_ir_link(Emu *e, int32_t on);
+size_t tg_ir_take(Emu *e, uint8_t *out, size_t max);
+void tg_ir_deliver(Emu *e, const uint8_t *data, size_t n);
 int32_t tg_mm_load_zip(const uint8_t *p, size_t n);
 size_t tg_mm_ids(uint16_t *out, size_t max);
 int32_t tg_mm_compose(uint16_t b, int32_t bp, uint16_t m, uint16_t a, int32_t ap, uint16_t k, int32_t kp, uint32_t *out);

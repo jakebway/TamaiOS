@@ -207,16 +207,18 @@ final class IRLink {
         var px = [UInt32](repeating: 0, count: 128 * 128)
         _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
         var rows: [String] = []
-        for y in stride(from: 0, to: 128, by: 8) {
+        let lo = px.map { Int(($0 >> 16) & 255) + Int(($0 >> 8) & 255) + Int($0 & 255) }.min() ?? 0
+        let hi = px.map { Int(($0 >> 16) & 255) + Int(($0 >> 8) & 255) + Int($0 & 255) }.max() ?? 0
+        let mid = (lo + hi) / 2
+        for y in stride(from: 0, to: 128, by: 4) {
             var r = ""
-            for x in stride(from: 0, to: 128, by: 4) {
-                var sum = 0
-                for dy in 0..<8 { for dx in 0..<4 {
+            for x in stride(from: 0, to: 128, by: 2) {
+                var dark = 0
+                for dy in 0..<4 { for dx in 0..<2 {
                     let c = px[(y + dy) * 128 + x + dx]
-                    sum += Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255)
+                    if Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255) < mid { dark += 1 }
                 } }
-                let avg = sum / (32 * 3)
-                r += avg < 90 ? "#" : avg < 170 ? "+" : "."
+                r += dark >= 3 ? "#" : dark >= 1 ? "+" : " "
             }
             rows.append(r)
         }

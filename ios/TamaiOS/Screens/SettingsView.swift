@@ -28,7 +28,6 @@ struct SettingsView: View {
     @ObservedObject private var liveName = LiveTamaName.shared
     @State private var name = ""
     @State private var nameFor = ""
-    @State private var confirmRestart = false
     @State private var showReset = false
     enum SettingsSheet: Identifiable {
         case share(URL), picker
@@ -56,10 +55,7 @@ struct SettingsView: View {
                             ColorPickerRow(selection: Binding(get: { toy.color }, set: { c in var t = toy; t.color = c; model.update(t) }))
                         }
                         .padding(.vertical, 6)
-                        Button(role: .destructive) { confirmRestart = true } label: { Label("Restart Device", systemImage: "arrow.clockwise") }
-                    } header: { Text(toy.romName) } footer: {
-                        Text("Restart is like taking the batteries out and putting them back in. Your pet is kept.")
-                    }
+                    } header: { Text(toy.romName) }
                 }
 
                 Section {
@@ -136,9 +132,6 @@ struct SettingsView: View {
             .onChange(of: neverSleep) { _ in emu.applySettings() }
             .onChange(of: live) { _ in emu.applySettings(); emu.audio.restart(); careAlerts.prepare() }
             .onChange(of: keepAwake) { v in UIApplication.shared.isIdleTimerDisabled = v }
-            .confirmationDialog("Restart the device?", isPresented: $confirmRestart, titleVisibility: .visible) {
-                Button("Restart", role: .destructive) { emu.restart(); dismiss() }
-            } message: { Text("Like taking the batteries out and putting them back. Your pet is kept.") }
             .sheet(item: $sheet) { which in
                 switch which {
                 case .share(let u): ActivityView(items: [u])
@@ -194,6 +187,7 @@ struct DevicesSection: View {
     @State private var restoring: Toy?
     @State private var shareURL: ShareItem?
     @State private var message: String?
+    @State private var confirmRestart = false
 
     private func tamaName(_ t: Toy) -> String? { LiveTamaName.savedName(t.id) }
 
@@ -209,6 +203,9 @@ struct DevicesSection: View {
                 deleting = nil
             }
         } message: { Text("This removes the ROM and all saves for it from this iPhone. Make a backup first if you might want it back.") }
+        .confirmationDialog("Restart the device?", isPresented: $confirmRestart, titleVisibility: .visible) {
+            Button("Restart", role: .destructive) { emu.restart(); dismiss() }
+        } message: { Text("Like taking the batteries out and putting them back. Your pet is kept.") }
         .confirmationDialog("Reset \(resetting.map { tamaName($0) ?? $0.name } ?? "")?", isPresented: Binding(get: { resetting != nil }, set: { if !$0 { resetting = nil } }), titleVisibility: .visible) {
             Button("Erase This Tama and Start Fresh", role: .destructive) {
                 if let t = resetting {
@@ -270,6 +267,9 @@ struct DevicesSection: View {
                 pill("Restore", "square.and.arrow.down", tint: theme.bottom) { restoring = t }
                 pill("Reset", "arrow.counterclockwise", tint: .red) { resetting = t }
                 Menu {
+                    if current {
+                        Button { confirmRestart = true } label: { Label("Restart Device", systemImage: "arrow.clockwise") }
+                    }
                     Button(role: .destructive) { deleting = t } label: { Label("Delete Device…", systemImage: "trash") }
                 } label: {
                     Image(systemName: "ellipsis")

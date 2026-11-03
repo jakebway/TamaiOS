@@ -42,14 +42,24 @@ struct SettingsView: View {
             Form {
                 if let toy = emu.toy {
                     Section {
-                        TextField("Device label", text: $name)
-                            .onSubmit { rename(toy) }
-                        ColorPickerRow(selection: Binding(get: { toy.color }, set: { c in var t = toy; t.color = c; model.update(t) }))
-                            .padding(.vertical, 4)
-                        Button { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { emu.syncClock() } } label: { Label("Sync Clock", systemImage: "clock.arrow.circlepath") }
-                        Button { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { emu.sleepNow() } } label: { Label("Sleep Now", systemImage: "moon.zzz.fill") }
-                        Button(role: .destructive) { confirmRestart = true } label: { Label("Restart", systemImage: "arrow.clockwise") }
-                    } header: { Text(toy.romName) }
+                        HStack {
+                            Text("Name")
+                            Spacer()
+                            TextField("Device name", text: $name)
+                                .multilineTextAlignment(.trailing)
+                                .foregroundStyle(.secondary)
+                                .submitLabel(.done)
+                                .onSubmit { rename(toy) }
+                        }
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Shell colour")
+                            ColorPickerRow(selection: Binding(get: { toy.color }, set: { c in var t = toy; t.color = c; model.update(t) }))
+                        }
+                        .padding(.vertical, 6)
+                        Button(role: .destructive) { confirmRestart = true } label: { Label("Restart Device", systemImage: "arrow.clockwise") }
+                    } header: { Text(toy.romName) } footer: {
+                        Text("Restart is like taking the batteries out and putting them back in. Your pet is kept.")
+                    }
                 }
 
                 Section {
@@ -106,23 +116,11 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Button {
-                        dismiss()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.openPickup = true }
-                    } label: {
-                        Label("TamaDepa In-Store Pick Up", systemImage: "bag.fill")
-                    }
-                } footer: {
-                    Text("Browse items and queue gifts. On your Tama choose Connection › App › Download for pickup.")
-                }
-
-                Section("Help") {
                     NavigationLink { ConsoleView() } label: { Label("Console", systemImage: "terminal.fill") }
-                }
-
-                Section {
-                    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
-                        .font(.footnote).foregroundStyle(.secondary)
+                } header: { Text("Help") } footer: {
+                    Text("TamaiOS \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 10)
                 }
             }
             .buttonStyle(SettingsRowButtonStyle())

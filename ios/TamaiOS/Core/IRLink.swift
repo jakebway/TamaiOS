@@ -45,11 +45,15 @@ final class IRLink {
         guard !active, !starting, now >= cooldownUntil, IRLink.waiting(h),
               !emu.holdForApp, !emu.appWaiting else { return }
         guard let model = AppModel.current, let me = emu.toy else { return }
-        let others = model.toys.filter { $0.id != me.id }.sorted(by: { a, b in
+        let others = model.toys.filter { $0.id != me.id && !Town.shared.state($0).away }.sorted(by: { a, b in
             let last = Prefs.d.string(forKey: "ir.lastPartner")
             return (a.id == last ? 0 : 1, a.romName == me.romName ? 0 : 1, a.name) < (b.id == last ? 0 : 1, b.romName == me.romName ? 0 : 1, b.name)
         })
-        guard !others.isEmpty else { cooldownUntil = now + 5; return }
+        guard !others.isEmpty else {
+            cooldownUntil = now + 30
+            if model.toys.count > 1 { emu.say("Your other device is out in Tamatown. Bring it home first, then connect.", seconds: 6) }
+            return
+        }
         starting = true
         let mode = IRLink.mode(h, deviceID: deviceID)
         let role = IRLink.role(h, deviceID: deviceID)
@@ -176,6 +180,18 @@ final class IRLink {
         return "your other Tama"
     }
 
+    /// Whatever time the visitor spent being driven (menus, the exchange, coming home) is simulated
+    /// faster than real time, so before it is saved its clock is set to the real time again.
+    /// That way it never needs a "clock matched" correction when you switch to it.
+    private func fixClock(_ p: OpaquePointer, _ toy: Toy, _ audio: UnsafeMutablePointer<Int16>) {
+        let target = DaytimeClock.target(toy.id)
+        tg_set_wall_clock(p, target)
+        for _ in 0..<3 {
+            if tg_sync_clock(p, target) == 1 { break }
+            tickAll(p, 25, audio)
+        }
+    }
+
     private func saveSnapshot(_ p: OpaquePointer, _ toy: Toy) {
         var out: UnsafeMutablePointer<UInt8>? = nil
         var n = 0
@@ -229,6 +245,7 @@ final class IRLink {
             // maybe it is still out from an earlier visit: send it home, then try again
             if case .home = bringHome(v, audio) {
                 emu.note("infrared link: \(partner.name) was out and is home now")
+                fixClock(v, partner, audio)
                 saveSnapshot(v, partner)
                 reached = reach()
             }
@@ -319,13 +336,10 @@ final class IRLink {
             tickAll(p, 25, audio)
         }
         tickAll(p, 50, audio)
-        var out: UnsafeMutablePointer<UInt8>? = nil
-        var n = 0
         // only keep the visitor's new state if the exchange really finished; otherwise it stays as it was
-        if finished, tg_snapshot(p, &out, &n) == 1, let out {
-            let d = Data(bytes: out, count: n)
-            tg_free(out, n)
-            try? d.write(to: ToyStore.snapURL(partner.id), options: .atomic)
+        if finished {
+            fixClock(p, partner, audio)
+            saveSnapshot(p, partner)
         }
         emu.note("infrared link: \(trace.count) frames, \(bytes) bytes; last frames:\n" + trace.suffix(30).joined(separator: "\n"))
         let who = IRLink.tamaLabel(partner)

@@ -55,6 +55,21 @@ jobs:
           cp target/aarch64-apple-ios/release/libtamaios.a ../ios/lib/
           ls -lh ../ios/lib/
 
+      - name: Fetch firmware and assets from the private repo (if configured)
+        env:
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PRIVATE_TOKEN:-}" ]; then
+            git clone --depth 1 "https://x-access-token:${PRIVATE_TOKEN}@github.com/jakebway/TamaiOS-private.git" private
+            mkdir -p firmware assets
+            cp private/firmware/*.bin firmware/ 2>/dev/null || true
+            cp private/assets/*.zip assets/ 2>/dev/null || true
+            rm -rf private
+          else
+            echo "No PRIVATE_REPO_TOKEN secret: using firmware/ and assets/ from this repo, if any."
+          fi
+
       - name: Bundle firmware and MyMeets assets into the app
         run: |
           set -euo pipefail

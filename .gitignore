@@ -1,0 +1,9 @@
+# Never commit these: they are your own copies of Bandai's firmware / third-party data
+firmware/*.bin
+assets/*.zip
+ffi/target/
+ios/lib/
+ios/*.xcodeproj/
+ios/TamaiOS/BundledFirmware/
+ios/TamaiOS/BundledAssets/
+.DS_Store

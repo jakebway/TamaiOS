@@ -52,7 +52,7 @@ final class IRLink {
             let t = Thread { [self] in
                 run(emu: emu, me: me, partner: partner, mode: mode, role: role)
                 starting = false
-                cooldownUntil = max(cooldownUntil, CACurrentMediaTime() + 5)
+                cooldownUntil = max(cooldownUntil, CACurrentMediaTime() + 1.5)
             }
             t.name = "TamaiOS infrared link"
             t.qualityOfService = .userInitiated
@@ -66,6 +66,94 @@ final class IRLink {
                 cooldownUntil = CACurrentMediaTime() + 20
             })
         }
+    }
+
+    // MARK: bringing the visitor home
+
+    /// One short radio write to the visitor's built-in app module, ticking it until it takes it.
+    private func radioWrite(_ p: OpaquePointer, _ d: [UInt8], _ audio: UnsafeMutablePointer<Int16>) -> Bool {
+        for _ in 0..<500 {
+            if d.withUnsafeBufferPointer({ tg_radio_write(p, $0.baseAddress, $0.count) }) == 1 { return true }
+            tickAll(p, 1, audio)
+        }
+        return false
+    }
+
+    private func radioSend(_ p: OpaquePointer, _ pkt: [UInt8], _ audio: UnsafeMutablePointer<Int16>) -> Bool {
+        tickAll(p, 1, audio)
+        guard radioWrite(p, [0xF0, 0x8D], audio) else { return false }
+        var i = 0
+        while i < pkt.count {
+            let j = min(i + 20, pkt.count)
+            guard radioWrite(p, Array(pkt[i..<j]), audio) else { return false }
+            i = j
+        }
+        return radioWrite(p, [0xF0, 0xCD], audio)
+    }
+
+    private func radioRead(_ p: OpaquePointer) -> [UInt8]? {
+        var q: UnsafeMutablePointer<UInt8>? = nil
+        var n = 0
+        guard tg_radio_read(p, &q, &n) == 1, let q else { return nil }
+        defer { tg_free(q, n) }
+        return Array(UnsafeBufferPointer(start: q, count: n))
+    }
+
+    /// The same listening the app does for a toy's answer (see TamaLink.answer), timed in toy ticks.
+    private func radioAnswer(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, firstTicks: Int = 200, idleTicks: Int = 200) -> Bool {
+        var gotAny = false, acked = false
+        var buffer = 0, expected = -1
+        var waited = 0
+        while true {
+            if let n = radioRead(p) {
+                gotAny = true; waited = 0
+                let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
+                if expected >= 0 && buffer < expected && tag != 0x4DF0 { buffer += n.count }
+                else if tag == 0x0CF0 {
+                    acked = true
+                    let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
+                    if status == 0x0200 { return true }
+                    _ = radioWrite(p, [0xF0, 0x8E, 0x0D], audio)
+                } else if tag == 0x0DF0 {
+                    expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
+                    buffer = 0
+                } else if tag == 0x4DF0 || tag == 0x5CF0 { return true }
+                else if expected >= 0 { buffer += n.count }
+                continue
+            }
+            tickAll(p, 1, audio)
+            waited += 1
+            if !gotAny && waited > firstTicks { return false }
+            if gotAny && waited > idleTicks { return acked }
+        }
+    }
+
+    /// If the visitor came back from the link "out" (I'M OUT), take it through GO BACK? › YES and the
+    /// app's ordinary come-home exchange so it is home and ready for another connection.
+    /// At home the same keys only open and close a menu, which the C presses afterwards undo.
+    private func bringHome(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>) -> Bool {
+        for _ in 0..<2 {
+            for k in [TGKey.b, .a, .b] {
+                tg_press(p, k.rawValue, CACurrentMediaTime())
+                tickAll(p, 8, audio)
+                tg_release(p, k.rawValue)
+                tickAll(p, 30, audio)
+            }
+            for _ in 0..<60 where tg_radio_ready(p) == 0 { tickAll(p, 1, audio) }
+            if tg_radio_ready(p) != 0 { break }
+            // not waiting for the app: back out of whatever those keys opened and look again
+            for _ in 0..<3 {
+                tg_press(p, TGKey.c.rawValue, CACurrentMediaTime()); tickAll(p, 8, audio)
+                tg_release(p, TGKey.c.rawValue); tickAll(p, 30, audio)
+            }
+        }
+        guard tg_radio_ready(p) != 0 else { return false }
+        tg_radio_connect(p, 1)
+        defer { tickAll(p, 5, audio); tg_radio_connect(p, 0) }
+        guard radioSend(p, TamaLink.packet(op: 0x15, cmd: 0), audio), radioAnswer(p, audio) else { return false }
+        tickAll(p, 3, audio)
+        guard radioSend(p, Town.backPacket(nil, points: 0), audio) else { return false }
+        return radioAnswer(p, audio, firstTicks: 400, idleTicks: 200)
     }
 
     private func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {
@@ -175,18 +263,22 @@ final class IRLink {
         // let the visitor settle (it shows its result), then save it where it was kept
         // let it finish whatever it was doing (a half-finished connection times out), show the
         // result, then press C until it is back on its home screen, so it is saved at home
-        tickAll(p, 500, audio)
-        for _ in 0..<8 {
+        let finished = sawDisc && bytes > 3000
+        tickAll(p, 150, audio)
+        if finished {
+            let home = bringHome(p, audio)
+            emu.note("infrared link: \(partner.name) \(home ? "came home" : "was not out (or could not be sent home)")")
+        }
+        for _ in 0..<6 {
             tg_press(p, TGKey.c.rawValue, CACurrentMediaTime())
             tickAll(p, 8, audio)
             tg_release(p, TGKey.c.rawValue)
-            tickAll(p, 40, audio)
+            tickAll(p, 25, audio)
         }
-        tickAll(p, 100, audio)
+        tickAll(p, 50, audio)
         var out: UnsafeMutablePointer<UInt8>? = nil
         var n = 0
         // only keep the visitor's new state if the exchange really finished; otherwise it stays as it was
-        let finished = sawDisc && bytes > 3000
         if finished, tg_snapshot(p, &out, &n) == 1, let out {
             let d = Data(bytes: out, count: n)
             tg_free(out, n)

@@ -282,7 +282,11 @@ final class IRLink {
         // after choosing GIFT (GIVE / RECEIVE), so try the likely endings until one reaches WAITING.
         let head: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b, .b] + Array(repeating: .a, count: mode)
         var tails: [[TGKey]] = [[.b]]
-        if mode == 3 { tails = [[.b, .b]] }      // TRAVEL: the other device always picks VISIT, whichever you chose
+        // TRAVEL: you INVITE (and pick the place) → the other device VISITs. You VISIT → the other device
+        // INVITEs and picks a random place: the list has 8 entries and wraps, and only the places that
+        // device has unlocked can be chosen, so go round from a random start until one accepts.
+        let inviteScan = mode == 3 && role == 0
+        if mode == 3 { tails = inviteScan ? [[.b, .a, .b]] : [[.b, .b]] }
         if mode == 1 {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
             tails = role == 1 ? [[.b, .b, .b], [.b, .b]] : [[.b, .a, .b], [.b, .b], [.b, .a, .a, .b]]
@@ -301,6 +305,18 @@ final class IRLink {
                     tickAll(v, 8, audio)
                     tg_release(v, k.rawValue)
                     tickAll(v, 22, audio)
+                }
+                if inviteScan {
+                    func tap(_ k: TGKey, _ settle: Int) {
+                        tg_press(v, k.rawValue, CACurrentMediaTime()); tickAll(v, 8, audio)
+                        tg_release(v, k.rawValue); tickAll(v, settle, audio)
+                    }
+                    for _ in 0..<Int.random(in: 0..<8) { tap(.a, 22) }
+                    for _ in 0..<8 {
+                        tap(.b, 70)
+                        if IRLink.waiting(v) { break }
+                        tap(.a, 22)
+                    }
                 }
                 tickAll(v, 25, audio)
                 if IRLink.waiting(v) { return true }

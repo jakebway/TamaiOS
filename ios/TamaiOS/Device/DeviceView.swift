@@ -234,14 +234,35 @@ struct DeviceView: View {
         }
     }
 
-    private func topBar(_ theme: Theme) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 0) {
+    private func titleLabel(chevron: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 4) {
                 Text((emu.daytimeMode ? "☀️ " : "") + (emu.toy?.name ?? "TamaiOS"))
                     .font(.system(.title3, design: .rounded).weight(.heavy))
-                if let r = emu.toy?.romName {
-                    Text(r).font(.system(.caption2, design: .rounded)).opacity(0.7)
-                }
+                if chevron { Image(systemName: "chevron.down").font(.system(size: 12, weight: .bold)) }
+            }
+            if let r = emu.toy?.romName {
+                Text(r).font(.system(.caption2, design: .rounded)).opacity(0.7)
+            }
+        }
+    }
+
+    private func topBar(_ theme: Theme) -> some View {
+        HStack {
+            if model.toys.count > 1 {
+                Menu {
+                    ForEach(model.toys) { t in
+                        Button {
+                            if t.id != emu.toy?.id { model.play(t) }
+                        } label: {
+                            Label((LiveTamaName.savedName(t.id).map { $0 + " · " } ?? "") + t.name + " (" + t.romName + ")",
+                                  systemImage: t.id == emu.toy?.id ? "checkmark.circle.fill" : "circle")
+                        }
+                    }
+                } label: { titleLabel(chevron: true) }
+                .tint(theme.ink)
+            } else {
+                titleLabel(chevron: false)
             }
             Spacer()
             Button { showSettings = true } label: {

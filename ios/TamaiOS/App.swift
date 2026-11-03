@@ -189,16 +189,51 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(nil)
-        .confirmationDialog("Link with which device?", isPresented: Binding(get: { model.irChoice != nil }, set: { _ in }), titleVisibility: .visible) {
-            if let c = model.irChoice {
-                ForEach(c.candidates) { t in
-                    Button(t.name) { model.irChoice = nil; c.pick(t) }
-                }
-                Button("Cancel", role: .cancel) { model.irChoice = nil; c.cancel() }
-            }
-        } message: {
-            Text("It wakes up, joins your connection, and goes back to sleep afterwards.")
+        .sheet(isPresented: Binding(get: { model.irChoice != nil }, set: { if !$0, let c = model.irChoice { model.irChoice = nil; c.cancel() } })) {
+            if let c = model.irChoice { LinkPicker(choice: c).environmentObject(model) }
         }
+    }
+}
+
+/// "Link with which device?": big rows with the device's look, its Tama's name and its firmware.
+struct LinkPicker: View {
+    let choice: IRChoice
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 12) {
+                    Text("Pick the device that joins your connection. It wakes up, links, and goes back to sleep afterwards.")
+                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.bottom, 4)
+                    ForEach(Array(choice.candidates.enumerated()), id: \.element.id) { i, t in
+                        Button {
+                            Prefs.d.set(t.id, forKey: "ir.lastPartner")
+                            model.irChoice = nil
+                            choice.pick(t)
+                        } label: {
+                            HStack(spacing: 14) {
+                                EggBadge(theme: Theme.of(t.color)).frame(width: 44, height: 55)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(LiveTamaName.savedName(t.id) ?? t.name).font(.system(.title3, design: .rounded).weight(.bold))
+                                    Text(t.name + " · " + t.romName).font(.caption).foregroundStyle(.secondary)
+                                    if i == 0, Prefs.d.string(forKey: "ir.lastPartner") == t.id {
+                                        Text("Last used").font(.caption2.weight(.semibold)).foregroundStyle(.pink)
+                                    }
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                            }
+                            .padding(14)
+                            .background(RoundedRectangle(cornerRadius: 20).fill(Color(.secondarySystemBackground)))
+                        }.buttonStyle(.plain)
+                    }
+                }.padding(20)
+            }
+            .navigationTitle("Link with…")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { model.irChoice = nil; choice.cancel() } } }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 struct BundledDevicePicker: View {

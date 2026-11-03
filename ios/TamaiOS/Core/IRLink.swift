@@ -41,7 +41,8 @@ final class IRLink {
               !emu.holdForApp, !emu.appWaiting else { return }
         guard let model = AppModel.current, let me = emu.toy else { return }
         let others = model.toys.filter { $0.id != me.id }.sorted(by: { a, b in
-            (a.romName == me.romName ? 0 : 1, a.name) < (b.romName == me.romName ? 0 : 1, b.name)
+            let last = Prefs.d.string(forKey: "ir.lastPartner")
+            return (a.id == last ? 0 : 1, a.romName == me.romName ? 0 : 1, a.name) < (b.id == last ? 0 : 1, b.romName == me.romName ? 0 : 1, b.name)
         })
         guard !others.isEmpty else { cooldownUntil = now + 5; return }
         starting = true

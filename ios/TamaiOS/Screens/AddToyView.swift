@@ -55,7 +55,13 @@ struct AddToyView: View {
                     .opacity(0.85)
             }
             .foregroundStyle(theme.ink)
-            BigButton(title: "Choose my ROM file", icon: "folder.fill", theme: theme) { sheet = .picker }
+            if !firstRun && model.devicesFull {
+                Text("You have \(AppModel.maxDevices) devices, the most TamaiOS keeps for smooth play. Delete one in Settings to add another.")
+                    .font(.system(.callout, design: .rounded).weight(.semibold)).multilineTextAlignment(.center)
+                    .foregroundStyle(theme.ink)
+            } else {
+                BigButton(title: "Choose my ROM file", icon: "folder.fill", theme: theme) { sheet = .picker }
+            }
             Text("A .bin file, or a .zip with one inside. You can also share it to TamaiOS from Files or AirDrop.")
                 .font(.system(.footnote, design: .rounded)).multilineTextAlignment(.center)
                 .foregroundStyle(theme.ink.opacity(0.75))
@@ -111,6 +117,7 @@ struct AddToyView: View {
     private func takePending() {
         if let u = model.pendingImport {
             model.pendingImport = nil
+            if !firstRun && model.devicesFull { return }      // at the device limit: the screen explains it
             check(u)
         }
     }

@@ -331,7 +331,9 @@ struct DevicesSection: View {
     }
 
     private var addButton: some View {
-        Button {
+        let full = model.devicesFull
+        return Button {
+            guard !full else { message = "You have \(AppModel.maxDevices) devices, the most TamaiOS keeps for smooth play. Delete one from its \u{2026} menu to add another."; return }
             dismiss()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.showAdd = true }
         } label: {
@@ -341,8 +343,8 @@ struct DevicesSection: View {
                     .frame(width: 42, height: 42)
                     .background(Circle().fill(Color.white.opacity(0.25)))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Add a device").font(.system(.headline, design: .rounded))
-                    Text("Wonder Garden, Fairy or Magic").font(.caption).opacity(0.85)
+                    Text(full ? "Device limit reached" : "Add a device").font(.system(.headline, design: .rounded))
+                    Text(full ? "\(model.toys.count) of \(AppModel.maxDevices) · delete one to add another" : "Wonder Garden, Fairy or Magic \u{00B7} \(model.toys.count) of \(AppModel.maxDevices)").font(.caption).opacity(0.85)
                 }
                 Spacer()
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).opacity(0.7)
@@ -355,6 +357,7 @@ struct DevicesSection: View {
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
             )
             .shadow(color: Color(red: 0.62, green: 0.48, blue: 0.96).opacity(0.35), radius: 8, y: 4)
+            .saturation(full ? 0.2 : 1).opacity(full ? 0.7 : 1)
         }
         .buttonStyle(.plain)
     }

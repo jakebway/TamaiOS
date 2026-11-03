@@ -66,6 +66,10 @@ final class AppModel: ObservableObject {
     let emu = Emulator()
     @Published var toys: [Toy] = []
     @Published var showAdd = false
+    /// Saved devices to switch between. Only one runs live (one more wakes briefly for a link), so this is about
+    /// memory, start-up checks and keeping the list tidy rather than speed.
+    static let maxDevices = 6
+    var devicesFull: Bool { toys.count >= AppModel.maxDevices }
     @Published var pendingImport: URL?
     @Published var pendingBackup: URL?
     /// Ask the toy screen to open Tamatown.

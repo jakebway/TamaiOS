@@ -439,7 +439,7 @@ final class IRLink {
                 emu.note("infrared link: message due when the visit scene ends")
                 // counted from the last infrared traffic (not from when the link thread finished, which is
                 // some 10 s later: it waits out 8 s of silence first)
-                let wait = max(0.5, lastTraffic + 24 - CACurrentMediaTime())
+                let wait = max(0.5, lastTraffic + 28 - CACurrentMediaTime())
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
                     guard emu.toy?.id == me.id, !emu.loading else { return }
                     emu.say(text, seconds: 5)

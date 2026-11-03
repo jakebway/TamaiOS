@@ -11,6 +11,8 @@ final class IRLink {
     static let shared = IRLink()
     fileprivate(set) var active = false
     fileprivate var starting = false
+    /// A link is being set up or running: nothing may change the toy's clock or state meanwhile.
+    var busy: Bool { active || starting }
     private var cooldownUntil = 0.0
     private var lastEnd = 0.0
 

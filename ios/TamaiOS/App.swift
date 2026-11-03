@@ -279,6 +279,32 @@ struct RootView: View {
     }
 }
 
+/// The Tama's own picture (from its profile page), or the egg until it is known.
+struct LinkPortrait: View {
+    let toy: Toy
+    var body: some View {
+        let theme = Theme.of(toy.color)
+        if let img = UIImage(contentsOfFile: ToyStore.spriteURL(toy.id).path) {
+            Image(uiImage: Self.sharp(img)).interpolation(.high).resizable().scaledToFit()
+                .padding(6).frame(width: 56, height: 56)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(LinearGradient(colors: [theme.top, theme.bottom.opacity(0.75)], startPoint: .top, endPoint: .bottom)))
+        } else {
+            EggBadge(theme: theme).frame(width: 44, height: 55).frame(width: 56, height: 56)
+        }
+    }
+    private static func sharp(_ img: UIImage) -> UIImage {
+        let w = max(1, Int(img.size.width * img.scale)), h = max(1, Int(img.size.height * img.scale))
+        let k = max(1, Int((300.0 / Double(max(w, h))).rounded(.up)))
+        let size = CGSize(width: w * k, height: h * k)
+        let fmt = UIGraphicsImageRendererFormat(); fmt.scale = 1; fmt.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: fmt).image { ctx in
+            ctx.cgContext.interpolationQuality = .none
+            img.draw(in: CGRect(origin: .zero, size: size))
+        }
+    }
+}
+
 /// "Link with which device?": big rows with the device's look, its Tama's name and its firmware.
 struct LinkPicker: View {
     let choice: IRChoice
@@ -296,7 +322,7 @@ struct LinkPicker: View {
                             choice.pick(t)
                         } label: {
                             HStack(spacing: 14) {
-                                EggBadge(theme: Theme.of(t.color)).frame(width: 44, height: 55)
+                                LinkPortrait(toy: t)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(LiveTamaName.savedName(t.id) ?? t.name).font(.system(.title3, design: .rounded).weight(.bold))
                                     Text(t.name + " · " + t.romName).font(.caption).foregroundStyle(.secondary)

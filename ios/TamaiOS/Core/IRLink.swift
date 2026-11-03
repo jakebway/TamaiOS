@@ -143,9 +143,9 @@ final class IRLink {
     /// app's ordinary come-home exchange so it is home and ready for another connection.
     /// It is still playing its receiving animation for a while, so the keys are tried every few
     /// seconds. At home the same keys only open and close a menu, which the C presses undo.
-    private func bringHome(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>) -> Homecoming {
+    private func bringHome(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, rounds: Int = 8) -> Homecoming {
         var ready = false
-        for round in 0..<8 {
+        for round in 0..<rounds {
             tickAll(p, round == 0 ? 100 : 150, audio)
             for k in [TGKey.b, .a, .b] {
                 tg_press(p, k.rawValue, CACurrentMediaTime())
@@ -207,6 +207,7 @@ final class IRLink {
     }
 
     private func run(emu: Emulator, me: Toy, partner: Toy, mode: Int, role: Int) {
+        emu.say("Getting \(IRLink.tamaLabel(partner)) ready…", seconds: 4)
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
         var visitor: OpaquePointer?
         defer { audio.deallocate(); if let v = visitor { tg_destroy(v) } }
@@ -227,12 +228,12 @@ final class IRLink {
                 tg_set_volume(v, 0)
                 tg_set_never_sleep(v, 0)
                 tg_wake(v)
-                tickAll(v, 50, audio)
+                tickAll(v, 25, audio)
                 for k in head + tail {
                     tg_press(v, k.rawValue, CACurrentMediaTime())
                     tickAll(v, 8, audio)
                     tg_release(v, k.rawValue)
-                    tickAll(v, 40, audio)
+                    tickAll(v, 22, audio)
                 }
                 tickAll(v, 25, audio)
                 if IRLink.waiting(v) { return true }
@@ -243,7 +244,7 @@ final class IRLink {
         var reached = reach()
         if !reached, let v = visitor {
             // maybe it is still out from an earlier visit: send it home, then try again
-            if case .home = bringHome(v, audio) {
+            if case .home = bringHome(v, audio, rounds: 3) {
                 emu.note("infrared link: \(partner.name) was out and is home now")
                 fixClock(v, partner, audio)
                 saveSnapshot(v, partner)
@@ -278,7 +279,9 @@ final class IRLink {
             let now = CACurrentMediaTime()
             let dt = min(now - last, 0.1)
             last = now
-            if dt > 0 { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
+            // the visitor waits on its WAITING screen, frozen, until your device first speaks, so it
+            // can't time out while you get ready to press B
+            if dt > 0 && sawTraffic { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
             // frames from the visitor go to the toy you're playing, and back
             var moved = true
             while moved {

@@ -306,12 +306,10 @@ pub extern "C" fn tg_create(
 }
 
 
-// --- more room for downloaded Places ---------------------------------------------------
-// The toy keeps downloaded Places in a flash area described by one 16-byte record in the firmware:
-// slot size, first block, slot count. Stock: 2 slots of 64 KB at 0x710000, so the 3rd Place asks to
-// delete one. A Place file is at most ~34 KB, so the record is rewritten to 5 slots of 36 KB in the
-// unused flash 0x760000..0x78D000 (nothing else lives there; checked by delivering all 5 Places).
-// This is permanent: it is applied to every toy when it starts and stays in its saves and snapshots.
+// --- Places storage ----------------------------------------------------------------------
+// The firmware's Places list is hard-wired for exactly two slots (code reads 0x710000 and 0x720000 directly),
+// so more than two Places can be stored but never shown. An earlier build widened the storage record; this
+// puts the stock record back and moves anything stored in the widened slots into the two real ones.
 const PLACES_STOCK: [u8; 8] = [0x00, 0x00, 0x01, 0x00, 0x72, 0x02, 0x00, 0x00];
 const PLACES_WIDE: [u8; 8] = [0x00, 0x90, 0x00, 0x00, 0x77, 0x05, 0x00, 0x00];
 
@@ -329,28 +327,25 @@ fn places_record(ram: &[u8]) -> Option<(usize, bool)> {
     None
 }
 
-/// Switch the Places storage record in a flash image to the roomy layout (true) or the stock one (false).
-fn places_wide_ram(ram: &mut [u8], on: bool) {
+/// Make a flash image's Places record the stock one again (true = stock). Places that were stored in the
+/// widened slots are copied into any empty real slot so they show up on the toy.
+fn places_stock_ram(ram: &mut [u8]) {
     let (at, wide) = match places_record(ram) { Some(r) => r, None => return };
-    if wide == on || ram.len() < 0x790000 { return; }
-    if on {
-        // Places the toy already holds sit in the old 64 KB slots: copy them to the matching new slots.
-        for slot in 0..2usize {
-            let old = 0x710000 + slot * 0x10000;
-            let new = 0x760000 + slot * 0x9000;
-            let have = &ram[old..old + 6] == b"TAMAGO";
-            let free = ram[new..new + 0x9000].iter().all(|&b| b == 0xFF);
-            if have && free {
-                for k in 0..0x9000 { ram[new + k] = ram[old + k]; }
-            }
-        }
-        ram[at..at + 8].copy_from_slice(&PLACES_WIDE);
-    } else {
-        ram[at..at + 8].copy_from_slice(&PLACES_STOCK);
+    if !wide || ram.len() < 0x790000 { return; }
+    let mut free: Vec<usize> = (0..2usize).map(|k| 0x710000 + k * 0x10000)
+        .filter(|&o| ram[o..o + 0x10000].iter().all(|&b| b == 0xFF)).collect();
+    for k in 0..5usize {
+        let from = 0x760000 + k * 0x9000;
+        if &ram[from..from + 6] != b"TAMAGO" { continue; }
+        let dup = (0..2usize).any(|j| { let o = 0x710000 + j * 0x10000; &ram[o..o + 0x80] == &ram[from..from + 0x80] });
+        if dup || free.is_empty() { continue; }
+        let to = free.remove(0);
+        for x in 0..0x9000 { ram[to + x] = ram[from + x]; }
     }
+    ram[at..at + 8].copy_from_slice(&PLACES_STOCK);
 }
 
-fn places_wide(m: &mut Machine, on: bool) { places_wide_ram(&mut m.sys.ram, on); }
+fn places_wide(m: &mut Machine, _on: bool) { places_stock_ram(&mut m.sys.ram); }
 
 fn new_emu(m: Machine, image: Arc<Vec<u8>>) -> Emu {
     let mut m = m;
@@ -413,7 +408,7 @@ fn boot(rom: Vec<u8>, snap: Option<Vec<u8>>, flash: Option<Vec<u8>>, meta: Optio
         let same = f.len() == FLASH_SIZE && {
             // the Places storage record is the one thing allowed to differ from the stock ROM
             let mut probe = f.clone();
-            places_wide_ram(&mut probe, false);
+            places_stock_ram(&mut probe);
             probe[..tg18::CODE_CHECK_LEN] == image[..tg18::CODE_CHECK_LEN]
         };
         if same {

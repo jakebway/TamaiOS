@@ -529,7 +529,7 @@ final class Emulator: ObservableObject {
         return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1, sample?.3 ?? -1, sample?.4 ?? "")
     }
     private func bathroomSample() -> Int {
-        guard CareSupport.supports(toyID) else { return -1 }
+        guard CareSupport.supports(toyID ?? "") else { return -1 }
         return withCore { h -> Int in
             guard tg_profile_attention(h) >= 0 else { return -1 }
             var raw: UInt8 = 0

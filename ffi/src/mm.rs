@@ -980,6 +980,37 @@ fn scale(px: &[u32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<u32> {
     out
 }
 
+/// Crop the drawing to its visible part and scale it up (nearest neighbour, same aspect) so it fills a
+/// w x h picture, centred on a transparent background. Small drawings on a big canvas otherwise show tiny.
+fn fit(px: &[u32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<u32> {
+    let (mut x0, mut y0, mut x1, mut y1) = (sw, sh, 0usize, 0usize);
+    for y in 0..sh {
+        for x in 0..sw {
+            if (px[y * sw + x] >> 24) >= 128 {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x1 < x0 || y1 < y0 {
+        return scale(px, sw, sh, w, h);
+    }
+    let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
+    let (tw, th) = (w - 2, h - 2); // a pixel of breathing room all round
+    // output size with the same aspect, as big as fits
+    let (ow, oh) = if bw * th >= bh * tw { (tw, (bh * tw / bw).max(1)) } else { ((bw * th / bh).max(1), th) };
+    let (ox, oy) = ((w - ow) / 2, (h - oh) / 2);
+    let mut out = vec![0u32; w * h];
+    for y in 0..oh {
+        for x in 0..ow {
+            out[(oy + y) * w + ox + x] = px[(y0 + y * bh / oh) * sw + x0 + x * bw / ow];
+        }
+    }
+    out
+}
+
 /// Build a brand-new item file (like WebMeets' custom items) from a drawing:
 /// a real item of the same kind from the pack is the template; its pictures,
 /// name, price and id are replaced and the checksum is redone.
@@ -1007,8 +1038,8 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
         if n > 16 || w * h % 2 != 0 {
             break;
         }
-        let mut scaled = scale(px, sw, sh, w, h);
         let key = kind != "wallpaper";
+        let mut scaled = if key { fit(px, sw, sh, w, h) } else { scale(px, sw, sh, w, h) };
         // Food has three pictures: whole, bitten, nearly gone. Take bites out of
         // the drawing for the later ones so the eating animation looks right.
         if key && replaced > 0 {
@@ -1031,6 +1062,10 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
         d[off..off + pic.len()].copy_from_slice(&pic);
         off += size;
         replaced += 1;
+        // Food files hold three pictures (whole, bitten, nearly gone), each after a 2-byte tag.
+        if image_size(&d[off.min(end)..end]) == 0 && off + 2 <= end && image_size(&d[off + 2..end]) > 0 {
+            off += 2;
+        }
     }
     if replaced == 0 {
         return None;

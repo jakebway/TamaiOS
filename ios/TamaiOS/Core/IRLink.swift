@@ -1,5 +1,7 @@
 import Foundation
 import QuartzCore
+import UIKit
+import Vision
 
 /// Infrared between two of your own devices. When the device you're playing reaches the
 /// "WAITING…" screen of Connection › Tamagotchi (PLAYDATE, GIFT or MARRY), another device of
@@ -199,6 +201,58 @@ final class IRLink {
             let d = Data(bytes: out, count: n)
             tg_free(out, n)
             try? d.write(to: ToyStore.snapURL(toy.id), options: .atomic)
+        }
+    }
+
+    /// Reads the text on the screen with Vision.
+    fileprivate func ocr(_ h: OpaquePointer) -> [String] {
+        var px = [UInt32](repeating: 0, count: 128 * 128)
+        _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
+        var rgb = [UInt8](repeating: 255, count: 128 * 128 * 3)
+        for i in 0..<(128 * 128) {
+            let c = px[i]
+            rgb[i * 3] = UInt8((c >> 16) & 255); rgb[i * 3 + 1] = UInt8((c >> 8) & 255); rgb[i * 3 + 2] = UInt8(c & 255)
+        }
+        guard let provider = CGDataProvider(data: Data(rgb) as CFData),
+              let image = CGImage(width: 128, height: 128, bitsPerComponent: 8, bitsPerPixel: 24, bytesPerRow: 128 * 3,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: 0), provider: provider,
+                decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+              let ctx = CGContext(data: nil, width: 768, height: 768, bitsPerComponent: 8, bytesPerRow: 768 * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return [] }
+        ctx.interpolationQuality = .none
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: 768, height: 768))
+        guard let big = ctx.makeImage() else { return [] }
+        let req = VNRecognizeTextRequest()
+        req.recognitionLevel = .accurate
+        req.usesLanguageCorrection = false
+        req.minimumTextHeight = 0.025
+        try? VNImageRequestHandler(cgImage: big, options: [:]).perform([req])
+        return (req.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+    }
+
+    /// Looks at the PROFILE pages on a throwaway copy and logs what's on them (research for
+    /// devices whose name can't be read any other way).
+    fileprivate func profileProbe(_ toy: Toy, _ audio: UnsafeMutablePointer<Int16>, _ log: (String) -> Void) {
+        guard let v = Emulator.makeHandle(toy).0 else { return }
+        defer { tg_destroy(v) }
+        tg_set_volume(v, 0)
+        tg_set_never_sleep(v, 0)
+        tg_wake(v)
+        tickAll(v, 25, audio)
+        let keys: [TGKey] = [.c, .c, .c, .c, .a, .b]
+        for k in keys {
+            tg_press(v, k.rawValue, CACurrentMediaTime())
+            tickAll(v, 8, audio)
+            tg_release(v, k.rawValue)
+            tickAll(v, 22, audio)
+        }
+        for page in 0..<4 {
+            tickAll(v, 15, audio)
+            log("profile page \(page): \(ocr(v).joined(separator: " | "))\n" + asciiScreen(v))
+            tg_press(v, TGKey.a.rawValue, CACurrentMediaTime())
+            tickAll(v, 8, audio)
+            tg_release(v, TGKey.a.rawValue)
+            tickAll(v, 22, audio)
         }
     }
 
@@ -428,6 +482,7 @@ extension IRLink {
         defer { audio.deallocate() }
         // Connection › (the APP entry, tried at the third and then second place) — or, if the Tama is
         // out in town, GO BACK? › YES leads to the same app screen
+        profileProbe(toy, audio, log)
         let endings: [[TGKey]] = [[.a, .a, .b], [.a, .b], [.a, .a, .a, .b], [.a, .a, .a, .a, .b], [.a, .a, .b, .b], []]
         var found: OpaquePointer?
         for (i, ending) in endings.enumerated() {

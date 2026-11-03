@@ -1007,8 +1007,22 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
         if n > 16 || w * h % 2 != 0 {
             break;
         }
-        let scaled = scale(px, sw, sh, w, h);
+        let mut scaled = scale(px, sw, sh, w, h);
         let key = kind != "wallpaper";
+        // Food has three pictures: whole, bitten, nearly gone. Take bites out of
+        // the drawing for the later ones so the eating animation looks right.
+        if key && replaced > 0 {
+            let keep = if replaced == 1 { w * 2 / 3 } else { w / 3 };
+            for y in 0..h {
+                for x in keep..w {
+                    // a round bite edge rather than a straight cut
+                    let dy = (y as i32 - h as i32 / 2).abs() as usize;
+                    if x >= keep + (h / 2).saturating_sub(dy) / 3 {
+                        scaled[y * w + x] = 0;
+                    }
+                }
+            }
+        }
         let (pal, mut idx) = quantize(&scaled, n, key);
         if key {
             idx[0] = 0; // pixel (0,0) is the see-through key

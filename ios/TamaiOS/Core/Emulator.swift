@@ -385,7 +385,7 @@ final class Emulator: ObservableObject {
             }
             let t0 = CACurrentMediaTime()
             // during a Bluetooth transfer the device runs 3x faster, so it's over sooner
-            code = tg_tick(h, linkBusy ? min(dt * 3, 0.1) : dt)
+            code = tg_tick(h, dt)   // normal speed: transfers are already instant, and turbo made animations jerky
             stats.lastTickMs = (CACurrentMediaTime() - t0) * 1000
             stats.ticks += 1
             flags = tg_take_flags(h)

@@ -20,6 +20,12 @@ headless copy of its save, woken and driven with key presses; infrared frames ar
 - A/B presses are dropped while the link is being set up (queued ones used to fire all at once).
 - Partner INVITE (if ever needed again): `B, A, B, A×place, B`, trying places in random order (locked ones refuse).
 
+## Disabled entries (silent back-out)
+- Travel › VISIT on the played Tama: C once, muted, no pop-up.
+- Connection › DOWNLOAD (middle entry of TAMAGOTCHI / DOWNLOAD / APP): it is only for receiving gifts, so the app
+  detects it (Connection menu cursor byte 0xF80178FC == 1, same address on all ROMs; 0 for every Tamagotchi mode),
+  presses C once, muted, no pop-up, no link. Connection › App › Download is a different flow and is untouched.
+
 ## Shared
 - Daytime Mode is one global setting; every device's save is changed when it is toggled, and each device is put on
   the selected clock when opened.

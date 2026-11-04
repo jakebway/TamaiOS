@@ -70,7 +70,7 @@ final class IRLink {
         })
         guard !others.isEmpty else {
             cooldownUntil = now + 30
-            if model.toys.count > 1 { emu.say("Your other device is out in Tamatown. Bring it home first, then connect.", seconds: 6) }
+            if model.toys.count > 1 { emu.say("Your other Tama is away. Bring it home first.", seconds: 6) }
             return
         }
         starting = true
@@ -113,7 +113,7 @@ final class IRLink {
                     cooldownUntil = CACurrentMediaTime() + 30
                     emu.linkFreezeUntil = 0
                     starting = false
-                    emu.say("None of your other devices can travel yet. They need to grow up a bit first.", seconds: 7)
+                    emu.say("No other Tama can travel yet.", seconds: 7)
                     return
                 }
                 if eligible.count == 1 { begin(eligible[0]) } else { choose(eligible, blocked) }
@@ -313,7 +313,7 @@ final class IRLink {
     }
 
     private func run(emu: Emulator, me: Toy, partner: Toy, mode: Int, role: Int) {
-        emu.say("Getting \(IRLink.tamaLabel(partner)) ready for \(IRLink.tamaLabel(me, fallback: "your Tama"))…", seconds: 4)
+        emu.say("Connecting to \(IRLink.tamaLabel(partner))…", seconds: 4)
         let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
         var visitor: OpaquePointer?
         defer { audio.deallocate(); if let v = visitor { tg_destroy(v) } }
@@ -367,7 +367,7 @@ final class IRLink {
             }
         }
         guard let p = visitor, IRLink.waiting(p) else {
-            emu.say("The other device couldn't get ready (is its Tama home and awake?). Nothing was changed.", seconds: 6)
+            emu.say("Couldn't connect. Nothing was changed.", seconds: 6)
             cooldownUntil = CACurrentMediaTime() + 60
             return
         }
@@ -380,7 +380,7 @@ final class IRLink {
         tg_ir_link(p, 1)
         active = true
         emu.note("infrared link: \(me.name) ⇄ \(partner.name) (mode \(mode))")
-        emu.say("\(IRLink.tamaLabel(me, fallback: "Your Tama")) ⇄ \(IRLink.tamaLabel(partner)) are linked. Starting… \(mode == 3 ? "✈️" : "📡")", seconds: 6)
+        emu.say("Connected! \(mode == 3 ? "✈️" : "📡")", seconds: 6)
 
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
@@ -514,11 +514,11 @@ final class IRLink {
         if finished {
             switch outcome {
             case .stuck:
-                emu.say("Done, but \(who) didn't make it home. On that device choose GO BACK › YES.", seconds: 8)
+                emu.say("Done. \(who) is still out: choose GO BACK › YES on it.", seconds: 8)
             default:
                 // Your device is still playing the visit scene (about 25 s: the guest plays, says
                 // goodbye and leaves). Say it when that's over, not when the infrared stops.
-                let text = mode == 1 ? "Gift delivered! \(who) is back home. 💕" : (mode == 3 ? "Travel is over. \(who) is heading home. ✈️" : "\(who) is heading home. 💕")
+                let text = mode == 1 ? "Gift sent! 💕" : (mode == 3 ? "Trip finished. ✈️" : "All done! 💕")
                 emu.note("infrared link: message due when the visit scene ends")
                 // counted from the last infrared traffic (not from when the link thread finished, which is
                 // some 10 s later: it waits out 8 s of silence first)
@@ -529,7 +529,7 @@ final class IRLink {
                 }
             }
         } else if sawTraffic {
-            emu.say("The infrared link stopped early, so nothing was exchanged. \(who) is unchanged. Try again.", seconds: 7)
+            emu.say("Connection lost. Nothing was changed. Try again.", seconds: 7)
         }
         emu.note("infrared link ended")
     }

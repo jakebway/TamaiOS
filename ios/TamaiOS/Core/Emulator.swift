@@ -105,7 +105,7 @@ final class Emulator: ObservableObject {
 
     func setDaytimeMode(_ enabled: Bool) {
         guard let toy, !clockChanging, !loading, !linkBusy, !appWaiting else {
-            say("Finish the current device operation before changing its clock.")
+            say("Please wait a moment, then try again.")
             return
         }
         if enabled { DaytimeClock.enable(toy.id) } else { DaytimeClock.disable(toy.id) }
@@ -121,8 +121,8 @@ final class Emulator: ObservableObject {
                 self.clockChanging = false
                 self.saveNow()
                 self.say(ok == 1
-                    ? (enabled ? "Daytime Mode is on for all your devices: the day starts at noon. ☀️" : "Clock returned to your iPhone's time on all devices.")
-                    : "Clock change is pending. It will be retried when the device can safely change time.")
+                    ? (enabled ? "Daytime Mode on for all devices. ☀️" : "Daytime Mode off. 🕒")
+                    : "Clock change pending. Will retry.")
             }
         }
     }
@@ -212,12 +212,12 @@ final class Emulator: ObservableObject {
 
     private func boot(_ toy: Toy) -> Bool {
         guard (try? Data(contentsOf: ToyStore.romURL(toy.id))) != nil else {
-            say("Couldn't read this device's ROM file.")
+            say("Couldn't open this device.")
             return false
         }
         let (h, elapsed) = Emulator.makeHandle(toy)
         guard let h else {
-            say("This device couldn't start. Open Settings › Console and run \"diag\".", seconds: 8)
+            say("This device couldn't start.", seconds: 8)
             note("tg_create returned null for \(toy.id)")
             return false
         }
@@ -230,7 +230,7 @@ final class Emulator: ObservableObject {
         for (k, v) in Prefs.coreParams { _ = withCore { h in k.withCString { tg_set_param(h, $0, v) } } }
         let status = coreText { tg_status($0, $1, $2) } ?? ""
         note("booted \(toy.id): \(status.split(separator: "\n").first ?? "")")
-        if elapsed > 60 { say("Welcome back! Your device's clock moved ahead \(describeDuration(elapsed)).") }
+        if elapsed > 60 { say("Welcome back! \(describeDuration(elapsed)) passed.") }
         DispatchQueue.main.async {
             for line in Prefs.autorun { _ = Console.shared.run(line, emu: self) }
         }
@@ -407,7 +407,7 @@ final class Emulator: ObservableObject {
                 if tg_sync_clock(h, w) == 1 {
                     discardAudio(h)
                     note("clock matched to selected time mode (was off by \(Int(off)) s)")
-                    say(DaytimeClock.enabled(currentID) ? "Daytime Mode clock restored. ☀️" : "Clock matched to your iPhone. 🕒")
+                    say(DaytimeClock.enabled(currentID) ? "Daytime Mode on. ☀️" : "Clock synced. 🕒")
                 }
             }
             if dt > lp.gap {
@@ -475,7 +475,7 @@ final class Emulator: ObservableObject {
             if flags & 2 != 0 { careCall() }
             if flags & 16 != 0 {
                 note("clock synced to selected time mode")
-                if !syncAnnounced { syncAnnounced = true; say(DaytimeClock.enabled(currentID) ? "Daytime Mode is active. ☀️" : "Your device's clock now matches your iPhone. 🕒") }
+                if !syncAnnounced { syncAnnounced = true; say(DaytimeClock.enabled(currentID) ? "Daytime Mode on. ☀️" : "Clock synced. 🕒") }
             }
             if code != 0 && code != lastCode { report(code) }
             lastCode = code
@@ -509,11 +509,11 @@ final class Emulator: ObservableObject {
     private func report(_ code: Int32) {
         switch code {
         case 1:
-            say("Bluetooth features (the phone app, downloads, camera) aren't available in the emulator. Your device was put back to just before.", seconds: 7)
+            say("Bluetooth isn't supported. Nothing was changed.", seconds: 7)
         case 2:
-            say("Infrared features (playdates, gifts, marriage) aren't available in the emulator. Your device was put back to just before.", seconds: 7)
+            say("Use LINK WITH to connect. Nothing was changed.", seconds: 7)
         case 3:
-            say("The game froze waiting for Bluetooth, so the device was restarted (like swapping the batteries). Choose CONTINUE to carry on.", seconds: 8)
+            say("Bluetooth isn't supported, so the device restarted. Choose CONTINUE.", seconds: 8)
         default:
             note("core stopped with code \(code)")
             DispatchQueue.main.async { self.stopped = StopInfo(code: code) }
@@ -651,20 +651,20 @@ final class Emulator: ObservableObject {
         objectWillChange.send()
         let now = rtcNow()
         let ok = withCore { tg_sync_clock($0, now) } ?? 0
-        say(ok == 1 ? "Clock set to your iPhone's time. 🕒" : "The device can't take a new time right now (maybe it's calling, or still in setup). TamaiOS will keep trying by itself.")
+        say(ok == 1 ? "Clock synced. 🕒" : "Couldn't set the clock now. Will retry.")
         return ok == 1
     }
 
     func sleepNow() {
         let ok = withCore { tg_force_sleep($0) } ?? 0
-        say(ok == 1 ? "Your device is asleep. Press any button to wake it." : "It can't go to sleep right now.")
+        say(ok == 1 ? "Asleep. Press any button to wake." : "Can't sleep right now.")
         saveNow()
     }
 
     func restart() {
         withCore { tg_restart($0) }
         DispatchQueue.main.async { self.stopped = nil }
-        say("Restarted, like taking the batteries out. Your pet is kept.")
+        say("Restarted. Your Tama is kept.")
     }
 
     // MARK: app lifecycle
@@ -706,7 +706,7 @@ final class Emulator: ObservableObject {
             let away = backgroundAt.map { Date().timeIntervalSince($0) } ?? 0
             if away > 30 {
                 withCore { h in tg_advance_clock(h, away); discardAudio(h) }
-                say("Welcome back! Your device's clock moved ahead \(describeDuration(away)).")
+                say("Welcome back! \(describeDuration(away)) passed.")
             } else {
                 withCore { tg_wake($0) }
             }

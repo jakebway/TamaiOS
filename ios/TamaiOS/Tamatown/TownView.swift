@@ -98,7 +98,7 @@ struct TownView: View {
         TownCard(tint: .pink) {
             Label("\(tamaName) isn't in town yet", systemImage: "figure.walk.motion")
                 .font(.system(.headline, design: .rounded)).foregroundStyle(.pink)
-            Text("On the device choose Connection › App › Visit. TamaiOS brings your Tama to town by itself, then you can come here to meet someone. 💕")
+            Text("On the device choose Connection › App › Visit. TamaiOS brings your Tama to town by itself, then you can come here to meet someone.")
                 .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
             if let t = toy, FileManager.default.fileExists(atPath: town.visitURL(t).path) {
                 Button("My Tama already left home (shows I'M OUT)") {
@@ -113,7 +113,7 @@ struct TownView: View {
         let info = toy.flatMap { town.visitInfo($0) }
         return TownCard(tint: .purple) {
             HStack {
-                Text("💕").font(.largeTitle)
+                Image(systemName: "heart.fill").font(.largeTitle).foregroundStyle(.pink)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(tamaName) is in town!").font(.system(.headline, design: .rounded))
                     Text("Tap someone to go on a date. When it's love, propose!")
@@ -141,13 +141,12 @@ struct TownView: View {
                         VStack(spacing: 4) {
                             CharacterPicture(image: town.image(s)).frame(width: 80, height: 80)
                             Text(s.name).font(.system(.subheadline, design: .rounded).weight(.heavy))
-                            Text(s.isMix ? "✨ one of a kind" : " ").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundStyle(.pink)
+                            Text(s.isMix ? "One of a kind" : " ").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundStyle(.pink)
                         }
                         .padding(8)
                         .frame(maxWidth: .infinity, minHeight: 136)
                         .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(LinearGradient(colors: [Color.pink.opacity(0.14), Color(.secondarySystemBackground)], startPoint: .top, endPoint: .bottom)))
-                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.pink.opacity(0.18), lineWidth: 1))
+                            .fill(Color(.secondarySystemBackground)))
                     }
                     .buttonStyle(.plain)
                 }
@@ -170,7 +169,7 @@ struct TownView: View {
                 HStack(spacing: 12) {
                     CharacterPicture(image: town.image(s)).frame(width: 72, height: 72)
                     VStack(alignment: .leading) {
-                        Text("\(s.name) said YES! 💍").font(.system(.title3, design: .rounded).weight(.bold))
+                        Text("\(s.name) said YES!").font(.system(.title3, design: .rounded).weight(.bold))
                         Text("Now send \(tamaName) home for the wedding.").font(.subheadline).foregroundStyle(.secondary)
                     }
                 }
@@ -178,7 +177,7 @@ struct TownView: View {
                 Text("Heading home 🏠").font(.system(.title3, design: .rounded).weight(.bold))
             }
             step(1, "Tap Home or Done to head home.")
-            step(2, "The wedding happens on the way, all by itself. 💒")
+            step(2, "The wedding happens on the way, all by itself.")
             step(3, "Watch your device for the egg!")
             Button("Change my mind") { setPending(.none, nil) }.font(.footnote)
         }

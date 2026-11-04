@@ -378,12 +378,16 @@ final class AppLink: ObservableObject {
         guard openForDownload else { return }
         openForDownload = false
         let link = TamaLink(emu: emu)
+        // Everything from here to the toy being back on its menu happens out of sight and silently: hang-up,
+        // then the CONNECTING and FAIL screens, which run ahead at full speed.
+        emu.beginQuiet()
         DispatchQueue.global(qos: .userInitiated).async {
             // Just hanging up leaves the device on CONNECTING for ~20 s. A command it
-            // doesn't expect in Download mode ends the session at once; then skip the
-            // short FAIL message so it's straight back in its room.
+            // doesn't expect in Download mode ends the session at once; the toy then shows FAIL briefly and
+            // returns to the VISIT / DOWNLOAD list by itself.
             try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
-            emu.quietSkip(4)
+            emu.fastForward(9)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { emu.endQuiet() }
         }
     }
 }

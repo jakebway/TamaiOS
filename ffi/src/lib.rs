@@ -1215,6 +1215,34 @@ pub extern "C" fn tg_mm_body_info(id: u16, out: *mut i32) -> i32 {
     }
 }
 
+/// How many wallpapers the pack has.
+#[no_mangle]
+pub extern "C" fn tg_mm_wallpaper_count() -> i32 {
+    let g = TOWN.lock().unwrap();
+    g.as_ref().map_or(0, |l| l.wallpaper_count() as i32)
+}
+
+/// The nth wallpaper: size in wh[0], wh[1], pixels (0xAARRGGBB, up to 128*128) in out. Returns 1 on success.
+#[no_mangle]
+pub extern "C" fn tg_mm_wallpaper(n: i32, wh: *mut i32, out: *mut u32) -> i32 {
+    if wh.is_null() || out.is_null() || n < 0 {
+        return 0;
+    }
+    let g = TOWN.lock().unwrap();
+    let Some(lib) = g.as_ref() else { return 0 };
+    match catch_unwind(AssertUnwindSafe(|| lib.wallpaper(n as usize))) {
+        Ok(Some(img)) if img.w * img.h <= 128 * 128 => {
+            unsafe {
+                *wh = img.w as i32;
+                *wh.add(1) = img.h as i32;
+                std::ptr::copy_nonoverlapping(img.px.as_ptr(), out, img.w * img.h);
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
 /// The 8 colours of a palette (for colour buttons).
 #[no_mangle]
 pub extern "C" fn tg_mm_palette(pal: i32, out: *mut u32) -> i32 {

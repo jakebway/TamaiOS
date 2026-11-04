@@ -17,14 +17,15 @@ struct GenePicture: View {
 
 private func tick() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
 
-/// The picture behind a character: your own town picture if you chose one, otherwise a plain system surface.
+/// The picture behind a character: one of the pack's Tama wallpapers.
 private struct Backdrop: View {
     @ObservedObject var town = Town.shared
+    let index: Int
     var body: some View {
         ZStack {
             Color(.secondarySystemBackground)
-            if let bg = town.customBG {
-                Image(uiImage: bg).resizable().scaledToFill().overlay(Color.black.opacity(0.08))
+            if let img = town.wallpaper(index) {
+                Image(decorative: img, scale: 1).interpolation(.none).resizable().scaledToFill()
             }
         }
     }
@@ -57,6 +58,11 @@ struct SuitorSheet: View {
     /// Everyone has one favourite outing worth two hearts.
     private var favourite: Int { suitor.name.unicodeScalars.reduce(0) { $0 + Int($1.value) } % outings.count }
     private var full: Bool { hearts >= 5 }
+    private var wallpaperFor: Int {
+        let list = town.niceWallpapers
+        guard !list.isEmpty else { return 0 }
+        return list[suitor.name.unicodeScalars.reduce(0) { $0 + Int($1.value) } % list.count]
+    }
 
     var body: some View {
         NavigationStack {
@@ -64,7 +70,7 @@ struct SuitorSheet: View {
                 Section {
                     VStack(spacing: 10) {
                         ZStack {
-                            Backdrop()
+                            Backdrop(index: wallpaperFor)
                             CharacterPicture(image: town.image(suitor)).padding(18)
                         }
                         .frame(height: 220)
@@ -153,6 +159,7 @@ struct DesignView: View {
     @ObservedObject var town = Town.shared
     @State private var s = Suitor(name: "", body: 0, face: 0, head: 0, back: 0, bodyColor: 0, headColor: 0, backColor: 0, blurb: "Made just for you.")
     @State private var part = 0
+    @State private var wall = 0
 
     private let names = ["Body", "Face", "Head", "Back"]
 
@@ -182,7 +189,7 @@ struct DesignView: View {
                     }.fontWeight(.bold).disabled(town.image(s) == nil)
                 }
             }
-            .onAppear { surprise(first: true) }
+            .onAppear { surprise(first: true); wall = town.niceWallpapers.randomElement() ?? 0 }
         }
     }
 
@@ -192,16 +199,22 @@ struct DesignView: View {
         VStack(spacing: 10) {
             ZStack(alignment: .topTrailing) {
                 ZStack {
-                    Backdrop()
+                    Backdrop(index: wall)
                     CharacterPicture(image: town.image(s)).padding(14)
                 }
                 .frame(height: 180)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                Button { surprise(first: false) } label: {
-                    Image(systemName: "dice.fill").font(.body).padding(9)
-                        .background(Circle().fill(.thinMaterial))
+                HStack(spacing: 8) {
+                    Button { nextWall() } label: {
+                        Image(systemName: "photo").font(.body).padding(9).background(Circle().fill(.thinMaterial))
+                    }
+                    .accessibilityLabel("Change wallpaper")
+                    Button { surprise(first: false) } label: {
+                        Image(systemName: "dice.fill").font(.body).padding(9).background(Circle().fill(.thinMaterial))
+                    }
+                    .accessibilityLabel("Surprise me")
                 }
-                .padding(8).accessibilityLabel("Surprise me")
+                .padding(8)
             }
             HStack(spacing: 8) {
                 TextField("Name (A–Z)", text: Binding(get: { s.name }, set: { s.name = String($0.uppercased().filter { $0.isLetter && $0.isASCII }.prefix(8)) }))
@@ -286,6 +299,13 @@ struct DesignView: View {
     }
     private func setColor(_ p: Int) {
         switch part { case 0: s.bodyColor = p; case 2: s.headColor = p; case 3: s.backColor = p; default: break }
+        tick()
+    }
+    private func nextWall() {
+        let list = town.niceWallpapers
+        guard !list.isEmpty else { return }
+        let i = list.firstIndex(of: wall) ?? -1
+        wall = list[(i + 1) % list.count]
         tick()
     }
     private func surprise(first: Bool) {

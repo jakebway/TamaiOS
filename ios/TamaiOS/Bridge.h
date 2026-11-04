@@ -70,6 +70,8 @@ size_t tg_mm_ids(uint16_t *out, size_t max);
 int32_t tg_mm_compose(uint16_t b, int32_t bp, uint16_t m, uint16_t a, int32_t ap, uint16_t k, int32_t kp, uint32_t *out);
 int32_t tg_mm_layer(int32_t part, uint16_t id, int32_t pal, uint32_t *out);
 int32_t tg_mm_body_info(uint16_t id, int32_t *out);
+int32_t tg_mm_wallpaper_count(void);
+int32_t tg_mm_wallpaper(int32_t n, int32_t *wh, uint32_t *out);
 int32_t tg_mm_palette(int32_t pal, uint32_t *out);
 void tg_mm_packet(uint8_t op, uint8_t cmd, uint8_t **out, size_t *out_len);
 int32_t tg_mm_visit_info(const uint8_t *p, size_t n);

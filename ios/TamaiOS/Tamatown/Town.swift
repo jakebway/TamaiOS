@@ -30,6 +30,10 @@ final class Town: ObservableObject {
     /// Characters with a real body (a few are only accessories: a bow, a hat). Only these can be a Body.
     @Published var bodyIDs: [UInt16] = []
     @Published var suitors: [Suitor] = []
+    /// Which wallpaper is behind the town (chosen in Tamatown Settings) when you haven't picked your own picture.
+    @Published var wallpaperIndex: Int = Prefs.d.object(forKey: "town.wallpaper") as? Int ?? 4 {
+        didSet { Prefs.d.set(wallpaperIndex, forKey: "town.wallpaper") }
+    }
     /// Shop items (food, items, accessories, wallpapers, places, games) from the pack.
     @Published var items: [PackItem] = []
     /// Your own town picture (Tamatown Settings), if you chose one.
@@ -199,6 +203,34 @@ final class Town: ObservableObject {
         else { return nil }
         imageCache[key] = img
         return img
+    }
+
+    /// The pack's wallpapers (the toy's own room and place pictures, 128x128).
+    var wallpaperCount: Int { Int(tg_mm_wallpaper_count()) }
+
+    func wallpaper(_ n: Int) -> CGImage? {
+        let key = "W\(n)"
+        if let c = imageCache[key] { return c }
+        var wh = [Int32](repeating: 0, count: 2)
+        var px = [UInt32](repeating: 0, count: 128 * 128)
+        let ok = px.withUnsafeMutableBufferPointer { tg_mm_wallpaper(Int32(n), &wh, $0.baseAddress) }
+        guard ok == 1, wh[0] > 0, wh[1] > 0 else { return nil }
+        let (w, h) = (Int(wh[0]), Int(wh[1]))
+        let data = px.withUnsafeBufferPointer { Data(buffer: UnsafeBufferPointer(rebasing: $0[0..<(w * h)])) }
+        guard let prov = CGDataProvider(data: data as CFData),
+              let img = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                                provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { return nil }
+        imageCache[key] = img
+        return img
+    }
+
+    /// The wallpapers that look good behind a character (the rest are duplicates or have writing on them).
+    var niceWallpapers: [Int] {
+        let n = wallpaperCount
+        return (Array(0..<30) + [32, 33, 34, 35, 60, 61, 62, 63, 64, 65]).filter { $0 < n }
     }
 
     static func swatch(_ pal: Int) -> Color {

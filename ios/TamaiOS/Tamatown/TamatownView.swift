@@ -187,6 +187,7 @@ struct TownSquare: View {
     @ObservedObject var town = Town.shared
     private var away: Bool { emu.toy.map { town.state($0).away } ?? false }
     private var sceneAspect: CGFloat {
+        if town.customBG == nil, TownScene.builtIn == nil, town.wallpaper(town.wallpaperIndex) != nil { return 1.0 }
         guard let bg = town.customBG ?? TownScene.builtIn, bg.size.height > 0 else { return 1.25 }
         return min(2.2, max(1.0, bg.size.width / bg.size.height))
     }
@@ -286,6 +287,8 @@ struct TownScene: View {
         GeometryReader { g in
             if let bg = town.customBG ?? TownScene.builtIn {
                 customScene(bg, g.size.width, g.size.height)
+            } else if let wp = town.wallpaper(town.wallpaperIndex) {
+                customScene(UIImage(cgImage: wp), g.size.width, g.size.height, pixel: true)
             } else {
                 ZStack {
                     sky(g.size.width, g.size.height)
@@ -410,9 +413,9 @@ struct TownScene: View {
             .position(x: w * x, y: h * 0.5)
     }
 
-    private func customScene(_ bg: UIImage, _ w: CGFloat, _ h: CGFloat) -> some View {
+    private func customScene(_ bg: UIImage, _ w: CGFloat, _ h: CGFloat, pixel: Bool = false) -> some View {
         ZStack {
-            Image(uiImage: bg).resizable().scaledToFill().frame(width: w, height: h).clipped()
+            Image(uiImage: bg).interpolation(pixel ? .none : .medium).resizable().scaledToFill().frame(width: w, height: h).clipped()
             hotspot(.party, w, h, 1.0 / 6)
             hotspot(.arcade, w, h, 5.0 / 6)
             walkersLayer(w, h)
@@ -596,6 +599,28 @@ struct TownSettingsView: View {
                 Text("Town picture")
             } footer: {
                 Text("Use any picture you like as the town — for example a screenshot of the original app from your own phone. Tap the left of it for Tama ♥ Party, the right for the Arcade. TamaDepa is available in Download mode only.")
+            }
+            Section {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8)], spacing: 8) {
+                    ForEach(town.niceWallpapers, id: \.self) { n in
+                        Button { town.wallpaperIndex = n; town.setBackground(nil) } label: {
+                            Group {
+                                if let img = town.wallpaper(n) {
+                                    Image(decorative: img, scale: 1).interpolation(.none).resizable().scaledToFill()
+                                } else { Color(.tertiarySystemFill) }
+                            }
+                            .frame(height: 64).clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(town.customBG == nil && town.wallpaperIndex == n ? Color.accentColor : Color.clear, lineWidth: 3))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Text("Town wallpaper")
+            } footer: {
+                Text("The Tama wallpapers from the character pack. Choosing one replaces your own town picture.")
             }
             Section("Gotchi Points") {
                 Text("Profile balance: " + (wallet.balance.map { "\($0) G" } ?? "unavailable"))

@@ -703,6 +703,20 @@ impl Library {
         Some((n, mask))
     }
 
+    /// The shop's wallpapers (English list): number of them.
+    pub fn wallpaper_count(&self) -> usize {
+        self.items.iter().filter(|it| it.lang == "en" && it.kind == "wallpaper").count()
+    }
+
+    /// The nth wallpaper's picture, as the toy draws it.
+    pub fn wallpaper(&self, n: usize) -> Option<Image> {
+        let it = self.items.iter().filter(|it| it.lang == "en" && it.kind == "wallpaper").nth(n)?;
+        if it.data.len() <= 0x210 {
+            return None;
+        }
+        decode_image(&it.data[0x204..], false)
+    }
+
     /// The 32 KB character data the toy draws the partner with.
     pub fn character_data(&self, sex: u8, ids: [u16; 4], lang: u8) -> Option<Vec<u8>> {
         const TABLE: [u8; 16] = [0x00, 0x01, 0x00, 0x00, 0xe4, 0x01, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0xf4, 0x01, 0x00, 0x00];

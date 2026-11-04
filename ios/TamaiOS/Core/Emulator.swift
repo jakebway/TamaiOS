@@ -471,7 +471,8 @@ final class Emulator: ObservableObject {
                 if let id = toyID { IRLink.shared.watch(emu: self, handle: h, deviceID: id, now: now) }
             }
             if flags & 1 != 0 { needFrame = true }
-            if needFrame && visible && now - lastPublish >= 0.7 / lp.fps {
+            // while a link is set up the screen stays on the firmware's own CONNECTING picture
+            if needFrame && visible && !linkCover && now - lastPublish >= 0.7 / lp.fps {
                 isDark = pixels.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) } != 0
                 needFrame = false
                 published = true
@@ -499,7 +500,7 @@ final class Emulator: ObservableObject {
                     CareAlerts.shared.observeBathroom(raw: bathroomRaw, deviceID: toy.id, observedAt: observedAt)
                 }
             }
-            audio.push(audioBuf, n)
+            if !linkCover { audio.push(audioBuf, n) }      // no beeps while a link is set up
             // skip frames identical to the one on screen: saves an image allocation per redraw
             if published, isDark == lastDark, pixels == lastPixels { published = false }
             if published { lastPixels = pixels; publish(pixels, dark: isDark) }

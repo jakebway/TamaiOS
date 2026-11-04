@@ -305,12 +305,6 @@ struct DeviceView: View {
                     ProgressView().tint(.white)
                     Text("Waking up…").font(.system(.caption, design: .rounded)).foregroundStyle(.white.opacity(0.8))
                 }
-            } else if emu.linkCover {
-                Color.black
-                VStack(spacing: 10) {
-                    ProgressView().tint(.white)
-                    Text("Connecting…").font(.system(.caption, design: .rounded)).foregroundStyle(.white.opacity(0.8))
-                }
             } else if emu.dark {
                 Color.black
                 Text("z z z").font(.system(size: size * 0.09, weight: .bold, design: .rounded))

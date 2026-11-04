@@ -598,7 +598,7 @@ final class IRLink {
             default:
                 // Your device is still playing the visit scene (about 25 s: the guest plays, says
                 // goodbye and leaves). Say it when that's over, not when the infrared stops.
-                let text = mode == 1 ? "Gift sent! 💕" : (mode == 3 ? "" : "All done! 💕")
+                let text = mode == 1 ? "Gift sent! 💕" : ""
                 emu.note("infrared link: message due when the visit scene ends")
                 // counted from the last infrared traffic (not from when the link thread finished, which is
                 // some 10 s later: it waits out 8 s of silence first)

@@ -347,7 +347,11 @@ final class AppLink: ObservableObject {
                             close = true
                             msg = "Delivered \(it.name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁 Watch the device."
                         } else {
-                            download = true
+                            // nothing waiting to collect: Download only accepts gifts, so quietly go back
+                            try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
+                            emu.quietSkip(4)
+                            close = true
+                            msg = ""
                         }
                     } else {
                         link.close()
@@ -383,7 +387,7 @@ final class AppLink: ObservableObject {
             // doesn't expect in Download mode ends the session at once; then skip the
             // short FAIL message so it's straight back in its room.
             try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
-            emu.fastForward(4)
+            emu.quietSkip(4)
         }
     }
 }

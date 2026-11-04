@@ -96,6 +96,15 @@ final class Emulator: ObservableObject {
         wake.signal()
     }
 
+    /// Let device time run ahead (e.g. past a FAIL message) without it being seen or heard: the screen is held on
+    /// its last picture meanwhile.
+    func quietSkip(_ seconds: Double) {
+        muteUntil = CACurrentMediaTime() + seconds + 1.5
+        setLinkCover(true)
+        fastForward(seconds)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { self.setLinkCover(false) }
+    }
+
     /// Answer the device's "GO BACK?" with YES: press B, A, B (a second apart) and
     /// stop as soon as the device is waiting for the app; if a press was missed
     /// (e.g. the device was busy), try the whole sequence again, up to 3 times.

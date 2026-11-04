@@ -212,6 +212,7 @@ final class Emulator: ObservableObject {
 
     func load(_ toy: Toy, completion: ((Bool) -> Void)? = nil) {
         unload()
+        holdRestoredUntil = FileManager.default.fileExists(atPath: ToyStore.lastFrameURL(toy.id).path) ? CACurrentMediaTime() + 4 : 0
         // paint the toy's own last picture straight away (before the first screen is drawn), not a black screen
         if Thread.isMainThread { self.frames.put(UIImage(contentsOfFile: ToyStore.lastFrameURL(toy.id).path)?.cgImage) }
         DispatchQueue.main.async { self.loading = true; self.toy = toy; self.stopped = nil; self.dark = false; self.lastDark = false
@@ -542,7 +543,15 @@ final class Emulator: ObservableObject {
 
     private var toyID: String? { currentID }
 
+    /// After opening a toy its last picture stays up until the firmware has drawn its first real picture
+    /// (its first frames are blank), so there is no black flash.
+    private var holdRestoredUntil: Double = 0
+
     private func publish(_ px: [UInt32], dark: Bool) {
+        if holdRestoredUntil > 0 {
+            if !dark, CACurrentMediaTime() < holdRestoredUntil, !px.contains(where: { $0 & 0xFFFFFF != 0 }) { return }
+            holdRestoredUntil = 0
+        }
         let data = px.withUnsafeBufferPointer { Data(buffer: $0) }
         guard let prov = CGDataProvider(data: data as CFData),
               let img = CGImage(width: 128, height: 128, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 512,

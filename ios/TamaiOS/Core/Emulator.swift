@@ -49,6 +49,8 @@ final class Emulator: ObservableObject {
     @Published var toast: String?
     /// The screen is hidden behind "Connecting…" while a link is set up (the menu would otherwise be seen going back and forth).
     @Published var linkCover = false
+    /// Beeps off for a moment (the app pressing buttons by itself).
+    var muteUntil = 0.0
     func setLinkCover(_ on: Bool) { DispatchQueue.main.async { if self.linkCover != on { self.linkCover = on } } }
     @Published var stopped: StopInfo?
     @Published var loading = false
@@ -500,7 +502,7 @@ final class Emulator: ObservableObject {
                     CareAlerts.shared.observeBathroom(raw: bathroomRaw, deviceID: toy.id, observedAt: observedAt)
                 }
             }
-            if !linkCover { audio.push(audioBuf, n) }      // no beeps while a link is set up
+            if !linkCover && CACurrentMediaTime() >= muteUntil { audio.push(audioBuf, n) }      // no beeps while a link is set up
             // skip frames identical to the one on screen: saves an image allocation per redraw
             if published, isDark == lastDark, pixels == lastPixels { published = false }
             if published { lastPixels = pixels; publish(pixels, dark: isDark) }

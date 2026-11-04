@@ -104,6 +104,7 @@ final class IRLink {
             emu.linkFreezeUntil = 0
             starting = false
             cooldownUntil = now + 8
+            emu.muteUntil = CACurrentMediaTime() + 1.5
             // a single C goes back to the INVITE / VISIT list, so it looks as if the button did nothing
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 emu.press(.c)
@@ -597,14 +598,14 @@ final class IRLink {
             default:
                 // Your device is still playing the visit scene (about 25 s: the guest plays, says
                 // goodbye and leaves). Say it when that's over, not when the infrared stops.
-                let text = mode == 1 ? "Gift sent! 💕" : (mode == 3 ? "Trip finished. ✈️" : "All done! 💕")
+                let text = mode == 1 ? "Gift sent! 💕" : (mode == 3 ? "" : "All done! 💕")
                 emu.note("infrared link: message due when the visit scene ends")
                 // counted from the last infrared traffic (not from when the link thread finished, which is
                 // some 10 s later: it waits out 8 s of silence first)
                 let wait = max(0.5, lastTraffic + 33 - CACurrentMediaTime())
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
                     guard emu.toy?.id == me.id, !emu.loading else { return }
-                    emu.say(text, seconds: 5)
+                    if !text.isEmpty { emu.say(text, seconds: 5) }
                 }
             }
         } else if sawTraffic {

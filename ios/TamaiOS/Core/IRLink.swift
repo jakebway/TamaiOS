@@ -408,6 +408,7 @@ final class IRLink {
         var autoB = !(mode == 3)
         var myClock = 0.0
         var nextB = 3.8
+        var nextWatch = 0.0
         var pressTries = 0
         while true {
             let now = CACurrentMediaTime()
@@ -416,6 +417,17 @@ final class IRLink {
             // the visitor waits on its WAITING screen, frozen, until your device first speaks, so it
             // can't time out while you get ready to press B
             if dt > 0 && (sawTraffic || inviteScan) { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
+            if mode == 3 && now - began < 16 && now >= nextWatch {
+                nextWatch = now + 1.5
+                let sig = emu.withCore { h -> String in
+                    var px = [UInt32](repeating: 0, count: 128 * 128)
+                    _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
+                    var sum: UInt64 = 0
+                    for (i, c) in px.enumerated() { sum = sum &+ UInt64(c & 0xFFFFFF) &* UInt64(i % 251 + 1) }
+                    return String(sum % 100000) + (IRLink.waiting(h) ? " waiting" : " not-waiting")
+                } ?? "?"
+                emu.note("infrared link: t+\(Int((now - began) * 10) / 10) s screen \(sig), frames \(trace.count), B tries \(pressTries)")
+            }
             if mode == 3 && !autoB {
                 // press B now and then until the real connection (infrared discovery frames) is under way; a B
                 // on the CONNECTING screen itself does nothing, so extra presses are harmless

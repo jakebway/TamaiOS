@@ -337,7 +337,7 @@ final class IRLink {
         let inviteScan = mode == 3 && role == 0
         if mode == 3 {
             // each place in random order, until one that this device has unlocked accepts
-            tails = inviteScan ? (0..<8).shuffled().map { [TGKey.b, .b] + Array(repeating: TGKey.a, count: $0) + [.b] } : [[.b, .b]]
+            tails = inviteScan ? (0..<8).shuffled().map { [TGKey.b, .a, .b] + Array(repeating: TGKey.a, count: $0) + [.b] } : [[.b, .b]]
         }
         if mode == 1 {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
@@ -441,8 +441,9 @@ final class IRLink {
                     myClock += dt
                     if myClock > nextB {
                         nextB = myClock + 1.5; pressTries += 1
-                        emu.press(.b)
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { emu.release(.b) }
+                        // straight into the toy (not through the button queue), held a third of a second
+                        _ = emu.withCore { tg_press($0, TGKey.b.rawValue, CACurrentMediaTime()) }
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { _ = emu.withCore { tg_release($0, TGKey.b.rawValue) } }
                         emu.note("infrared link: pressed B to start (try \(pressTries))" + (pressTries == 1 || pressTries == 4 ? ", screen:\n" + (emu.withCore { tinyScreen($0) } ?? "") : ""))
                     }
                 } else { autoB = true }

@@ -47,6 +47,8 @@ final class IRLink {
     static func stage(of toy: Toy) -> Int {
         guard let v = Emulator.makeHandle(toy).0 else { return -1 }
         defer { tg_destroy(v) }
+        // a device that was just loaded reads stage 0 for its first moments, so let it run a little first
+        for _ in 0..<40 { _ = tg_tick(v, 0.02) }
         var b: UInt8 = 0
         return tg_peek(v, 0xF800D8B6, &b, 1) == 1 ? Int(b) : -1
     }

@@ -212,6 +212,8 @@ final class Emulator: ObservableObject {
 
     func load(_ toy: Toy, completion: ((Bool) -> Void)? = nil) {
         unload()
+        // paint the toy's own last picture straight away (before the first screen is drawn), not a black screen
+        if Thread.isMainThread { self.frames.put(UIImage(contentsOfFile: ToyStore.lastFrameURL(toy.id).path)?.cgImage) }
         DispatchQueue.main.async { self.loading = true; self.toy = toy; self.stopped = nil; self.dark = false; self.lastDark = false
             // show the toy's own last picture while it wakes up (not a black screen)
             self.frames.put(UIImage(contentsOfFile: ToyStore.lastFrameURL(toy.id).path)?.cgImage) }

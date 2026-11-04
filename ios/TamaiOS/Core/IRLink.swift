@@ -91,6 +91,21 @@ final class IRLink {
             var tb: UInt8 = 9
             role = tg_peek(h, 0xF80178C4, &tb, 1) == 1 && tb <= 1 ? Int(tb) : -1
         }
+        if mode == 3 && role == 0 {
+            // Only the Tama you play can INVITE; the other one visits by itself. Choosing VISIT here would leave
+            // this Tama "out", so back out of it and say what to do.
+            emu.linkFreezeUntil = 0
+            starting = false
+            cooldownUntil = now + 8
+            emu.say("Choose INVITE. The other Tama will visit for you.", seconds: 6)
+            for i in 0..<3 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4 + Double(i) * 0.9) {
+                    emu.press(.c)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
+                }
+            }
+            return
+        }
         let begin: (Toy) -> Void = { [self] partner in
             let t = Thread { [self] in
                 run(emu: emu, me: me, partner: partner, mode: mode, role: role)

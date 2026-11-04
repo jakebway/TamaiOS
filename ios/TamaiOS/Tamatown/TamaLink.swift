@@ -383,11 +383,12 @@ final class AppLink: ObservableObject {
         emu.beginQuiet()
         DispatchQueue.global(qos: .userInitiated).async {
             // Just hanging up leaves the device on CONNECTING for ~20 s. A command it
-            // doesn't expect in Download mode ends the session at once; the toy then shows FAIL briefly and
-            // returns to the VISIT / DOWNLOAD list by itself.
+            // doesn't expect in Download mode ends the session at once and the toy shows FAIL. One press of C
+            // on that screen goes back a single page, to the VISIT / DOWNLOAD list (tested on all firmwares),
+            // so FAIL is never seen; left alone it would show FAIL for ~7 s and then drop out to the room.
             try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
-            emu.fastForward(9)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { emu.endQuiet() }
+            emu.fastForward(0.3, keys: [.c])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { emu.endQuiet() }
         }
     }
 }

@@ -441,7 +441,7 @@ final class Console: ObservableObject {
             "-- town --", run("town", emu: emu),
         ]
         let link = LinkDiagnostics.shared.report().split(separator: "\n").dropFirst(2)
-        if !link.isEmpty { lines += ["-- connection trace --"] + link.suffix(60) }
+        if !link.isEmpty { lines += ["-- connection trace --"] + link.suffix(60).map(String.init) }
         if full {
             lines += ["-- files --", run("files", emu: emu),
                       "-- autorun --", run("autorun", emu: emu),

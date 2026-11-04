@@ -121,7 +121,7 @@ final class Emulator: ObservableObject {
                 self.clockChanging = false
                 self.saveNow()
                 self.say(ok == 1
-                    ? (enabled ? "Daytime Mode: your Tama's day starts at noon. ☀️" : "Clock returned to your iPhone's current time.")
+                    ? (enabled ? "Daytime Mode is on for all your devices: the day starts at noon. ☀️" : "Clock returned to your iPhone's time on all devices.")
                     : "Clock change is pending. It will be retried when the device can safely change time.")
             }
         }

@@ -185,7 +185,6 @@ final class AppModel: ObservableObject {
         do { try fm.moveItem(at: staging, to: working) }
         catch { try fm.moveItem(at: previous, to: working); throw error }
         Town.shared.invalidateDeviceCache(toy)
-        DaytimeClock.disable(toy.id)
         forgetName(toy.id)
         try? fm.removeItem(at: previous)
         toys = ToyStore.list()
@@ -209,7 +208,6 @@ final class AppModel: ObservableObject {
             do { try fm.moveItem(at: staging, to: working) }
             catch { try fm.moveItem(at: previous, to: working); throw error }
             Town.shared.invalidateDeviceCache(toy)
-            DaytimeClock.disable(toy.id)
             forgetName(toy.id)
             CareAlerts.shared.cancelAll()
             emu.appWaiting = false

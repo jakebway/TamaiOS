@@ -64,7 +64,7 @@ struct SettingsView: View {
                     }.disabled(emu.clockChanging || emu.loading || emu.linkBusy || emu.appWaiting)
                     if emu.clockChanging { ProgressView("Updating device clock…") }
                 } header: { Text("Clock") } footer: {
-                    Text("Start your Tama’s day at noon to play after bedtime. Time continues normally. Turn off to return to your iPhone’s current date and time.")
+                    Text("Start every Tama’s day at noon to play after bedtime, on all your devices. Time continues normally. Turn off to return to your iPhone’s current date and time.")
                 }
 
                 Section("Sound & Haptics") {

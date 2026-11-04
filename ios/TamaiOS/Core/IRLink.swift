@@ -380,7 +380,7 @@ final class IRLink {
         tg_ir_link(p, 1)
         active = true
         emu.note("infrared link: \(me.name) ⇄ \(partner.name) (mode \(mode))")
-        emu.say("\(IRLink.tamaLabel(me, fallback: "Your Tama")) ⇄ \(IRLink.tamaLabel(partner)) are linked. \(mode == 3 ? "Starting the trip… ✈️" : "Press B to start. 📡")", seconds: 6)
+        emu.say("\(IRLink.tamaLabel(me, fallback: "Your Tama")) ⇄ \(IRLink.tamaLabel(partner)) are linked. Starting… \(mode == 3 ? "✈️" : "📡")", seconds: 6)
 
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
@@ -394,9 +394,9 @@ final class IRLink {
         // TRAVEL: a toy on CONNECTING first tries a few times on its own, gives up (FAIL) after about 3 s, and
         // then B starts the real connection. The app presses that B, so nobody has to catch the moment.
         var pClock = 1.9                  // the invited partner has already been on CONNECTING this long
-        var autoB = !(mode == 3)
+        var autoB = false
         var myClock = 0.0
-        var nextB = 3.8
+        var nextB = mode == 3 ? 3.8 : 1.2
         var nextWatch = 0.0
         var pressTries = 0
         while true {
@@ -417,7 +417,7 @@ final class IRLink {
                 } ?? "?"
                 emu.note("infrared link: t+\(Int((now - began) * 10) / 10) s screen \(sig), frames \(trace.count), B tries \(pressTries)")
             }
-            if mode == 3 && !autoB {
+            if !autoB {
                 // press B now and then until the real connection (infrared discovery frames) is under way; a B
                 // on the CONNECTING screen itself does nothing, so extra presses are harmless
                 if inviteScan {
@@ -425,15 +425,15 @@ final class IRLink {
                     if pClock > nextB {
                         nextB = pClock + 1.5; pressTries += 1
                         tg_press(p, TGKey.b.rawValue, CACurrentMediaTime()); tickAll(p, 15, audio); tg_release(p, TGKey.b.rawValue)
-                        emu.note("infrared link: partner pressed B to start the trip (try \(pressTries))")
+                        emu.note("infrared link: partner pressed B to start (try \(pressTries))")
                     }
-                } else if role == 1 {
+                } else if mode != 3 || role == 1 {
                     myClock += dt
                     if myClock > nextB {
                         nextB = myClock + 1.5; pressTries += 1
                         emu.press(.b)
                         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { emu.release(.b) }
-                        emu.note("infrared link: pressed B to start the trip (try \(pressTries))" + (pressTries == 1 || pressTries == 4 ? ", screen:\n" + (emu.withCore { tinyScreen($0) } ?? "") : ""))
+                        emu.note("infrared link: pressed B to start (try \(pressTries))" + (pressTries == 1 || pressTries == 4 ? ", screen:\n" + (emu.withCore { tinyScreen($0) } ?? "") : ""))
                     }
                 } else { autoB = true }
                 if pressTries >= 8 { autoB = true }
@@ -467,6 +467,7 @@ final class IRLink {
             }
             if mode == 3, toYou.contains(where: { $0.first == 0xFF }) || toVisitor.contains(where: { $0.first == 0xFF }) { autoB = true }
             let moved = !toYou.isEmpty || !toVisitor.isEmpty
+            if mode != 3 && moved { autoB = true }      // PLAYDATE / GIFT / MARRY: the exchange is under way
             if moved { sawTraffic = true; lastTraffic = CACurrentMediaTime() }
             // is it over? Once data has flowed, only silence ends it (the infrared speed changes
             // during a connection, so "waiting" can't be trusted); before that, leaving the screen does.

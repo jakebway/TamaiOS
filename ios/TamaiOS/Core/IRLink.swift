@@ -249,6 +249,23 @@ final class IRLink {
         }
     }
 
+    /// In a two-line list (VISIT / INVITE): which line the pointing hand is on (0 = first, 1 = second).
+    fileprivate func cursorRow(_ h: OpaquePointer) -> Int? {
+        var px = [UInt32](repeating: 0, count: 128 * 128)
+        _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
+        func ink(_ y0: Int, _ y1: Int) -> Int {
+            var n = 0
+            for y in y0..<y1 { for x in 3..<18 {
+                let c = px[y * 128 + x]
+                if Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255) < 500 { n += 1 }
+            } }
+            return n
+        }
+        let a = ink(16, 36), b = ink(41, 61)
+        if a + b < 20 { return nil }
+        return a >= b ? 0 : 1
+    }
+
     /// A small 40×20 text picture of the screen, for the log.
     fileprivate func tinyScreen(_ h: OpaquePointer) -> String {
         var px = [UInt32](repeating: 0, count: 128 * 128)
@@ -311,7 +328,7 @@ final class IRLink {
         let inviteScan = mode == 3 && role == 0
         if mode == 3 {
             // each place in random order, until one that this device has unlocked accepts
-            tails = inviteScan ? (0..<8).shuffled().map { [TGKey.b, .a, .b] + Array(repeating: TGKey.a, count: $0) + [.b] } : [[.b, .b]]
+            tails = inviteScan ? (0..<8).shuffled().map { [TGKey.b, .b] + Array(repeating: TGKey.a, count: $0) + [.b] } : [[.b, .b]]
         }
         if mode == 1 {
             // the visitor takes the opposite of what you chose (RECEIVE when you give or when unsure)
@@ -326,11 +343,22 @@ final class IRLink {
                 tg_set_never_sleep(v, 0)
                 tg_wake(v)
                 tickAll(v, 25, audio)
-                for k in head + tail {
+                for (i, k) in (head + tail).enumerated() {
                     tg_press(v, k.rawValue, CACurrentMediaTime())
                     tickAll(v, 8, audio)
                     tg_release(v, k.rawValue)
                     tickAll(v, 22, audio)
+                    if mode == 3 && i == head.count {
+                        // the VISIT / INVITE list remembers where its cursor was last time: put it on the entry
+                        // this device needs (the opposite of what you chose) before choosing
+                        tickAll(v, 20, audio)
+                        let wantRow = inviteScan ? 1 : 0
+                        if let row = cursorRow(v), row != wantRow {
+                            emu.note("infrared link: \(partner.name) had its cursor on the wrong entry; moving it")
+                            tg_press(v, TGKey.a.rawValue, CACurrentMediaTime()); tickAll(v, 8, audio)
+                            tg_release(v, TGKey.a.rawValue); tickAll(v, 22, audio)
+                        }
+                    }
                 }
                 if inviteScan { tickAll(v, 70, audio) }      // the CONNECTING screen takes a moment
                 tickAll(v, 25, audio)

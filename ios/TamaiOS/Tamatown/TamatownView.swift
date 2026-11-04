@@ -347,9 +347,9 @@ struct TownScene: View {
 
     private func walker(_ a: WanderSim.Actor, _ s: Suitor, _ t: Double, _ w: CGFloat, _ h: CGFloat) -> some View {
         let walking = a.state == .walk
-        let hop: Double = walking ? abs(sin(t * 7 + a.phase)) * 0.012 : 0
+        let hop: Double = walking ? abs(sin(t * 4 + a.phase)) * 0.005 : 0
         let near = (a.lane - 0.7) / 0.25      // a little bigger further down, like it's closer
-        let size: CGFloat = w * CGFloat(0.13 + 0.035 * min(1, max(0, near)))
+        let size: CGFloat = w * CGFloat(0.105 + 0.025 * min(1, max(0, near)))
         let x: CGFloat = w * CGFloat(a.x)
         let y: CGFloat = h * CGFloat(a.lane - hop)
         return ZStack {
@@ -357,7 +357,7 @@ struct TownScene: View {
                 .frame(width: size, height: size)
                 .scaleEffect(x: CGFloat(a.facing) * -1, y: 1)
                 .position(x: x, y: y)
-            if a.state != .walk {
+            if a.state == .idle && a.line.isEmpty {
                 Text(a.name.capitalized)
                     .font(.system(size: max(8, w * 0.022), weight: .bold, design: .rounded))
                     .padding(.horizontal, 5).padding(.vertical, 1)
@@ -366,8 +366,8 @@ struct TownScene: View {
                     .position(x: x, y: y + size * 0.55)
             }
             if !a.line.isEmpty {
-                SpeechBubble(text: a.line, size: max(9, w * 0.028))
-                    .position(x: min(w * 0.78, max(w * 0.22, x)), y: y - size * 0.95)
+                SpeechBubble(text: a.line, size: max(8, w * 0.024))
+                    .position(x: min(w * 0.72, max(w * 0.28, x)), y: y - size * 1.15)
             }
         }
     }

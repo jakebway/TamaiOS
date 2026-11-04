@@ -89,11 +89,16 @@ struct SuitorSheet: View {
             List {
                 Section {
                     VStack(spacing: 10) {
-                        ZStack {
-                            Backdrop(index: scene)
-                            CharacterPicture(image: town.image(suitor)).padding(18)
+                        GeometryReader { g in
+                            ZStack(alignment: .bottom) {
+                                Backdrop(index: scene)
+                                CharacterPicture(image: town.image(suitor))
+                                    .frame(width: g.size.width * 0.42, height: g.size.width * 0.42)
+                                    .padding(.bottom, g.size.width * 0.05)
+                            }
                         }
-                        .frame(height: 220)
+                        .aspectRatio(1, contentMode: .fit)
+                        .frame(maxWidth: 300)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         Text(suitor.name).font(.system(.title, design: .rounded).weight(.heavy))
                         Text(said.isEmpty ? suitor.blurb : said)
@@ -219,11 +224,16 @@ struct DesignView: View {
     private var stage: some View {
         VStack(spacing: 10) {
             ZStack(alignment: .topTrailing) {
-                ZStack {
-                    Backdrop(index: wall)
-                    CharacterPicture(image: town.image(s)).padding(14)
+                GeometryReader { g in
+                    ZStack(alignment: .bottom) {
+                        Backdrop(index: wall)
+                        CharacterPicture(image: town.image(s))
+                            .frame(width: g.size.width * 0.62, height: g.size.width * 0.62)
+                            .padding(.bottom, g.size.width * 0.04)
+                    }
                 }
-                .frame(height: 180)
+                .aspectRatio(1, contentMode: .fit)
+                .frame(width: 190, height: 190)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 HStack(spacing: 8) {
                     Button { nextWall() } label: {

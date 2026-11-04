@@ -230,6 +230,15 @@ extension TamaLink {
         _ = try answer(firstTimeout: 6, idleTimeout: 3)
     }
 
+    /// Hang up from Download mode: the toy reacts the moment it has the command, so don't wait the usual
+    /// three seconds of silence for a reply that never comes.
+    func hangUpQuick(_ pkt: [UInt8]) {
+        defer { close() }
+        emu.linkBusy = true
+        try? send(pkt)
+        _ = try? answer(firstTimeout: 1.5, idleTimeout: 0.3)
+    }
+
     func close() {
         emu.linkBusy = true
         drain(0.05)
@@ -386,9 +395,9 @@ final class AppLink: ObservableObject {
             // doesn't expect in Download mode ends the session at once and the toy shows FAIL. One press of C
             // on that screen goes back a single page, to the VISIT / DOWNLOAD list (tested on all firmwares),
             // so FAIL is never seen; left alone it would show FAIL for ~7 s and then drop out to the room.
-            try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
-            emu.fastForward(0.3, keys: [.c])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { emu.endQuiet() }
+            link.hangUpQuick(TamaLink.packet(op: 0x15, cmd: 0x36))
+            emu.fastForward(0.2, keys: [.c])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { emu.endQuiet() }
         }
     }
 }

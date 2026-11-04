@@ -249,6 +249,22 @@ final class IRLink {
         }
     }
 
+    /// A small 40×20 text picture of the screen, for the log.
+    fileprivate func tinyScreen(_ h: OpaquePointer) -> String {
+        var px = [UInt32](repeating: 0, count: 128 * 128)
+        _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
+        var out: [String] = []
+        for y in stride(from: 4, to: 124, by: 6) {
+            var r = ""
+            for x in stride(from: 4, to: 124, by: 3) {
+                let c = px[y * 128 + x]
+                r += Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255) < 330 ? "#" : "."
+            }
+            out.append(r)
+        }
+        return out.joined(separator: "\n")
+    }
+
     /// A 32×16 text sketch of the screen, for the log.
     fileprivate func asciiScreen(_ h: OpaquePointer) -> String {
         var px = [UInt32](repeating: 0, count: 128 * 128)
@@ -388,7 +404,7 @@ final class IRLink {
                         nextB = myClock + 1.5; pressTries += 1
                         emu.press(.b)
                         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { emu.release(.b) }
-                        emu.note("infrared link: pressed B to start the trip (try \(pressTries))")
+                        emu.note("infrared link: pressed B to start the trip (try \(pressTries))" + (pressTries == 1 || pressTries == 4 ? ", screen:\n" + (emu.withCore { tinyScreen($0) } ?? "") : ""))
                     }
                 } else { autoB = true }
                 if pressTries >= 8 { autoB = true }

@@ -358,6 +358,10 @@ final class Emulator: ObservableObject {
             if holdForApp && radioReady && !radioStale { holdLatch = true }
             if !holdForApp { holdLatch = false }
             if paused || CACurrentMediaTime() < linkFreezeUntil || (holdForApp && holdLatch && !linkBusy) {
+                if CACurrentMediaTime() < linkFreezeUntil {
+                    // while the link is being set up, A and B presses must not pile up and fire all at once later
+                    inputLock.lock(); inputQ.removeAll { $0.0 != TGKey.c.rawValue }; inputLock.unlock()
+                }
                 _ = wake.wait(timeout: .now() + (paused ? 0.1 : 0.03))
                 last = CACurrentMediaTime()
                 continue

@@ -415,7 +415,8 @@ final class IRLink {
                     for (i, c) in px.enumerated() { sum = sum &+ UInt64(c & 0xFFFFFF) &* UInt64(i % 251 + 1) }
                     return String(sum % 100000) + (IRLink.waiting(h) ? " waiting" : " not-waiting")
                 } ?? "?"
-                emu.note("infrared link: t+\(Int((now - began) * 10) / 10) s screen \(sig), frames \(trace.count), B tries \(pressTries)")
+                let ex = emu.coreText { tg_status($0, $1, $2) }?.split(separator: "\n").first(where: { $0.hasPrefix("executed") || $0.hasPrefix("game_time") }).map(String.init) ?? "?"
+                emu.note("infrared link: t+\(Int((now - began) * 10) / 10) s screen \(sig), frames \(trace.count), B tries \(pressTries), loop ticks \(emu.stats.ticks), \(ex), frozen \(emu.linkFreezeUntil > now)")
             }
             if !autoB {
                 // press B now and then until the real connection (infrared discovery frames) is under way; a B

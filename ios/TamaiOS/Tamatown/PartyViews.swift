@@ -17,7 +17,27 @@ struct GenePicture: View {
 
 private func tick() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
 
-/// The picture behind a character: one of the pack's Tama wallpapers.
+/// A wallpaper drawn pixel-perfect (a whole number of screen pixels per picture pixel), centred, with a soft
+/// blurred copy of itself filling any space around it, so it is never stretched or cropped.
+struct PixelBackdrop: View {
+    let image: CGImage
+    var body: some View {
+        GeometryReader { g in
+            let scale = UIScreen.main.scale
+            let side = min(g.size.width, g.size.height)
+            let k = max(1, floor(side * scale / CGFloat(image.width)))
+            let s = CGFloat(image.width) * k / scale
+            ZStack {
+                Image(decorative: image, scale: 1).resizable().scaledToFill()
+                    .frame(width: g.size.width, height: g.size.height).blur(radius: 22).clipped()
+                Image(decorative: image, scale: 1).interpolation(.none).resizable().frame(width: s, height: s)
+            }
+            .frame(width: g.size.width, height: g.size.height)
+        }
+    }
+}
+
+/// The picture behind a character: one of the pack's Tama wallpapers, changing smoothly with the situation.
 private struct Backdrop: View {
     @ObservedObject var town = Town.shared
     let index: Int
@@ -25,9 +45,10 @@ private struct Backdrop: View {
         ZStack {
             Color(.secondarySystemBackground)
             if let img = town.wallpaper(index) {
-                Image(decorative: img, scale: 1).interpolation(.none).resizable().scaledToFill()
+                PixelBackdrop(image: img).id(index).transition(.opacity)
             }
         }
+        .animation(.easeInOut(duration: 0.3), value: index)
     }
 }
 
@@ -47,22 +68,21 @@ struct SuitorSheet: View {
     @State private var done: Set<Int> = []
     @State private var said = ""
 
-    private struct Outing { let icon: String; let title: String; let line: String }
+    private struct Outing { let icon: String; let title: String; let line: String; let scene: Int }
+    /// Each outing has its own Tama wallpaper behind the two of them.
     private let outings: [Outing] = [
-        Outing(icon: "cup.and.saucer.fill", title: "Have a drink", line: "Sharing a warm drink and a slice of cake."),
-        Outing(icon: "figure.walk", title: "Take a walk", line: "A slow walk through the park together."),
-        Outing(icon: "film.fill", title: "See a movie", line: "Sharing popcorn at the movies."),
-        Outing(icon: "fork.knife", title: "Have a picnic", line: "A picnic on the grass in the sunshine."),
-        Outing(icon: "moon.stars.fill", title: "Watch the stars", line: "Lying back to watch the stars come out."),
+        Outing(icon: "cup.and.saucer.fill", title: "Have a drink", line: "Sharing a warm drink and a slice of cake.", scene: 12),
+        Outing(icon: "figure.walk", title: "Take a walk", line: "A slow walk through the park together.", scene: 18),
+        Outing(icon: "music.note", title: "Go to a show", line: "Dancing along at the show.", scene: 17),
+        Outing(icon: "fork.knife", title: "Have a picnic", line: "A picnic under the apple trees.", scene: 25),
+        Outing(icon: "moon.stars.fill", title: "Watch the stars", line: "Lying back to watch the stars come out.", scene: 3),
     ]
+    private static let meetScene = 18
+    private static let loveScene = 7
+    @State private var scene = SuitorSheet.meetScene
     /// Everyone has one favourite outing worth two hearts.
     private var favourite: Int { suitor.name.unicodeScalars.reduce(0) { $0 + Int($1.value) } % outings.count }
     private var full: Bool { hearts >= 5 }
-    private var wallpaperFor: Int {
-        let list = town.niceWallpapers
-        guard !list.isEmpty else { return 0 }
-        return list[suitor.name.unicodeScalars.reduce(0) { $0 + Int($1.value) } % list.count]
-    }
 
     var body: some View {
         NavigationStack {
@@ -70,7 +90,7 @@ struct SuitorSheet: View {
                 Section {
                     VStack(spacing: 10) {
                         ZStack {
-                            Backdrop(index: wallpaperFor)
+                            Backdrop(index: scene)
                             CharacterPicture(image: town.image(suitor)).padding(18)
                         }
                         .frame(height: 220)
@@ -145,6 +165,7 @@ struct SuitorSheet: View {
         done.insert(i)
         hearts = min(5, hearts + (i == favourite ? 2 : 1))
         said = (i == favourite ? "My favourite! " : "") + outings[i].line
+        scene = full ? SuitorSheet.loveScene : outings[i].scene
         if full { said = "\(tamaName)… I think I'm in love." }
         tick()
     }
@@ -189,7 +210,7 @@ struct DesignView: View {
                     }.fontWeight(.bold).disabled(town.image(s) == nil)
                 }
             }
-            .onAppear { surprise(first: true); wall = town.niceWallpapers.randomElement() ?? 0 }
+            .onAppear { surprise(first: true); wall = town.niceWallpapers.contains(2) ? 2 : 0 }
         }
     }
 

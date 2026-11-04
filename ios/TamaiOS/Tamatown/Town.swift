@@ -31,8 +31,17 @@ final class Town: ObservableObject {
     @Published var bodyIDs: [UInt16] = []
     @Published var suitors: [Suitor] = []
     /// Which wallpaper is behind the town (chosen in Tamatown Settings) when you haven't picked your own picture.
-    @Published var wallpaperIndex: Int = Prefs.d.object(forKey: "town.wallpaper") as? Int ?? 4 {
+    /// -1 = automatic: it follows the time of day.
+    @Published var wallpaperIndex: Int = Prefs.d.object(forKey: "town.wallpaper") as? Int ?? -1 {
         didSet { Prefs.d.set(wallpaperIndex, forKey: "town.wallpaper") }
+    }
+    /// The wallpaper to show behind the town right now.
+    var activeWallpaper: Int {
+        if wallpaperIndex >= 0 { return wallpaperIndex }
+        let hour = Calendar.current.component(.hour, from: Date())
+        if hour >= 7 && hour < 17 { return 4 }       // sunny beach
+        if hour >= 17 && hour < 20 { return 22 }     // sunset
+        return 6                                      // night city
     }
     /// Shop items (food, items, accessories, wallpapers, places, games) from the pack.
     @Published var items: [PackItem] = []

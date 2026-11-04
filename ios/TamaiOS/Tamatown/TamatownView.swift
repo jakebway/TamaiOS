@@ -187,7 +187,7 @@ struct TownSquare: View {
     @ObservedObject var town = Town.shared
     private var away: Bool { emu.toy.map { town.state($0).away } ?? false }
     private var sceneAspect: CGFloat {
-        if town.customBG == nil, TownScene.builtIn == nil, town.wallpaper(town.wallpaperIndex) != nil { return 1.0 }
+        if town.customBG == nil, TownScene.builtIn == nil, town.wallpaper(town.activeWallpaper) != nil { return 1.0 }
         guard let bg = town.customBG ?? TownScene.builtIn, bg.size.height > 0 else { return 1.25 }
         return min(2.2, max(1.0, bg.size.width / bg.size.height))
     }
@@ -287,7 +287,7 @@ struct TownScene: View {
         GeometryReader { g in
             if let bg = town.customBG ?? TownScene.builtIn {
                 customScene(bg, g.size.width, g.size.height)
-            } else if let wp = town.wallpaper(town.wallpaperIndex) {
+            } else if let wp = town.wallpaper(town.activeWallpaper) {
                 customScene(UIImage(cgImage: wp), g.size.width, g.size.height, pixel: true)
             } else {
                 ZStack {
@@ -415,7 +415,11 @@ struct TownScene: View {
 
     private func customScene(_ bg: UIImage, _ w: CGFloat, _ h: CGFloat, pixel: Bool = false) -> some View {
         ZStack {
-            Image(uiImage: bg).interpolation(pixel ? .none : .medium).resizable().scaledToFill().frame(width: w, height: h).clipped()
+            if pixel, let cg = bg.cgImage {
+                PixelBackdrop(image: cg).frame(width: w, height: h)
+            } else {
+                Image(uiImage: bg).resizable().scaledToFill().frame(width: w, height: h).clipped()
+            }
             hotspot(.party, w, h, 1.0 / 6)
             hotspot(.arcade, w, h, 5.0 / 6)
             walkersLayer(w, h)
@@ -601,6 +605,13 @@ struct TownSettingsView: View {
                 Text("Use any picture you like as the town — for example a screenshot of the original app from your own phone. Tap the left of it for Tama ♥ Party, the right for the Arcade. TamaDepa is available in Download mode only.")
             }
             Section {
+                Button { town.wallpaperIndex = -1; town.setBackground(nil) } label: {
+                    HStack {
+                        Label("Automatic (follows the time of day)", systemImage: "clock")
+                        Spacer()
+                        if town.customBG == nil && town.wallpaperIndex < 0 { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
+                    }
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8)], spacing: 8) {
                     ForEach(town.niceWallpapers, id: \.self) { n in
                         Button { town.wallpaperIndex = n; town.setBackground(nil) } label: {

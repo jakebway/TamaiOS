@@ -16,6 +16,7 @@ final class IRLink {
     fileprivate var quietUntil = 0.0      // the visit scene keeps playing after the infrared stops: no background reading then
     private var cooldownUntil = 0.0
     private var lastEnd = 0.0
+    private var heldFrame: [UInt32]? = nil     // the CONNECTING picture the screen is held on during a Travel invitation
 
     /// For the console: what the link machinery is doing right now.
     var stateText: String {
@@ -91,7 +92,12 @@ final class IRLink {
             var tb: UInt8 = 9
             role = tg_peek(h, 0xF80178C4, &tb, 1) == 1 && tb <= 1 ? Int(tb) : -1
         }
-        if mode == 3 && role == 1 { emu.setLinkCover(true) }
+        if mode == 3 && role == 1 {
+            var px = [UInt32](repeating: 0, count: 128 * 128)
+            _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
+            heldFrame = px
+            emu.setLinkCover(true)
+        }
         if mode == 3 && role == 0 {
             // Only the Tama you play can INVITE; the other one visits by itself. Choosing VISIT here would leave
             // this Tama "out", so back out of it and say what to do.
@@ -430,6 +436,23 @@ final class IRLink {
             wait(0.4)
             _ = emu.withCore { tg_release($0, TGKey.b.rawValue) }
             emu.note("infrared link: restarted the invitation with the link ready")
+            // let go like un-pausing a video: only when the live screen looks just like the held picture
+            if let held = heldFrame {
+                let end = CACurrentMediaTime() + 2.5
+                var matched = false
+                while CACurrentMediaTime() < end && !matched {
+                    wait(0.02)
+                    matched = emu.withCore { h -> Bool in
+                        var now = [UInt32](repeating: 0, count: 128 * 128)
+                        _ = now.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
+                        var diff = 0
+                        for i in 0..<now.count where (now[i] & 0xFFFFFF) != (held[i] & 0xFFFFFF) { diff += 1 }
+                        return diff < 150
+                    } ?? true
+                }
+                emu.note("infrared link: screen released " + (matched ? "on a matching picture" : "after waiting"))
+            }
+            emu.setLinkCover(false)
         }
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
@@ -449,7 +472,6 @@ final class IRLink {
         var nextWatch = 0.0
         var pressTries = 0
         var shownP = false
-        var coverOn = true
         var pn = 0
         while true {
             let now = CACurrentMediaTime()
@@ -526,9 +548,6 @@ final class IRLink {
             let moved = !toYou.isEmpty || !toVisitor.isEmpty
             if mode != 3 && moved { autoB = true }      // PLAYDATE / GIFT / MARRY: the exchange is under way
             if moved { sawTraffic = true; lastTraffic = CACurrentMediaTime() }
-            if mode == 3 && role == 1 && coverOn && (toYou.contains(where: { $0.count > 100 }) || now - began > 5) {
-                coverOn = false; emu.setLinkCover(false)     // straight from the held CONNECTING picture into the live one
-            }
             // is it over? Once data has flowed, only silence ends it (the infrared speed changes
             // during a connection, so "waiting" can't be trusted); before that, leaving the screen does.
             guard let stillOn = emu.withCore({ IRLink.waiting($0) }), emu.toy?.id == me.id else { break }

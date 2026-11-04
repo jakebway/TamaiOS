@@ -404,6 +404,29 @@ final class IRLink {
         emu.note("infrared link: \(me.name) ⇄ \(partner.name) (mode \(mode))")
         emu.say("Connected! \(mode == 3 ? "✈️" : "📡")", seconds: 6)
 
+        // TRAVEL (you INVITE): the connection starts by itself when the other Tama is already waiting on VISIT
+        // as the invitation begins. Yours began before this link was ready, so back out of CONNECTING (C) and
+        // choose the same place again (B): now both ends are ready and no one has to press anything.
+        if mode == 3 && role == 1 {
+            func wait(_ sec: Double) {
+                let end = CACurrentMediaTime() + sec
+                var t0 = CACurrentMediaTime()
+                while CACurrentMediaTime() < end {
+                    let n = CACurrentMediaTime()
+                    _ = tg_tick(p, min(n - t0, 0.05)); _ = tg_take_audio(p, audio, 44100)
+                    t0 = n
+                    Thread.sleep(forTimeInterval: 0.004)
+                }
+            }
+            _ = emu.withCore { tg_press($0, TGKey.c.rawValue, CACurrentMediaTime()) }
+            wait(0.3)
+            _ = emu.withCore { tg_release($0, TGKey.c.rawValue) }
+            wait(1.1)
+            _ = emu.withCore { tg_press($0, TGKey.b.rawValue, CACurrentMediaTime()) }
+            wait(0.4)
+            _ = emu.withCore { tg_release($0, TGKey.b.rawValue) }
+            emu.note("infrared link: restarted the invitation with the link ready")
+        }
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
         let began = last
@@ -418,7 +441,7 @@ final class IRLink {
         var pClock = 1.9                  // the invited partner has already been on CONNECTING this long
         var autoB = false
         var myClock = 0.0
-        var nextB = mode == 3 ? 3.8 : 1.2
+        var nextB = mode == 3 ? 7.0 : 1.2
         var nextWatch = 0.0
         var pressTries = 0
         var shownP = false
@@ -429,7 +452,7 @@ final class IRLink {
             last = now
             // the visitor waits on its WAITING screen, frozen, until your device first speaks, so it
             // can't time out while you get ready to press B
-            if dt > 0 && (sawTraffic || inviteScan) { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
+            if dt > 0 && (sawTraffic || inviteScan || mode == 3) { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
             if mode == 3 && now - began < 16 && now >= nextWatch {
                 nextWatch = now + 1.5
                 let sig = emu.withCore { h -> String in

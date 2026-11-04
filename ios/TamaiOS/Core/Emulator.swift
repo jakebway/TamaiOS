@@ -69,6 +69,9 @@ final class Emulator: ObservableObject {
     var holdForApp = false
     /// A Bluetooth exchange is running (the toy must keep running then).
     var linkBusy = false
+    /// While a TRAVEL link is being set up (the other device has to be woken and driven to its screen, which takes
+    /// a while) the toy's own time stands still, or its CONNECTING / WAITING screen would give up and fail first.
+    var linkFreezeUntil = 0.0
     /// Set once the toy was seen waiting while the app is open; cleared when the
     /// app hangs up. Keeps the hold on even while connected.
     var holdLatch = false
@@ -323,7 +326,7 @@ final class Emulator: ObservableObject {
         while !stopFlag {
             if holdForApp && radioReady && !radioStale { holdLatch = true }
             if !holdForApp { holdLatch = false }
-            if paused || (holdForApp && holdLatch && !linkBusy) {
+            if paused || CACurrentMediaTime() < linkFreezeUntil || (holdForApp && holdLatch && !linkBusy) {
                 _ = wake.wait(timeout: .now() + (paused ? 0.1 : 0.03))
                 last = CACurrentMediaTime()
                 continue

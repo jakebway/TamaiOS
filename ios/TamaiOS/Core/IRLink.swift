@@ -75,6 +75,7 @@ final class IRLink {
         }
         starting = true
         let mode = IRLink.mode(h, deviceID: deviceID)
+        if mode == 3 { emu.linkFreezeUntil = now + 60 }
         // GIFT: GIVE / RECEIVE. TRAVEL: 0 = this device chose VISIT, 1 = INVITE (Wonder Garden EN)
         var role = IRLink.role(h, deviceID: deviceID)
         if mode == 3 {
@@ -84,6 +85,7 @@ final class IRLink {
         let begin: (Toy) -> Void = { [self] partner in
             let t = Thread { [self] in
                 run(emu: emu, me: me, partner: partner, mode: mode, role: role)
+                emu.linkFreezeUntil = 0
                 starting = false
                 cooldownUntil = max(cooldownUntil, CACurrentMediaTime() + 1.5)
                 lastEnd = CACurrentMediaTime()
@@ -95,6 +97,7 @@ final class IRLink {
         let choose: ([Toy], [String: String]) -> Void = { _, blocked in
             DispatchQueue.main.async {
                 model.irChoice = IRChoice(candidates: others, blocked: blocked, pick: begin, cancel: { [self] in
+                    emu.linkFreezeUntil = 0
                     starting = false
                     cooldownUntil = CACurrentMediaTime() + 20
                 })
@@ -108,6 +111,7 @@ final class IRLink {
                 let eligible = others.filter { blocked[$0.id] == nil }
                 if eligible.isEmpty {
                     cooldownUntil = CACurrentMediaTime() + 30
+                    emu.linkFreezeUntil = 0
                     starting = false
                     emu.say("None of your other devices can travel yet. They need to grow up a bit first.", seconds: 7)
                     return
@@ -337,12 +341,13 @@ final class IRLink {
         guard emu.withCore({ h -> Bool in
             guard IRLink.waiting(h) else { return false }
             tg_ir_link(h, 1)
+            emu.linkFreezeUntil = 0
             return true
         }) == true else { return }
         tg_ir_link(p, 1)
         active = true
         emu.note("infrared link: \(me.name) ⇄ \(partner.name) (mode \(mode))")
-        emu.say("\(IRLink.tamaLabel(me, fallback: "Your Tama")) ⇄ \(IRLink.tamaLabel(partner)) are linked. Press B to start. 📡", seconds: 6)
+        emu.say("\(IRLink.tamaLabel(me, fallback: "Your Tama")) ⇄ \(IRLink.tamaLabel(partner)) are linked. \(mode == 3 ? "Starting the trip… ✈️" : "Press B to start. 📡")", seconds: 6)
 
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
@@ -353,13 +358,36 @@ final class IRLink {
         var sawDisc = false
         var trace: [String] = []
         var lastTraffic = CACurrentMediaTime()
+        // TRAVEL: a toy on CONNECTING first tries a few times on its own, gives up (FAIL) after about 3 s, and
+        // then B starts the real connection. The app presses that B, so nobody has to catch the moment.
+        var pClock = 1.9                  // the invited partner has already been on CONNECTING this long
+        var autoB = !(mode == 3)
+        var myClock = 0.0
         while true {
             let now = CACurrentMediaTime()
             let dt = min(now - last, 0.1)
             last = now
             // the visitor waits on its WAITING screen, frozen, until your device first speaks, so it
             // can't time out while you get ready to press B
-            if dt > 0 && sawTraffic { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
+            if dt > 0 && (sawTraffic || inviteScan) { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
+            if mode == 3 && !autoB {
+                if inviteScan {
+                    pClock += dt
+                    if pClock > 3.8 {
+                        autoB = true
+                        tg_press(p, TGKey.b.rawValue, CACurrentMediaTime()); tickAll(p, 8, audio); tg_release(p, TGKey.b.rawValue)
+                        emu.note("infrared link: partner pressed B to start the trip")
+                    }
+                } else if role == 1 {
+                    myClock += dt
+                    if myClock > 3.8 {
+                        autoB = true
+                        emu.press(.b)
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) { emu.release(.b) }
+                        emu.note("infrared link: pressed B to start the trip")
+                    }
+                } else { autoB = true }
+            }
             // frames from the visitor go to the toy you're playing, and back; your toy's core is
             // locked once per pass (not per frame) so this doesn't get in the way of its own loop
             var toYou: [[UInt8]] = []

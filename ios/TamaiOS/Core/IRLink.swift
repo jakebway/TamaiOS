@@ -262,8 +262,8 @@ final class IRLink {
             return n
         }
         let a = ink(16, 36), b = ink(41, 61)
-        if a + b < 20 { return nil }
-        return a >= b ? 0 : 1
+        if a + b < 60 || abs(a - b) < 30 { return nil }
+        return a > b ? 0 : 1
     }
 
     /// A small 40×20 text picture of the screen, for the log.
@@ -351,10 +351,13 @@ final class IRLink {
                     if mode == 3 && i == head.count {
                         // the VISIT / INVITE list remembers where its cursor was last time: put it on the entry
                         // this device needs (the opposite of what you chose) before choosing
-                        tickAll(v, 20, audio)
+                        tickAll(v, 60, audio)
                         let wantRow = inviteScan ? 1 : 0
-                        if let row = cursorRow(v), row != wantRow {
-                            emu.note("infrared link: \(partner.name) had its cursor on the wrong entry; moving it")
+                        // only act when the picture of the list and the toy's own VISIT/INVITE value agree
+                        var rb: UInt8 = 9
+                        let ramRow = tg_peek(v, 0xF80178C4, &rb, 1) == 1 && rb <= 1 ? Int(rb) : -1
+                        if let row = cursorRow(v), row != wantRow, ramRow == row {
+                            emu.note("infrared link: \(partner.name) had its cursor on the wrong entry (row \(row), value \(ramRow)); moving it")
                             tg_press(v, TGKey.a.rawValue, CACurrentMediaTime()); tickAll(v, 8, audio)
                             tg_release(v, TGKey.a.rawValue); tickAll(v, 22, audio)
                         }

@@ -27,6 +27,8 @@ final class Town: ObservableObject {
 
     @Published var pack: Pack = .missing
     @Published var ids: [UInt16] = []
+    /// Characters with a real body (a few are only accessories: a bow, a hat). Only these can be a Body.
+    @Published var bodyIDs: [UInt16] = []
     @Published var suitors: [Suitor] = []
     /// Shop items (food, items, accessories, wallpapers, places, games) from the pack.
     @Published var items: [PackItem] = []
@@ -53,6 +55,7 @@ final class Town: ObservableObject {
     }
 
     private var imageCache: [String: CGImage] = [:]
+    private var emptyLayers = Set<String>()
 
     // MARK: character pack
 
@@ -85,9 +88,15 @@ final class Town: ObservableObject {
             let n = d.withUnsafeBytes { tg_mm_load_zip($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
             var ids = [UInt16](repeating: 0, count: 512)
             let c = ids.withUnsafeMutableBufferPointer { tg_mm_ids($0.baseAddress, 512) }
+            let all = Array(ids.prefix(c))
+            let bodies = all.filter { id in
+                var info = [Int32](repeating: 0, count: 2)
+                return tg_mm_body_info(id, &info) == 1 && info[0] >= 200 && info[1] == 7
+            }
             await MainActor.run {
                 if n > 0 {
-                    self.ids = Array(ids.prefix(c))
+                    self.ids = all
+                    self.bodyIDs = bodies.isEmpty ? all : bodies
                     self.items = Town.readItems()
                     self.imageCache = [:]
                     self.pack = .ready(Int(n))
@@ -165,6 +174,33 @@ final class Town: ObservableObject {
         return img
     }
 
+    /// One gene on its own (0 Body, 1 Face, 2 Head, 3 Back), in a colour, trimmed to its edges. nil = nothing there.
+    func layer(_ part: Int, id: UInt16, color: Int) -> CGImage? {
+        let key = "L\(part).\(id).\(color)"
+        if let c = imageCache[key] { return c }
+        if emptyLayers.contains(key) { return nil }
+        var px = [UInt32](repeating: 0, count: 64 * 64)
+        let ok = px.withUnsafeMutableBufferPointer { tg_mm_layer(Int32(part), id, Int32(color), $0.baseAddress) }
+        var x0 = 64, x1 = -1, y0 = 64, y1 = -1
+        if ok == 1 {
+            for i in 0..<(64 * 64) where px[i] >> 24 != 0 {
+                let x = i % 64, y = i / 64
+                x0 = min(x0, x); x1 = max(x1, x); y0 = min(y0, y); y1 = max(y1, y)
+            }
+        }
+        guard ok == 1, x1 >= x0 else { emptyLayers.insert(key); return nil }
+        let data = px.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let prov = CGDataProvider(data: data as CFData),
+              let full = CGImage(width: 64, height: 64, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 256,
+                                 space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                                 provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+              let img = full.cropping(to: CGRect(x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1))
+        else { return nil }
+        imageCache[key] = img
+        return img
+    }
+
     static func swatch(_ pal: Int) -> Color {
         var c = [UInt32](repeating: 0, count: 8)
         _ = c.withUnsafeMutableBufferPointer { tg_mm_palette(Int32(pal), $0.baseAddress) }
@@ -187,7 +223,7 @@ final class Town: ObservableObject {
     func randomSuitor(mix: Bool) -> Suitor? {
         guard !ids.isEmpty else { return nil }
         let pick = { self.ids.randomElement()! }
-        let base = pick()
+        let base = (self.bodyIDs.isEmpty ? self.ids : self.bodyIDs).randomElement()!
         let s = Suitor(name: Town.names.randomElement()!,
                        body: base, face: mix ? pick() : base, head: mix ? pick() : base, back: mix ? pick() : base,
                        bodyColor: Int.random(in: 0...12), headColor: Int.random(in: 0...12), backColor: Int.random(in: 0...12),

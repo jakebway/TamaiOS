@@ -140,12 +140,14 @@ struct TownView: View {
                     Button { chosen = s } label: {
                         VStack(spacing: 4) {
                             CharacterPicture(image: town.image(s)).frame(width: 80, height: 80)
-                            Text(s.name).font(.system(.subheadline, design: .rounded).weight(.bold))
-                            if s.isMix { Text("one of a kind").font(.caption2).foregroundStyle(.pink) }
+                            Text(s.name).font(.system(.subheadline, design: .rounded).weight(.heavy))
+                            Text(s.isMix ? "✨ one of a kind" : " ").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundStyle(.pink)
                         }
                         .padding(8)
-                        .frame(maxWidth: .infinity, minHeight: 128)
-                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemBackground)))
+                        .frame(maxWidth: .infinity, minHeight: 136)
+                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(LinearGradient(colors: [Color.pink.opacity(0.14), Color(.secondarySystemBackground)], startPoint: .top, endPoint: .bottom)))
+                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.pink.opacity(0.18), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                 }
@@ -247,148 +249,3 @@ struct BusyOverlay: View {
     }
 }
 
-/// A date: meet the suitor, then propose.
-struct SuitorSheet: View {
-    let suitor: Suitor
-    let tamaName: String
-    let adult: Bool
-    let onPropose: (_ babySex: Int, _ genes: Int) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @ObservedObject var town = Town.shared
-    @State private var babySex = 2
-    @State private var genes = 0
-    @State private var hearts = 0
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 18) {
-                    ZStack {
-                        Circle().fill(LinearGradient(colors: [.pink.opacity(0.25), .purple.opacity(0.2)], startPoint: .top, endPoint: .bottom))
-                        CharacterPicture(image: town.image(suitor)).padding(30)
-                    }
-                    .frame(width: 220, height: 220)
-                    Text(suitor.name).font(.system(size: 30, weight: .heavy, design: .rounded))
-                    Text(suitor.blurb).font(.system(.body, design: .rounded)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    HStack(spacing: 4) {
-                        ForEach(0..<5, id: \.self) { i in
-                            Image(systemName: i < hearts ? "heart.fill" : "heart").foregroundStyle(.pink)
-                        }
-                    }
-                    .font(.title2)
-                    Button { withAnimation(.spring()) { hearts = min(5, hearts + 1 + Int.random(in: 0...1)) } } label: {
-                        Label(hearts >= 5 ? "It's love! 💘" : "Go on a date with \(tamaName)", systemImage: "cup.and.saucer.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered).tint(.pink).disabled(hearts >= 5)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Baby").font(.headline)
-                        Picker("Baby", selection: $babySex) {
-                            Text("Surprise").tag(2); Text("Boy").tag(0); Text("Girl").tag(1)
-                        }.pickerStyle(.segmented)
-                        Text("Genes").font(.headline)
-                        Picker("Genes", selection: $genes) {
-                            Text("Like the app").tag(0); Text("Wild mix").tag(2)
-                        }.pickerStyle(.segmented)
-                        Text(genes == 0 ? "Mixes the parents the same way the official app did." : "Gives the baby a more random blend of both parents.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if !adult {
-                        Label("\(tamaName) isn't a grown-up yet — the device may refuse.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.footnote).foregroundStyle(.orange)
-                    }
-                    Button { onPropose(babySex, genes) } label: {
-                        Label("Propose 💍", systemImage: "heart.circle.fill")
-                            .font(.system(.title3, design: .rounded).weight(.bold))
-                            .frame(maxWidth: .infinity).padding(.vertical, 6)
-                    }
-                    .buttonStyle(.borderedProminent).tint(.pink)
-                    .disabled(hearts < 5)
-                    if hearts < 5 {
-                        Text("Go on dates until the hearts are full.").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(20)
-            }
-            .navigationTitle("Date")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-        }
-    }
-}
-
-/// Build a partner from parts and colours.
-struct DesignView: View {
-    let onDone: (Suitor) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @ObservedObject var town = Town.shared
-    @State private var s: Suitor = Suitor(name: "", body: 0, face: 0, head: 0, back: 0, bodyColor: 0, headColor: 0, backColor: 0, blurb: "Made just for you.")
-    @State private var part = 0
-
-    private let parts = ["Body", "Face", "Head", "Back"]
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 12) {
-                CharacterPicture(image: town.image(s)).frame(width: 160, height: 160)
-                    .background(Circle().fill(Color.pink.opacity(0.12)))
-                TextField("Name (A–Z)", text: Binding(get: { s.name }, set: { s.name = String($0.uppercased().filter { $0.isLetter && $0.isASCII }.prefix(8)) }))
-                    .textFieldStyle(.roundedBorder).multilineTextAlignment(.center).frame(maxWidth: 220)
-                Picker("Part", selection: $part) { ForEach(0..<4, id: \.self) { Text(parts[$0]).tag($0) } }
-                    .pickerStyle(.segmented)
-                if part != 1 {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 4)], spacing: 4) {
-                        ForEach(0..<13, id: \.self) { p in
-                            Button { setColor(p) } label: {
-                                Circle().fill(Town.swatch(p)).frame(width: 36, height: 36)
-                                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.3), lineWidth: 1))
-                                    .overlay(Circle().strokeBorder(Color.primary, lineWidth: color == p ? 3 : 0))
-                                    .frame(width: 48, height: 48)
-                                    .contentShape(Circle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8)], spacing: 8) {
-                        ForEach(town.ids, id: \.self) { id in
-                            CharacterPicture(image: town.image(body: id, bodyColor: 0, face: id, head: id, headColor: 0, back: id, backColor: 0))
-                                .frame(width: 56, height: 56)
-                                .padding(4)
-                                .background(RoundedRectangle(cornerRadius: 10).fill(current == id ? Color.pink.opacity(0.3) : Color(.secondarySystemBackground)))
-                                .contentShape(RoundedRectangle(cornerRadius: 10))
-                                .onTapGesture { setPart(id) }
-                        }
-                    }
-                }
-            }
-            .padding(16)
-            .navigationTitle("Design your own")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Meet") {
-                        var x = s
-                        if x.name.isEmpty { x.name = Town.names.randomElement()! }
-                        onDone(x)
-                    }.disabled(town.image(s) == nil)
-                }
-            }
-            .onAppear {
-                if let r = town.randomSuitor(mix: false) { s.body = r.body; s.face = r.face; s.head = r.head; s.back = r.back; s.bodyColor = 0; s.headColor = 0; s.backColor = 0 }
-            }
-        }
-    }
-
-    private var current: UInt16 { [s.body, s.face, s.head, s.back][part] }
-    private var color: Int { [s.bodyColor, 0, s.headColor, s.backColor][part] }
-    private func setPart(_ id: UInt16) {
-        switch part { case 0: s.body = id; case 1: s.face = id; case 2: s.head = id; default: s.back = id }
-    }
-    private func setColor(_ p: Int) {
-        switch part { case 0: s.bodyColor = p; case 2: s.headColor = p; default: s.backColor = p }
-    }
-}

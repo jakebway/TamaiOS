@@ -640,6 +640,69 @@ impl Library {
         Some(out)
     }
 
+    /// One part on its own, centred on a 64x64 picture (for showing the separate genes).
+    /// part: 0 = Body, 1 = Face, 2 = Head, 3 = Back.
+    pub fn layer(&self, part: usize, id: u16, pal: usize) -> Option<Image> {
+        let p = *PARTS.get(part)?;
+        let mut img = self.part_image(id, p, NORMAL_INDEX).cloned()?;
+        if p == 'B' && img.w >= 4 {
+            let row: Vec<u32> = (0..4).map(|x| img.get(x, 0)).collect();
+            for x in 0..4 {
+                img.set(x, 0, row[0]);
+            }
+            for y in 0..img.h {
+                for x in 0..img.w {
+                    let c = img.get(x, y);
+                    if c >> 24 == 0 {
+                        continue;
+                    }
+                    let repl = match c | 0xFF00_0000 {
+                        0xFFFF_0000 => row[1],
+                        0xFFFF_FF00 => row[2],
+                        0xFF00_00FF => row[3],
+                        _ => continue,
+                    };
+                    img.set(x, y, repl);
+                }
+            }
+        }
+        let mut out = Image::new(64, 64);
+        let (x0, y0) = ((64 - img.w.min(64)) / 2, (64 - img.h.min(64)) / 2);
+        for y in 0..img.h.min(64) {
+            for x in 0..img.w.min(64) {
+                let c = img.get(x, y);
+                if c >> 24 != 0 {
+                    out.set(x0 + x, y0 + y, recolor(c, pal));
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// How usable a character's body is: (opaque pixels, which anchors it has: 1 = head, 2 = face, 4 = back).
+    /// Some characters are really accessories (a bow, a hat): they have almost no body and no anchors.
+    pub fn body_info(&self, id: u16) -> Option<(usize, u32)> {
+        let img = self.part_image(id, 'B', NORMAL_INDEX)?;
+        let mut n = 0;
+        let mut mask = 0;
+        for y in 0..img.h {
+            for x in 0..img.w {
+                let c = img.get(x, y);
+                if c >> 24 == 0 {
+                    continue;
+                }
+                n += 1;
+                match c | 0xFF00_0000 {
+                    0xFFFF_0000 => mask |= 1,
+                    0xFFFF_FF00 => mask |= 2,
+                    0xFF00_00FF => mask |= 4,
+                    _ => {}
+                }
+            }
+        }
+        Some((n, mask))
+    }
+
     /// The 32 KB character data the toy draws the partner with.
     pub fn character_data(&self, sex: u8, ids: [u16; 4], lang: u8) -> Option<Vec<u8>> {
         const TABLE: [u8; 16] = [0x00, 0x01, 0x00, 0x00, 0xe4, 0x01, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0xf4, 0x01, 0x00, 0x00];
@@ -670,7 +733,9 @@ impl Library {
         }
         for _ in 0..20 {
             let id = self.ids[rng.next(0, self.ids.len() as i32) as usize];
-            if self.part(id, p).map_or(false, |x| !x.images.is_empty()) {
+            let ok = self.part(id, p).map_or(false, |x| !x.images.is_empty())
+                && (p != 'B' || self.body_info(id).map_or(false, |(n, m)| n >= 200 && m == 7));
+            if ok {
                 return id;
             }
         }

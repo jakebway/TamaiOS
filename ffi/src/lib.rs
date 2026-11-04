@@ -1180,6 +1180,41 @@ pub extern "C" fn tg_mm_compose(b: u16, bp: i32, m: u16, a: u16, ap: i32, k: u16
     }
 }
 
+/// One part on its own (0 Body, 1 Face, 2 Head, 3 Back), centred in 64*64 0xAARRGGBB. Returns 1 on success.
+#[no_mangle]
+pub extern "C" fn tg_mm_layer(part: i32, id: u16, pal: i32, out: *mut u32) -> i32 {
+    if out.is_null() || !(0..4).contains(&part) {
+        return 0;
+    }
+    let g = TOWN.lock().unwrap();
+    let Some(lib) = g.as_ref() else { return 0 };
+    match catch_unwind(AssertUnwindSafe(|| lib.layer(part as usize, id, pal.max(0) as usize))) {
+        Ok(Some(img)) => {
+            let o = unsafe { std::slice::from_raw_parts_mut(out, 64 * 64) };
+            o.copy_from_slice(&img.px[..64 * 64]);
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// A character's body: out[0] = opaque pixels, out[1] = anchors it has (1 head, 2 face, 4 back). Returns 1 on success.
+#[no_mangle]
+pub extern "C" fn tg_mm_body_info(id: u16, out: *mut i32) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    let g = TOWN.lock().unwrap();
+    let Some(lib) = g.as_ref() else { return 0 };
+    match catch_unwind(AssertUnwindSafe(|| lib.body_info(id))) {
+        Ok(Some((n, m))) => {
+            unsafe { *out = n as i32; *out.add(1) = m as i32 };
+            1
+        }
+        _ => 0,
+    }
+}
+
 /// The 8 colours of a palette (for colour buttons).
 #[no_mangle]
 pub extern "C" fn tg_mm_palette(pal: i32, out: *mut u32) -> i32 {

@@ -29,17 +29,15 @@ final class IRLink {
         return g & 0x80 == 0
     }
 
-    /// Which entry of the PLAYDATE / GIFT / MARRY / TRAVEL list is chosen (Wonder Garden EN; others: PLAYDATE).
+    /// Which entry of the PLAYDATE / GIFT / MARRY / TRAVEL list is chosen (same place on all three devices).
     static func mode(_ h: OpaquePointer, deviceID: String) -> Int {
-        guard deviceID.contains("wondergarden") else { return 0 }
         var b = [UInt8](repeating: 0, count: 1)
         guard tg_peek(h, 0xF80178E4, &b, 1) == 1, b[0] <= 3 else { return 0 }
         return Int(b[0])
     }
 
-    /// For GIFT: 0 = this device chose GIVE, 1 = RECEIVE (Wonder Garden EN; others: unknown = -1).
+    /// For GIFT: 0 = this device chose GIVE, 1 = RECEIVE .
     static func role(_ h: OpaquePointer, deviceID: String) -> Int {
-        guard deviceID.contains("wondergarden") else { return -1 }
         var b = [UInt8](repeating: 0, count: 1)
         guard tg_peek(h, 0xF80178BC, &b, 1) == 1, b[0] <= 1 else { return -1 }
         return Int(b[0])
@@ -76,7 +74,7 @@ final class IRLink {
         starting = true
         let mode = IRLink.mode(h, deviceID: deviceID)
         if mode == 3 { emu.linkFreezeUntil = now + 60 }
-        // GIFT: GIVE / RECEIVE. TRAVEL: 0 = this device chose VISIT, 1 = INVITE (Wonder Garden EN)
+        // GIFT: GIVE / RECEIVE. TRAVEL: 0 = this device chose VISIT, 1 = INVITE 
         var role = IRLink.role(h, deviceID: deviceID)
         if mode == 3 {
             var tb: UInt8 = 9

@@ -430,7 +430,6 @@ final class IRLink {
             wait(0.4)
             _ = emu.withCore { tg_release($0, TGKey.b.rawValue) }
             emu.note("infrared link: restarted the invitation with the link ready")
-            emu.setLinkCover(false)
         }
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()
@@ -450,6 +449,7 @@ final class IRLink {
         var nextWatch = 0.0
         var pressTries = 0
         var shownP = false
+        var coverOn = true
         var pn = 0
         while true {
             let now = CACurrentMediaTime()
@@ -526,6 +526,9 @@ final class IRLink {
             let moved = !toYou.isEmpty || !toVisitor.isEmpty
             if mode != 3 && moved { autoB = true }      // PLAYDATE / GIFT / MARRY: the exchange is under way
             if moved { sawTraffic = true; lastTraffic = CACurrentMediaTime() }
+            if mode == 3 && role == 1 && coverOn && (toYou.contains(where: { $0.count > 100 }) || now - began > 5) {
+                coverOn = false; emu.setLinkCover(false)     // straight from the held CONNECTING picture into the live one
+            }
             // is it over? Once data has flowed, only silence ends it (the infrared speed changes
             // during a connection, so "waiting" can't be trusted); before that, leaving the screen does.
             guard let stillOn = emu.withCore({ IRLink.waiting($0) }), emu.toy?.id == me.id else { break }

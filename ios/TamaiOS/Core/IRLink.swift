@@ -332,15 +332,21 @@ final class IRLink {
         var px = [UInt32](repeating: 0, count: 128 * 128)
         _ = px.withUnsafeMutableBufferPointer { tg_frame(h, $0.baseAddress) }
         var rows: [String] = []
-        let lo = px.map { Int(($0 >> 16) & 255) + Int(($0 >> 8) & 255) + Int($0 & 255) }.min() ?? 0
-        let hi = px.map { Int(($0 >> 16) & 255) + Int(($0 >> 8) & 255) + Int($0 & 255) }.max() ?? 0
+        let sums: [Int] = px.map { (v: UInt32) -> Int in
+            let r = Int((v >> 16) & 255)
+            let g = Int((v >> 8) & 255)
+            let b = Int(v & 255)
+            return r + g + b
+        }
+        let lo: Int = sums.min() ?? 0
+        let hi: Int = sums.max() ?? 0
         let mid = (lo + hi) / 2
         var blank = false
         for y in 4..<124 {
             var r = ""
             for x in 4..<124 {
-                let c = px[y * 128 + x]
-                r += Int((c >> 16) & 255) + Int((c >> 8) & 255) + Int(c & 255) < mid ? "#" : " "
+                let dark: Bool = sums[y * 128 + x] < mid
+                r += dark ? "#" : " "
             }
             while r.hasSuffix(" ") { r.removeLast() }
             if r.isEmpty { if !blank { rows.append("") }; blank = true } else { rows.append(r); blank = false }

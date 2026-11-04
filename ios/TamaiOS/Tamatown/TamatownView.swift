@@ -276,6 +276,7 @@ struct TownScene: View {
     let open: Bool
     let go: (TownPlace) -> Void
     @ObservedObject var town = Town.shared
+    @State private var sim = WanderSim()
     /// The Tamas walking around are the ones you can date at Tama ♥ Party.
     private var walkers: [Suitor] { Array(town.suitors.prefix(5)) }
     static let sparkX: [CGFloat] = [0.08, 0.22, 0.36, 0.55, 0.68, 0.83, 0.93, 0.47, 0.15]
@@ -341,25 +342,42 @@ struct TownScene: View {
         }
     }
 
-    private func walker(_ i: Int, _ s: Suitor, _ t: Double, _ w: CGFloat, _ h: CGFloat) -> some View {
-        let a: Double = t * 0.75 * (0.25 + Double(i) * 0.07) + Double(i) * 1.7
-        let x: CGFloat = w * CGFloat(0.5 + 0.40 * sin(a))
-        let flip: CGFloat = cos(a) >= 0 ? -1 : 1
-        let lane: Double = 0.80 + Double(i % 3) * 0.05
-        let hop: Double = abs(sin(t * 3 + Double(i))) * 0.009
-        let y: CGFloat = h * CGFloat(lane - hop)
-        let size: CGFloat = w * 0.15
-        return CharacterPicture(image: town.image(s))
-            .frame(width: size, height: size)
-            .scaleEffect(x: flip, y: 1)
-            .position(x: x, y: y)
+    private func walker(_ a: WanderSim.Actor, _ s: Suitor, _ t: Double, _ w: CGFloat, _ h: CGFloat) -> some View {
+        let walking = a.state == .walk
+        let hop: Double = walking ? abs(sin(t * 7 + a.phase)) * 0.012 : 0
+        let near = (a.lane - 0.7) / 0.25      // a little bigger further down, like it's closer
+        let size: CGFloat = w * CGFloat(0.13 + 0.035 * min(1, max(0, near)))
+        let x: CGFloat = w * CGFloat(a.x)
+        let y: CGFloat = h * CGFloat(a.lane - hop)
+        return ZStack {
+            CharacterPicture(image: town.image(s))
+                .frame(width: size, height: size)
+                .scaleEffect(x: CGFloat(a.facing) * -1, y: 1)
+                .position(x: x, y: y)
+            if a.state != .walk {
+                Text(a.name.capitalized)
+                    .font(.system(size: max(8, w * 0.022), weight: .bold, design: .rounded))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.white.opacity(0.85)))
+                    .foregroundStyle(Color.black.opacity(0.7))
+                    .position(x: x, y: y + size * 0.55)
+            }
+            if !a.line.isEmpty {
+                SpeechBubble(text: a.line, size: max(9, w * 0.028))
+                    .position(x: min(w * 0.78, max(w * 0.22, x)), y: y - size * 0.95)
+            }
+        }
     }
 
     private func walkersLayer(_ w: CGFloat, _ h: CGFloat) -> some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / 24)) { tl in
+            let now = tl.date.timeIntervalSinceReferenceDate
+            let singles = Array(town.suitors.prefix(6))
+            let _ = sim.sync(singles, now: now)
+            let _ = sim.step(now: now)
             ZStack {
-                ForEach(0..<walkers.count, id: \.self) { i in
-                    walker(i, walkers[i], tl.date.timeIntervalSinceReferenceDate, w, h)
+                ForEach(sim.actors.indices.sorted(by: { sim.actors[$0].lane < sim.actors[$1].lane }), id: \.self) { i in
+                    if i < singles.count { walker(sim.actors[i], singles[i], now, w, h) }
                 }
             }
         }

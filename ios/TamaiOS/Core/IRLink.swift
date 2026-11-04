@@ -446,7 +446,7 @@ final class IRLink {
                         emu.note("infrared link: pressed B to start (try \(pressTries))" + (pressTries == 1 || pressTries == 4 ? ", screen:\n" + (emu.withCore { tinyScreen($0) } ?? "") : ""))
                     }
                 } else { autoB = true }
-                if pressTries >= 8 { autoB = true }
+                if pressTries >= 14 { autoB = true }
             }
             // frames from the visitor go to the toy you're playing, and back; your toy's core is
             // locked once per pass (not per frame) so this doesn't get in the way of its own loop
@@ -475,7 +475,8 @@ final class IRLink {
                 if f.count == 2 && f[1] == 0x53 { sawDisc = true }
                 bytes += f.count; trace.append("you→visitor \(f.count)B " + f.prefix(6).map { String(format: "%02x", $0) }.joined())
             }
-            if mode == 3, toYou.contains(where: { $0.first == 0xFF }) || toVisitor.contains(where: { $0.first == 0xFF }) { autoB = true }
+            // the real connection is under way once the toy that has to press B has started its discovery
+            if mode == 3, (inviteScan ? toYou : toVisitor).contains(where: { $0.first == 0xFF }) { autoB = true }
             let moved = !toYou.isEmpty || !toVisitor.isEmpty
             if mode != 3 && moved { autoB = true }      // PLAYDATE / GIFT / MARRY: the exchange is under way
             if moved { sawTraffic = true; lastTraffic = CACurrentMediaTime() }

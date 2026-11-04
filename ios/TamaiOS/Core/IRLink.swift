@@ -97,12 +97,10 @@ final class IRLink {
             emu.linkFreezeUntil = 0
             starting = false
             cooldownUntil = now + 8
-            emu.say("Choose INVITE. The other Tama will visit for you.", seconds: 6)
-            for i in 0..<3 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4 + Double(i) * 0.9) {
-                    emu.press(.c)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
-                }
+            // a single C goes back to the INVITE / VISIT list, so it looks as if the button did nothing
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                emu.press(.c)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
             }
             return
         }
@@ -423,6 +421,8 @@ final class IRLink {
         var nextB = mode == 3 ? 3.8 : 1.2
         var nextWatch = 0.0
         var pressTries = 0
+        var shownP = false
+        var pn = 0
         while true {
             let now = CACurrentMediaTime()
             let dt = min(now - last, 0.1)
@@ -439,8 +439,10 @@ final class IRLink {
                     for (i, c) in px.enumerated() { sum = sum &+ UInt64(c & 0xFFFFFF) &* UInt64(i % 251 + 1) }
                     return String(sum % 100000) + (IRLink.waiting(h) ? " waiting" : " not-waiting")
                 } ?? "?"
+                pn += 1
                 let ex = emu.coreText { tg_status($0, $1, $2) }?.split(separator: "\n").first(where: { $0.hasPrefix("executed") || $0.hasPrefix("game_time") }).map(String.init) ?? "?"
-                emu.note("infrared link: t+\(Int((now - began) * 10) / 10) s screen \(sig), frames \(trace.count), B tries \(pressTries), loop ticks \(emu.stats.ticks), \(ex), frozen \(emu.linkFreezeUntil > now)")
+                emu.note("infrared link: t+\(Int((now - began) * 10) / 10) s screen \(sig), frames \(trace.count), B tries \(pressTries), loop ticks \(emu.stats.ticks), \(ex), frozen \(emu.linkFreezeUntil > now), partner waiting \(IRLink.waiting(p)) asleep \(tg_is_asleep(p))" + (pn == 1 || (now - began > 8 && !shownP) ? "\npartner screen:\n" + tinyScreen(p) : ""))
+                if now - began > 8 { shownP = true }
             }
             if !autoB {
                 // press B now and then until the real connection (infrared discovery frames) is under way; a B

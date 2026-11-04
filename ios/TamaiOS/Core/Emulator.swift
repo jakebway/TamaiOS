@@ -230,7 +230,6 @@ final class Emulator: ObservableObject {
         for (k, v) in Prefs.coreParams { _ = withCore { h in k.withCString { tg_set_param(h, $0, v) } } }
         let status = coreText { tg_status($0, $1, $2) } ?? ""
         note("booted \(toy.id): \(status.split(separator: "\n").first ?? "")")
-        if elapsed > 60 { say("Welcome back! \(describeDuration(elapsed)) passed.") }
         DispatchQueue.main.async {
             for line in Prefs.autorun { _ = Console.shared.run(line, emu: self) }
         }
@@ -407,7 +406,6 @@ final class Emulator: ObservableObject {
                 if tg_sync_clock(h, w) == 1 {
                     discardAudio(h)
                     note("clock matched to selected time mode (was off by \(Int(off)) s)")
-                    say(DaytimeClock.enabled(currentID) ? "Daytime Mode on. ☀️" : "Clock synced. 🕒")
                 }
             }
             if dt > lp.gap {
@@ -475,7 +473,6 @@ final class Emulator: ObservableObject {
             if flags & 2 != 0 { careCall() }
             if flags & 16 != 0 {
                 note("clock synced to selected time mode")
-                if !syncAnnounced { syncAnnounced = true; say(DaytimeClock.enabled(currentID) ? "Daytime Mode on. ☀️" : "Clock synced. 🕒") }
             }
             if code != 0 && code != lastCode { report(code) }
             lastCode = code
@@ -706,7 +703,6 @@ final class Emulator: ObservableObject {
             let away = backgroundAt.map { Date().timeIntervalSince($0) } ?? 0
             if away > 30 {
                 withCore { h in tg_advance_clock(h, away); discardAudio(h) }
-                say("Welcome back! \(describeDuration(away)) passed.")
             } else {
                 withCore { tg_wake($0) }
             }

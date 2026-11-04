@@ -347,11 +347,7 @@ final class AppLink: ObservableObject {
                             close = true
                             msg = "Delivered \(it.name)\(pts > 0 ? " and \(pts) Gotchi Points" : "")! 🎁 Watch the device."
                         } else {
-                            // nothing waiting to collect: Download only accepts gifts, so quietly go back
-                            try? link.finishItem(TamaLink.packet(op: 0x15, cmd: 0x36))
-                            emu.quietSkip(4)
-                            close = true
-                            msg = ""
+                            download = true
                         }
                     } else {
                         link.close()

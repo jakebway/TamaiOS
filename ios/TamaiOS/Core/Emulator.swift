@@ -203,7 +203,9 @@ final class Emulator: ObservableObject {
 
     func load(_ toy: Toy, completion: ((Bool) -> Void)? = nil) {
         unload()
-        DispatchQueue.main.async { self.loading = true; self.toy = toy; self.stopped = nil; self.frames.put(nil) }
+        DispatchQueue.main.async { self.loading = true; self.toy = toy; self.stopped = nil; self.dark = false; self.lastDark = false
+            // show the toy's own last picture while it wakes up (not a black screen)
+            self.frames.put(UIImage(contentsOfFile: ToyStore.lastFrameURL(toy.id).path)?.cgImage) }
         DispatchQueue.global(qos: .userInitiated).async {
             let ok = self.boot(toy)
             DispatchQueue.main.async {
@@ -616,6 +618,9 @@ final class Emulator: ObservableObject {
 
     private func saveLocked(_ h: OpaquePointer, snapshot: Bool, later: Bool = false) {
         guard let id = toyID else { return }
+        if snapshot, !linkCover, let img = frames.current(), let png = UIImage(cgImage: img).pngData() {
+            try? png.write(to: ToyStore.lastFrameURL(id), options: .atomic)
+        }
         if snapshot {
             var p: UnsafeMutablePointer<UInt8>? = nil
             var n = 0

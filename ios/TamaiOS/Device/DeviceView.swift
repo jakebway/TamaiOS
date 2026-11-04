@@ -299,13 +299,7 @@ struct DeviceView: View {
         return ZStack {
             inkLine
             LCDView(sink: emu.frames)
-            if emu.loading {
-                Color.black
-                VStack(spacing: 10) {
-                    ProgressView().tint(.white)
-                    Text("Waking up…").font(.system(.caption, design: .rounded)).foregroundStyle(.white.opacity(0.8))
-                }
-            } else if emu.dark {
+            if emu.dark {
                 Color.black
                 Text("z z z").font(.system(size: size * 0.09, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.25))

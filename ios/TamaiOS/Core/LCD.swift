@@ -12,6 +12,9 @@ final class FrameSink {
         lock.lock(); image = img; version &+= 1; lock.unlock()
     }
 
+    /// The picture on screen right now.
+    func current() -> CGImage? { lock.lock(); defer { lock.unlock() }; return image }
+
     /// The image if it changed since `seen`.
     func take(after seen: Int) -> (CGImage?, Int)? {
         lock.lock(); defer { lock.unlock() }

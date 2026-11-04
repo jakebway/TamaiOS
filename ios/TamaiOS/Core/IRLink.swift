@@ -17,6 +17,15 @@ final class IRLink {
     private var cooldownUntil = 0.0
     private var lastEnd = 0.0
 
+    /// For the console: what the link machinery is doing right now.
+    var stateText: String {
+        let n = CACurrentMediaTime()
+        func left(_ t: Double) -> String { String(format: "%.0fs", max(0, t - n)) }
+        return "active=\(active) starting=\(starting) busy=\(busy) quiet=\(left(quietUntil)) cooldown=\(left(cooldownUntil)) sinceLastEnd=\(String(format: "%.0f", n - lastEnd))s"
+    }
+    /// For the console: a small text picture of a toy's screen.
+    func picture(_ h: OpaquePointer) -> String { tinyScreen(h) }
+
     /// The device's infrared is on (its serial speed was set for infrared).
     static func waiting(_ h: OpaquePointer) -> Bool {
         var b = [UInt8](repeating: 0, count: 2)

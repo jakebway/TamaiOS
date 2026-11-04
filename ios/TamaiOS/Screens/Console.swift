@@ -68,9 +68,35 @@ final class Console: ObservableObject {
             LiveTamaName.shared.requestCheck()
             return "Scheduled a disposable-copy name check; no live menu presses. Run namelog after it finishes."
         case "diag":
-            let s = diagnostics(emu)
+            let s = diagnostics(emu, full: args.first?.lowercased() == "full")
             UIPasteboard.general.string = s
             return s + "\n(copied to clipboard — paste it into this chat)"
+
+        case "devices":
+            return devicesReport(emu)
+
+        case "screen":
+            return emu.withCore { h in
+                "waiting for infrared: \(IRLink.waiting(h))  asleep: \(tg_is_asleep(h))  radio: \(tg_radio_ready(h))\n" + IRLink.shared.picture(h)
+            } ?? noToy
+
+        case "ram":
+            return ramReport(emu) ?? noToy
+
+        case "linkstate":
+            return linkReport(emu)
+
+        case "daytime":
+            switch args.first?.lowercased() ?? "" {
+            case "on": emu.setDaytimeMode(true); return "turning Daytime Mode on for all devices"
+            case "off": emu.setDaytimeMode(false); return "turning Daytime Mode off for all devices"
+            default: return daytimeReport()
+            }
+
+        case "partner":
+            // partner <part of a device name or id> — wake that device headlessly and report its state
+            guard let q = args.first?.lowercased(), let t = AppModel.current?.toys.first(where: { $0.id.lowercased().contains(q) || $0.name.lowercased().contains(q) || $0.romName.lowercased().contains(q) }) else { return "usage: partner <name or id part>  (see devices)" }
+            return partnerReport(t)
 
         case "clear":
             DispatchQueue.main.async { self.output = "" }
@@ -343,29 +369,87 @@ final class Console: ObservableObject {
         }.joined(separator: "\n")
     }
 
-    func diagnostics(_ emu: Emulator) -> String {
+    private func daytimeReport() -> String {
+        let shift = (DaytimeClock.target() - rtcNow()) / 3600
+        return "Daytime Mode: \(DaytimeClock.enabled() ? "ON" : "off")  clock shift vs iPhone: \(String(format: "%+.1f", shift)) h  (one setting for all devices)"
+    }
+
+    private func devicesReport(_ emu: Emulator) -> String {
+        guard let model = AppModel.current else { return "no app model" }
+        var rows: [String] = []
+        for t in model.toys {
+            let st = Town.shared.state(t)
+            let active = t.id == emu.toy?.id
+            let snap = (try? FileManager.default.attributesOfItem(atPath: ToyStore.snapURL(t.id).path)) ?? [:]
+            let mod = (snap[.modificationDate] as? Date).map { "\(Int(Date().timeIntervalSince($0))) s ago" } ?? "no save"
+            let stage = active ? (emu.withCore { h -> Int in var b: UInt8 = 0; return tg_peek(h, 0xF800D8B6, &b, 1) == 1 ? Int(b) : -1 } ?? -1) : IRLink.stage(of: t)
+            rows.append("\(active ? "*" : " ") \(IRLink.tamaLabel(t, fallback: t.name)) | \(t.romName) | id \(t.id) | stage \(stage) | away \(st.away) | saved \(mod)")
+        }
+        return rows.joined(separator: "\n")
+    }
+
+    private func ramReport(_ emu: Emulator) -> String? {
+        emu.withCore { h -> String in
+            func b(_ a: UInt32) -> String { var x: UInt8 = 0; return tg_peek(h, a, &x, 1) == 1 ? String(x) : "?" }
+            return "stage \(b(0xF800D8B6))  character \(b(0xF800D8C4))  bathroom \(b(0xF800D888))  link mode \(b(0xF80178E4)) (0 playdate,1 gift,2 marry,3 travel)  gift role \(b(0xF80178BC))  travel role \(b(0xF80178C4)) (0 visit,1 invite)  clock drift \(tg_clock_drift(h)) s  asleep \(tg_is_asleep(h))"
+        }
+    }
+
+    private func linkReport(_ emu: Emulator) -> String {
+        "IRLink: \(IRLink.shared.stateText)\nemulator: linkBusy=\(emu.linkBusy) appWaiting=\(emu.appWaiting) holdForApp=\(emu.holdForApp) frozen=\(emu.linkFreezeUntil > CACurrentMediaTime()) loading=\(emu.loading) ticks=\(emu.stats.ticks)\nclock hold: \(String(format: "%.0f", max(0, Emulator.clockHoldUntil - CACurrentMediaTime()))) s"
+    }
+
+    /// Wake a saved device without touching it, and say what shape it is in (the way a link would find it).
+    private func partnerReport(_ t: Toy) -> String {
+        guard let v = Emulator.makeHandle(t).0 else { return "could not open \(t.name)" }
+        defer { tg_destroy(v) }
+        tg_set_volume(v, 0)
+        tg_wake(v)
+        for _ in 0..<60 { _ = tg_tick(v, 0.02) }
+        var st: UInt8 = 0
+        _ = tg_peek(v, 0xF800D8B6, &st, 1)
+        return "\(t.name): stage \(st)  asleep \(tg_is_asleep(v))  drift \(tg_clock_drift(v)) s  waiting-for-infrared \(IRLink.waiting(v))\n" + IRLink.shared.picture(v)
+    }
+
+    /// The firmware log without its constant main-loop chatter.
+    private func quietLog(_ emu: Emulator, _ n: Int) -> String {
+        let fw = emu.coreText { tg_log($0, $1, $2) } ?? "(none)"
+        let keep = fw.split(separator: "\n").filter { l in
+            !(l.contains("main2()") || l.contains("TamaHotel_Azukeru") || l.contains("DispYobidashi") || l.contains("SleepOutCPU") || l.contains("KekkonUp"))
+        }
+        return keep.suffix(n).joined(separator: "\n")
+    }
+
+    /// Everything useful, nothing noisy. `diag full` adds the long reference blocks.
+    func diagnostics(_ emu: Emulator, full: Bool = false) -> String {
         let info = Bundle.main.infoDictionary
         var lines = [
             "== TamaiOS diagnostics ==",
-            "app: \(info?["CFBundleShortVersionString"] ?? "?") (\(info?["CFBundleVersion"] ?? "?"))",
-            "iOS: \(UIDevice.current.systemVersion)  device: \(deviceModel())",
-            "date: \(Date())  tz: \(TimeZone.current.identifier)",
-            "device: \(emu.toy.map { "\($0.name) / \($0.romName) / \($0.id) known=\($0.known)" } ?? "none")",
-            "stopped: \(emu.stopped.map { "\($0.code)" } ?? "no")  loading: \(emu.loading)  dark: \(emu.dark)",
-            "audio running: \(emu.audio.isRunning) queued: \(emu.audio.queued) underruns: \(emu.audio.underruns)",
-            "-- params --", run("params", emu: emu),
-            "-- autorun --", run("autorun", emu: emu),
+            "app: \(info?["CFBundleShortVersionString"] ?? "?") (\(info?["CFBundleVersion"] ?? "?"))  iOS: \(UIDevice.current.systemVersion)  \(deviceModel())  tz: \(TimeZone.current.identifier)",
+            "date: \(Date())",
+            "active: \(emu.toy.map { "\($0.name) / \($0.romName) / \($0.id)" } ?? "none")  stopped: \(emu.stopped.map { "\($0.code)" } ?? "no")  loading: \(emu.loading)  dark: \(emu.dark)",
+            "-- daytime --", daytimeReport(),
+            "-- devices --", devicesReport(emu),
+            "-- link --", linkReport(emu),
+            "-- active toy --", ramReport(emu) ?? "no device",
+            run("screen", emu: emu),
             "-- perf --", run("perf", emu: emu),
-            "-- files --", run("files", emu: emu),
-            "-- care notifications --", CareAlerts.shared.diagnostics(),
-            "-- playback policy --", "foreground-audio-v1: playback allowed=\(emu.audio.foregroundPlaybackAllowed); core sound/detection unchanged",
+            "-- settings --", run("params", emu: emu),
             "-- core status --", run("status", emu: emu),
-            "-- core log (last 40) --", run("log 40", emu: emu),
-            "-- app log (last 40) --", run("applog 40", emu: emu),
-            "-- town state --", run("town", emu: emu),
-            "-- arcade performance --", ArcadeDiagnostics.shared.report(),
-            "-- connection trace --", LinkDiagnostics.shared.report(),
+            "-- firmware log (quiet, last 15) --", quietLog(emu, 15),
+            "-- app log (last 150) --", run("applog 150", emu: emu),
+            "-- town --", run("town", emu: emu),
         ]
+        let link = LinkDiagnostics.shared.report().split(separator: "\n").dropFirst(2)
+        if !link.isEmpty { lines += ["-- connection trace --"] + link.suffix(60) }
+        if full {
+            lines += ["-- files --", run("files", emu: emu),
+                      "-- autorun --", run("autorun", emu: emu),
+                      "-- care notifications --", CareAlerts.shared.diagnostics(),
+                      "-- names --", LiveTamaName.shared.diagnostics(),
+                      "-- arcade --", ArcadeDiagnostics.shared.report(),
+                      "-- firmware log (last 40, raw) --", run("log 40", emu: emu)]
+        }
         lines.append("== end ==")
         return lines.joined(separator: "\n")
     }
@@ -381,7 +465,8 @@ final class Console: ObservableObject {
     static let help = """
     Paste one command per line (# for comments). Changes persist.
     INFO
-      diag                 everything + connection/arcade trace, copied to clipboard
+      diag [full]          what matters (devices, daytime, link, screen, logs), copied to clipboard
+      devices | screen | ram | linkstate | daytime [on|off] | partner <name>
       carelog | namelog | namecheck   notification and disposable-reader diagnostics
       status | perf | params | files
       log [n]  applog [n]  firmware / app log

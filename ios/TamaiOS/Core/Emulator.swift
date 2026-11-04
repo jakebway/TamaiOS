@@ -230,6 +230,17 @@ final class Emulator: ObservableObject {
         for (k, v) in Prefs.coreParams { _ = withCore { h in k.withCString { tg_set_param(h, $0, v) } } }
         let status = coreText { tg_status($0, $1, $2) } ?? ""
         note("booted \(toy.id): \(status.split(separator: "\n").first ?? "")")
+        // Daytime Mode applies to every device: put this one on the selected clock as soon as it opens,
+        // not only after a few quiet seconds (switching Tamas quickly used to skip it)
+        _ = withCore { h in
+            let target = DaytimeClock.target(toy.id)
+            tg_set_wall_clock(h, target)
+            let off = tg_clock_drift(h)
+            if abs(off) > 60, tg_sync_clock(h, target) == 1 {
+                discardAudio(h)
+                self.note("clock matched to selected time mode at start (was off by \(Int(off)) s)")
+            }
+        }
         DispatchQueue.main.async {
             for line in Prefs.autorun { _ = Console.shared.run(line, emu: self) }
         }

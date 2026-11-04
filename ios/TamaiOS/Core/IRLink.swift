@@ -73,6 +73,18 @@ final class IRLink {
             return
         }
         guard now >= cooldownUntil, !emu.holdForApp, !emu.appWaiting else { return }
+        // Connection › DOWNLOAD (middle entry of the Connection list) is only used to receive gifts, so it
+        // quietly goes back, as if the button did nothing. Connection › APP is a different entry and untouched.
+        var menuCursor: UInt8 = 0
+        if tg_peek(h, 0xF80178FC, &menuCursor, 1) == 1, menuCursor == 1 {
+            cooldownUntil = now + 8
+            emu.muteUntil = CACurrentMediaTime() + 1.5
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                emu.press(.c)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
+            }
+            return
+        }
         guard let model = AppModel.current, let me = emu.toy else { return }
         let others = model.toys.filter { $0.id != me.id && !Town.shared.state($0).away }.sorted(by: { a, b in
             let last = Prefs.d.string(forKey: "ir.lastPartner")

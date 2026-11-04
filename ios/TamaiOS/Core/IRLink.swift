@@ -343,30 +343,16 @@ final class IRLink {
                 tg_set_never_sleep(v, 0)
                 tg_wake(v)
                 tickAll(v, 25, audio)
-                for (i, k) in (head + tail).enumerated() {
+                for k in head + tail {
                     tg_press(v, k.rawValue, CACurrentMediaTime())
                     tickAll(v, 8, audio)
                     tg_release(v, k.rawValue)
                     tickAll(v, 22, audio)
-                    if mode == 3 && i == head.count {
-                        // the VISIT / INVITE list remembers where its cursor was last time: put it on the entry
-                        // this device needs (the opposite of what you chose) before choosing
-                        tickAll(v, 60, audio)
-                        let wantRow = inviteScan ? 1 : 0
-                        // only act when the picture of the list and the toy's own VISIT/INVITE value agree
-                        var rb: UInt8 = 9
-                        let ramRow = tg_peek(v, 0xF80178C4, &rb, 1) == 1 && rb <= 1 ? Int(rb) : -1
-                        if let row = cursorRow(v), row != wantRow, ramRow == row {
-                            emu.note("infrared link: \(partner.name) had its cursor on the wrong entry (row \(row), value \(ramRow)); moving it")
-                            tg_press(v, TGKey.a.rawValue, CACurrentMediaTime()); tickAll(v, 8, audio)
-                            tg_release(v, TGKey.a.rawValue); tickAll(v, 22, audio)
-                        }
-                    }
                 }
                 if inviteScan { tickAll(v, 70, audio) }      // the CONNECTING screen takes a moment
                 tickAll(v, 25, audio)
                 if IRLink.waiting(v) { return true }
-                emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })")
+                emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })" + ", asleep=\(tg_is_asleep(v)), screen:\n" + tinyScreen(v))
             }
             return false
         }

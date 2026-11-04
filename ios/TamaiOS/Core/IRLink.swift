@@ -361,6 +361,8 @@ final class IRLink {
         var pClock = 1.9                  // the invited partner has already been on CONNECTING this long
         var autoB = !(mode == 3)
         var myClock = 0.0
+        var nextB = 3.8
+        var pressTries = 0
         while true {
             let now = CACurrentMediaTime()
             let dt = min(now - last, 0.1)
@@ -369,22 +371,25 @@ final class IRLink {
             // can't time out while you get ready to press B
             if dt > 0 && (sawTraffic || inviteScan) { _ = tg_tick(p, dt); _ = tg_take_audio(p, audio, 44100) }
             if mode == 3 && !autoB {
+                // press B now and then until the real connection (infrared discovery frames) is under way; a B
+                // on the CONNECTING screen itself does nothing, so extra presses are harmless
                 if inviteScan {
                     pClock += dt
-                    if pClock > 3.8 {
-                        autoB = true
-                        tg_press(p, TGKey.b.rawValue, CACurrentMediaTime()); tickAll(p, 8, audio); tg_release(p, TGKey.b.rawValue)
-                        emu.note("infrared link: partner pressed B to start the trip")
+                    if pClock > nextB {
+                        nextB = pClock + 1.5; pressTries += 1
+                        tg_press(p, TGKey.b.rawValue, CACurrentMediaTime()); tickAll(p, 15, audio); tg_release(p, TGKey.b.rawValue)
+                        emu.note("infrared link: partner pressed B to start the trip (try \(pressTries))")
                     }
                 } else if role == 1 {
                     myClock += dt
-                    if myClock > 3.8 {
-                        autoB = true
+                    if myClock > nextB {
+                        nextB = myClock + 1.5; pressTries += 1
                         emu.press(.b)
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) { emu.release(.b) }
-                        emu.note("infrared link: pressed B to start the trip")
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { emu.release(.b) }
+                        emu.note("infrared link: pressed B to start the trip (try \(pressTries))")
                     }
                 } else { autoB = true }
+                if pressTries >= 8 { autoB = true }
             }
             // frames from the visitor go to the toy you're playing, and back; your toy's core is
             // locked once per pass (not per frame) so this doesn't get in the way of its own loop
@@ -413,6 +418,7 @@ final class IRLink {
                 if f.count == 2 && f[1] == 0x53 { sawDisc = true }
                 bytes += f.count; trace.append("you→visitor \(f.count)B " + f.prefix(6).map { String(format: "%02x", $0) }.joined())
             }
+            if mode == 3, toYou.contains(where: { $0.first == 0xFF }) || toVisitor.contains(where: { $0.first == 0xFF }) { autoB = true }
             let moved = !toYou.isEmpty || !toVisitor.isEmpty
             if moved { sawTraffic = true; lastTraffic = CACurrentMediaTime() }
             // is it over? Once data has flowed, only silence ends it (the infrared speed changes

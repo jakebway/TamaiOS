@@ -47,6 +47,9 @@ final class Emulator: ObservableObject {
     let frames = FrameSink()
     @Published var dark = false
     @Published var toast: String?
+    /// The screen is hidden behind "Connecting…" while a link is set up (the menu would otherwise be seen going back and forth).
+    @Published var linkCover = false
+    func setLinkCover(_ on: Bool) { DispatchQueue.main.async { if self.linkCover != on { self.linkCover = on } } }
     @Published var stopped: StopInfo?
     @Published var loading = false
     @Published var toy: Toy?

@@ -91,6 +91,7 @@ final class IRLink {
             var tb: UInt8 = 9
             role = tg_peek(h, 0xF80178C4, &tb, 1) == 1 && tb <= 1 ? Int(tb) : -1
         }
+        if mode == 3 && role == 1 { emu.setLinkCover(true) }
         if mode == 3 && role == 0 {
             // Only the Tama you play can INVITE; the other one visits by itself. Choosing VISIT here would leave
             // this Tama "out", so back out of it and say what to do.
@@ -107,6 +108,7 @@ final class IRLink {
         let begin: (Toy) -> Void = { [self] partner in
             let t = Thread { [self] in
                 run(emu: emu, me: me, partner: partner, mode: mode, role: role)
+                emu.setLinkCover(false)
                 emu.linkFreezeUntil = 0
                 starting = false
                 cooldownUntil = max(cooldownUntil, CACurrentMediaTime() + 1.5)
@@ -119,6 +121,7 @@ final class IRLink {
         let choose: ([Toy], [String: String]) -> Void = { _, blocked in
             DispatchQueue.main.async {
                 model.irChoice = IRChoice(candidates: others, blocked: blocked, pick: begin, cancel: { [self] in
+                    emu.setLinkCover(false)
                     emu.linkFreezeUntil = 0
                     starting = false
                     cooldownUntil = CACurrentMediaTime() + 20
@@ -133,6 +136,7 @@ final class IRLink {
                 let eligible = others.filter { blocked[$0.id] == nil }
                 if eligible.isEmpty {
                     cooldownUntil = CACurrentMediaTime() + 30
+                    emu.setLinkCover(false)
                     emu.linkFreezeUntil = 0
                     starting = false
                     emu.say("No other Tama can travel yet.", seconds: 7)
@@ -426,6 +430,7 @@ final class IRLink {
             wait(0.4)
             _ = emu.withCore { tg_release($0, TGKey.b.rawValue) }
             emu.note("infrared link: restarted the invitation with the link ready")
+            emu.setLinkCover(false)
         }
         var buf = [UInt8](repeating: 0, count: 1024)
         var last = CACurrentMediaTime()

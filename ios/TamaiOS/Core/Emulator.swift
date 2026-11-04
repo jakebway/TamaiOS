@@ -117,6 +117,27 @@ final class Emulator: ObservableObject {
                 tg_set_wall_clock(h, target)
                 return tg_sync_clock(h, target)
             } ?? 0
+            // the other devices change too, without having to be opened: each one is woken quietly from its
+            // save, put on the new clock and saved again
+            for other in ToyStore.list() where other.id != toy.id {
+                guard let v = Emulator.makeHandle(other).0 else { continue }
+                let audio = UnsafeMutablePointer<Int16>.allocate(capacity: 44100)
+                tg_set_volume(v, 0)
+                let t = DaytimeClock.target(other.id)
+                tg_set_wall_clock(v, t)
+                for _ in 0..<4 {
+                    if tg_sync_clock(v, t) == 1 { break }
+                    for _ in 0..<25 { _ = tg_tick(v, 0.02); _ = tg_take_audio(v, audio, 44100) }
+                }
+                var out: UnsafeMutablePointer<UInt8>? = nil
+                var n = 0
+                if tg_snapshot(v, &out, &n) == 1, let out {
+                    try? Data(bytes: out, count: n).write(to: ToyStore.snapURL(other.id), options: .atomic)
+                    tg_free(out, n)
+                }
+                audio.deallocate()
+                tg_destroy(v)
+            }
             DispatchQueue.main.async {
                 self.clockChanging = false
                 self.saveNow()

@@ -31,46 +31,75 @@ final class LiveTamaName: ObservableObject {
         "wondergarden": 0x1c12fc, "magic": 0x1bd9bc, "fairy": 0x1bbf78]
     /// Reads the Tama's name straight from firmware memory: the key at F800D864 indexes the firmware's own name table.
     /// Returns nil for anything unexpected so the screen reader stays the fallback.
+    enum Direct: Equatable { case name(String), unnamed, unknown }
     static func directName(core h: OpaquePointer, deviceID: String) -> String? {
-        guard let base = tableBase.first(where: { deviceID.contains($0.key) })?.value else { return nil }
-        var st: UInt8 = 0
-        guard tg_peek(h, 0xF800D8B6, &st, 1) == 1, st >= 1 else { return nil }
-        // A name you typed (Tamas born after a marriage): 8 glyphs at F800DADE; the toy shows it with "tchi".
-        var cn = [UInt8](repeating: 0, count: 16)
-        guard tg_peek(h, 0xF800DADE, &cn, 16) == 1 else { return nil }
-        if cn[0] != 0 || cn[1] != 0 {
+        if case .name(let n) = direct(core: h, deviceID: deviceID) { return n }
+        return nil
+    }
+    /// What the firmware says right now. Generation (F800D89E) 1 = built-in Tama (name table), 2+ = a name you typed (F800DADE).
+    static func direct(core h: OpaquePointer, deviceID: String) -> Direct {
+        guard let base = tableBase.first(where: { deviceID.contains($0.key) })?.value else { return .unknown }
+        var st: UInt8 = 0, gen: UInt8 = 0
+        guard tg_peek(h, 0xF800D8B6, &st, 1) == 1, tg_peek(h, 0xF800D89E, &gen, 1) == 1 else { return .unknown }
+        if st < 1 { return .unknown }                       // still an egg
+        if gen >= 2 {
+            var cn = [UInt8](repeating: 0, count: 16)
+            guard tg_peek(h, 0xF800DADE, &cn, 16) == 1 else { return .unknown }
+            if cn[0] == 0 && cn[1] == 0 { return .unnamed }  // hatched but not named yet
             var typed = ""
             for i in stride(from: 0, to: 16, by: 2) {
                 let c = Int(cn[i]) << 8 | Int(cn[i + 1])
                 if c == 0 { break }
                 if c == 0x86c { typed += " "; continue }
-                guard (0x8e0...0x8f9).contains(c), let u = UnicodeScalar(c - 0x87f) else { return nil }
+                guard (0x8e0...0x8f9).contains(c), let u = UnicodeScalar(c - 0x87f) else { return .unknown }
                 typed.unicodeScalars.append(u)
             }
             typed = typed.trimmingCharacters(in: .whitespaces)
-            guard !typed.isEmpty else { return nil }
-            return typed.prefix(1).uppercased() + typed.dropFirst() + "tchi"
+            return typed.isEmpty ? .unnamed : .name(typed.prefix(1).uppercased() + typed.dropFirst() + "tchi")
         }
         var kb = [UInt8](repeating: 0, count: 2)
-        guard tg_peek(h, 0xF800D864, &kb, 2) == 1 else { return nil }
+        guard tg_peek(h, 0xF800D864, &kb, 2) == 1 else { return .unknown }
         let key = UInt32(kb[0]) | UInt32(kb[1]) << 8
-        guard key < 200 else { return nil }
+        guard key < 200 else { return .unknown }
         var ent = [UInt8](repeating: 0, count: 8)
-        guard tg_peek(h, 0x2000_0000 + base + key * 8, &ent, 8) == 1 else { return nil }
+        guard tg_peek(h, 0x2000_0000 + base + key * 8, &ent, 8) == 1 else { return .unknown }
         let k = UInt32(ent[0]) | UInt32(ent[1]) << 8
         let ptr = UInt32(ent[4]) | UInt32(ent[5]) << 8 | UInt32(ent[6]) << 16 | UInt32(ent[7]) << 24
-        guard k == key, ptr >= 0x2000_0000, ptr < 0x2100_0000 else { return nil }
+        guard k == key, ptr >= 0x2000_0000, ptr < 0x2100_0000 else { return .unknown }
         var buf = [UInt8](repeating: 0, count: 48)
-        guard tg_peek(h, ptr, &buf, 48) == 1 else { return nil }
+        guard tg_peek(h, ptr, &buf, 48) == 1 else { return .unknown }
         var out = ""
         for i in stride(from: 0, to: 46, by: 2) {
             let c = Int(buf[i]) << 8 | Int(buf[i + 1])
             if c == 0 { break }
-            guard (0x8e0...0x8f9).contains(c), let u = UnicodeScalar(c - 0x87f) else { return nil }
+            guard (0x8e0...0x8f9).contains(c), let u = UnicodeScalar(c - 0x87f) else { return .unknown }
             out.unicodeScalars.append(u)
         }
-        return out.count >= 3 ? out.prefix(1).uppercased() + out.dropFirst() : nil
+        return out.count >= 3 ? .name(out.prefix(1).uppercased() + out.dropFirst()) : .unknown
     }
+    /// Live feed from the emulator loop (several times a second): the name always follows the firmware, never a stale one.
+    func applyDirect(_ d: Direct, deviceID: String) {
+        guard deviceID == self.deviceID || self.deviceID.isEmpty else { return }
+        switch d {
+        case .name(let n):
+            if directName != n || probeName != n {
+                directName = n; probeName = n
+                if !deviceID.isEmpty { Prefs.d.set(n, forKey: "tamaName.v1." + deviceID) }
+                if let key = identity { Prefs.d.set(n, forKey: "notification.probeName.v1." + key) }
+                resolve()
+            }
+        case .unnamed:
+            if directName != "" || !probeName.isEmpty {
+                directName = ""; probeName = ""
+                if !deviceID.isEmpty { Prefs.d.removeObject(forKey: "tamaName.v1." + deviceID) }
+                if let key = identity { Prefs.d.removeObject(forKey: "notification.probeName.v1." + key) }
+                resolve()
+            }
+        case .unknown:
+            directName = nil
+        }
+    }
+    private var directName: String? = nil
     var verifiedName: String? { probeName.isEmpty ? nil : probeName }
     private init() {
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -164,7 +193,8 @@ final class LiveTamaName: ObservableObject {
     }
     private func resolve() {
         let next: String, detail: String
-        if !probeName.isEmpty { next = probeName; detail = "Two agreeing profile OCR reads on a disposable emulator copy" }
+        if directName == "" { next = "Your Tama"; detail = "Waiting for you to name this Tama" }
+        else if !probeName.isEmpty { next = probeName; detail = directName != nil ? "Read live from firmware memory" : "Two agreeing profile OCR reads on a disposable emulator copy" }
         else if let observed = LiveNamePolicy.observedName(deviceID: deviceID, stage: stage, character: character) {
             next = observed; detail = "Observed baby mapping fallback while automatic profile verification is pending"
         } else { next = "Your Tama"; detail = "Waiting for a verified profile name; no owner or old-visitor substitution" }

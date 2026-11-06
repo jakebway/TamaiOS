@@ -382,6 +382,7 @@ final class Emulator: ObservableObject {
         var lastPublish = 0.0
         var asleep = false
         var nextCarePoll = last
+        var nextNamePoll = last
         var nextRadio = last
         var radioReady = false
         while !stopFlag {
@@ -515,6 +516,12 @@ final class Emulator: ObservableObject {
             }
             lock.unlock()
 
+            if now >= nextNamePoll, let toy = toyID {
+                nextNamePoll = now + 0.25
+                if let d = withCore({ LiveTamaName.direct(core: $0, deviceID: toy) }) {
+                    DispatchQueue.main.async { LiveTamaName.shared.applyDirect(d, deviceID: toy) }
+                }
+            }
             if now >= nextCarePoll {
                 nextCarePoll = now + 1
                 let sample = careSample(), bathroomRaw = bathroomSample()

@@ -26,6 +26,33 @@ final class LiveTamaName: ObservableObject {
         let n = Prefs.d.string(forKey: "tamaName.v1." + deviceID) ?? ""
         return n.isEmpty ? nil : n
     }
+    /// Name table location inside each firmware's flash (file offset; flash maps at 0x20000000).
+    private static let tableBase: [String: UInt32] = [
+        "wondergarden": 0x1c12fc, "magic": 0x1bd9bc, "fairy": 0x1bbf78]
+    /// Reads the Tama's name straight from firmware memory: the key at F800D864 indexes the firmware's own name table.
+    /// Returns nil for anything unexpected so the screen reader stays the fallback.
+    static func directName(core h: OpaquePointer, deviceID: String) -> String? {
+        guard let base = tableBase.first(where: { deviceID.contains($0.key) })?.value else { return nil }
+        var kb = [UInt8](repeating: 0, count: 2)
+        guard tg_peek(h, 0xF800D864, &kb, 2) == 1 else { return nil }
+        let key = UInt32(kb[0]) | UInt32(kb[1]) << 8
+        guard key < 200 else { return nil }
+        var ent = [UInt8](repeating: 0, count: 8)
+        guard tg_peek(h, 0x2000_0000 + base + key * 8, &ent, 8) == 1 else { return nil }
+        let k = UInt32(ent[0]) | UInt32(ent[1]) << 8
+        let ptr = UInt32(ent[4]) | UInt32(ent[5]) << 8 | UInt32(ent[6]) << 16 | UInt32(ent[7]) << 24
+        guard k == key, ptr >= 0x2000_0000, ptr < 0x2100_0000 else { return nil }
+        var buf = [UInt8](repeating: 0, count: 48)
+        guard tg_peek(h, ptr, &buf, 48) == 1 else { return nil }
+        var out = ""
+        for i in stride(from: 0, to: 46, by: 2) {
+            let c = Int(buf[i]) << 8 | Int(buf[i + 1])
+            if c == 0 { break }
+            guard (0x8e0...0x8f9).contains(c), let u = UnicodeScalar(c - 0x87f) else { return nil }
+            out.unicodeScalars.append(u)
+        }
+        return out.count >= 3 ? out.prefix(1).uppercased() + out.dropFirst() : nil
+    }
     var verifiedName: String? { probeName.isEmpty ? nil : probeName }
     private init() {
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -71,6 +98,18 @@ final class LiveTamaName: ObservableObject {
             self.scheduled = nil
             guard let emu = AppModel.current?.emu, emu.toy?.id == self.deviceID, !emu.loading else {
                 self.probeStatus = "Waiting for emulator availability"; self.schedule(key: key, delay: 5); return
+            }
+            let id = self.deviceID
+            if let direct = emu.withCore({ LiveTamaName.directName(core: $0, deviceID: id) }) ?? nil {
+                if direct != self.probeName {
+                    self.probeName = direct
+                    Prefs.d.set(direct, forKey: "notification.probeName.v1." + key)
+                    emu.note("name read from firmware memory: " + direct)
+                }
+                self.probeStatus = "Name read directly from firmware memory"
+                self.nextCheck[key] = ProcessInfo.processInfo.systemUptime + 60
+                self.resolve()
+                return
             }
             if self.running || emu.linkBusy || IRLink.shared.busy || emu.holdForApp || emu.appWaiting || ArcadeDiagnostics.shared.report().contains("state: active") {
                 self.probeStatus = "Deferred during a probe, connection, or arcade round"

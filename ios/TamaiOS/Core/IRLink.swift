@@ -415,7 +415,16 @@ final class IRLink {
                 }
                 if inviteScan { tickAll(v, 70, audio) }      // the CONNECTING screen takes a moment
                 tickAll(v, 25, audio)
-                if IRLink.waiting(v) { return true }
+                if IRLink.waiting(v) {
+                    if mode == 1 && role >= 0 {
+                        // GIVE on one side needs RECEIVE on the other. A menu cursor remembered from an earlier use can
+                        // make the same key presses land on the wrong entry, so check what the partner really chose.
+                        let pr = IRLink.role(v, deviceID: partner.id)
+                        emu.note("infrared link: gift roles: you=\(role == 0 ? "GIVE" : "RECEIVE") partner=\(pr == 0 ? "GIVE" : (pr == 1 ? "RECEIVE" : "?"))")
+                        if pr == role { continue }
+                    }
+                    return true
+                }
                 emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })" + ", asleep=\(tg_is_asleep(v)), screen:\n" + tinyScreen(v))
             }
             return false

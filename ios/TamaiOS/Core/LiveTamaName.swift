@@ -33,6 +33,24 @@ final class LiveTamaName: ObservableObject {
     /// Returns nil for anything unexpected so the screen reader stays the fallback.
     static func directName(core h: OpaquePointer, deviceID: String) -> String? {
         guard let base = tableBase.first(where: { deviceID.contains($0.key) })?.value else { return nil }
+        var st: UInt8 = 0
+        guard tg_peek(h, 0xF800D8B6, &st, 1) == 1, st >= 1 else { return nil }
+        // A name you typed (Tamas born after a marriage): 8 glyphs at F800DADE; the toy shows it with "tchi".
+        var cn = [UInt8](repeating: 0, count: 16)
+        guard tg_peek(h, 0xF800DADE, &cn, 16) == 1 else { return nil }
+        if cn[0] != 0 || cn[1] != 0 {
+            var typed = ""
+            for i in stride(from: 0, to: 16, by: 2) {
+                let c = Int(cn[i]) << 8 | Int(cn[i + 1])
+                if c == 0 { break }
+                if c == 0x86c { typed += " "; continue }
+                guard (0x8e0...0x8f9).contains(c), let u = UnicodeScalar(c - 0x87f) else { return nil }
+                typed.unicodeScalars.append(u)
+            }
+            typed = typed.trimmingCharacters(in: .whitespaces)
+            guard !typed.isEmpty else { return nil }
+            return typed.prefix(1).uppercased() + typed.dropFirst() + "tchi"
+        }
         var kb = [UInt8](repeating: 0, count: 2)
         guard tg_peek(h, 0xF800D864, &kb, 2) == 1 else { return nil }
         let key = UInt32(kb[0]) | UInt32(kb[1]) << 8

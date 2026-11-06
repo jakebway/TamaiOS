@@ -192,8 +192,8 @@ final class Emulator: ObservableObject {
     // MARK: core access
 
     /// Run `body` with the core locked. Returns nil if no toy is running.
-    @discardableResult
     var lastLookSig = ""
+    @discardableResult
     func withCore<T>(_ body: (OpaquePointer) -> T) -> T? {
         lock.lock(); defer { lock.unlock() }
         guard let h = handle else { return nil }

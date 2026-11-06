@@ -31,6 +31,24 @@ final class LiveTamaName: ObservableObject {
         "wondergarden": 0x1c12fc, "magic": 0x1bd9bc, "fairy": 0x1bbf78]
     /// Reads the Tama's name straight from firmware memory: the key at F800D864 indexes the firmware's own name table.
     /// Returns nil for anything unexpected so the screen reader stays the fallback.
+    /// The profile picture decoded from firmware data (built-in Tamas). Transparent PNG, trimmed to the picture.
+    static func spritePNG(core h: OpaquePointer, deviceID: String) -> Data? {
+        let rom = deviceID.contains("wondergarden") ? 0 : deviceID.contains("magic") ? 1 : deviceID.contains("fairy") ? 2 : -1
+        guard rom >= 0 else { return nil }
+        var px = [UInt32](repeating: 0, count: 64 * 64)
+        let r = tg_profile_sprite(h, Int32(rom), &px)
+        guard r > 0 else { return nil }
+        let w = Int(r >> 8), hh = Int(r & 255)
+        var rows = [UInt32]()
+        for y in 0..<hh { rows += px[(y * 64)..<(y * 64 + w)] }
+        let data = rows.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let prov = CGDataProvider(data: data as CFData),
+              let img = CGImage(width: w, height: hh, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                                provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
+        return UIImage(cgImage: img).pngData()
+    }
     enum Direct: Equatable { case name(String), unnamed, unknown }
     static func directName(core h: OpaquePointer, deviceID: String) -> String? {
         if case .name(let n) = direct(core: h, deviceID: deviceID) { return n }

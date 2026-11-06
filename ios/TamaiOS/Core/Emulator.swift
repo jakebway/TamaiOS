@@ -383,6 +383,7 @@ final class Emulator: ObservableObject {
         var asleep = false
         var nextCarePoll = last
         var nextNamePoll = last
+        var lastSpritePNG: Data? = nil
         var nextRadio = last
         var radioReady = false
         while !stopFlag {
@@ -520,6 +521,11 @@ final class Emulator: ObservableObject {
                 nextNamePoll = now + 0.25
                 if let d = withCore({ LiveTamaName.direct(core: $0, deviceID: toy) }) {
                     DispatchQueue.main.async { LiveTamaName.shared.applyDirect(d, deviceID: toy) }
+                }
+                if let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil, png != lastSpritePNG {
+                    lastSpritePNG = png
+                    try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
+                    DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                 }
             }
             if now >= nextCarePoll {

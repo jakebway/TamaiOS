@@ -1631,3 +1631,57 @@ pub extern "C" fn tg_ir_deliver(e: *mut Emu, data: *const u8, n: usize) {
         }
     })
 }
+
+fn pal16<B: Bus>(s: &mut B, a: u32) -> Vec<u16> {
+    let n = u32::from(s.read8(a + 2));
+    (0..n).map(|i| u16::from(s.read8(a + 6 + 2 * i)) << 8 | u16::from(s.read8(a + 7 + 2 * i))).collect()
+}
+
+/// The profile picture of the current built-in Tama, decoded straight from firmware data.
+/// rom: 0 Wonder Garden, 1 Magic, 2 Fairy. `out` holds 64*64 ARGB pixels. Returns (w<<8)|h, or 0 when not a built-in Tama.
+#[no_mangle]
+pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32 {
+    if e.is_null() || out.is_null() { return 0; }
+    // (character table, colour strips table, grey reference palette image)
+    const T: [(u32, u32, u32); 3] = [
+        (0x201a_e1cc, 0x201d_44cc, 0x2038_5e78),
+        (0x201a_aadc, 0x201c_f33c, 0x2037_ac68),
+        (0x201a_909c, 0x201c_d8f8, 0x2037_a744),
+    ];
+    let Some(&(chars, strips, refimg)) = T.get(rom as usize) else { return 0 };
+    with(e, |e| {
+        let s = &mut e.m.sys;
+        if s.read8(0xF800_D89E) != 1 || s.read8(0xF800_D8B6) < 1 { return 0; }
+        let key = u32::from(s.read8(0xF800_D864)) | u32::from(s.read8(0xF800_D865)) << 8;
+        if key >= 200 { return 0; }
+        let cidx = u32::from(s.read8(0xF800_BF68));
+        if cidx > 11 { return 0; }
+        let img = s.read32(chars + key * 14 * 4);
+        if !(0x2020_0000..0x2080_0000).contains(&img) { return 0; }
+        let reference = pal16(s, refimg);
+        let strip_addr = s.read32(strips + (6 + cidx) * 4);
+        let strip = pal16(s, strip_addr);
+        let (w, h) = (u32::from(s.read8(img)), u32::from(s.read8(img + 1)));
+        if w == 0 || h == 0 || w > 64 || h > 64 { return 0; }
+        let mut colors = pal16(s, img);
+        for c in colors.iter_mut() {
+            if let Some(p) = reference.iter().skip(1).take(8).position(|r| r == c) {
+                if let Some(&n) = strip.get(p + 1) { *c = n; }
+            }
+        }
+        let data = img + 6 + 2 * colors.len() as u32;
+        let o = unsafe { std::slice::from_raw_parts_mut(out, 64 * 64) };
+        for p in o.iter_mut() { *p = 0; }
+        for y in 0..h {
+            for x in 0..w {
+                let b = s.read8(data + (y * w + x) / 2);
+                let i = ((b >> (4 * (x & 1))) & 15) as usize;
+                if i == 0 { continue; }
+                let Some(&v) = colors.get(i) else { continue };
+                let (b5, g6, r5) = (u32::from(v >> 11) & 31, u32::from(v >> 5) & 63, u32::from(v) & 31);
+                o[(y * 64 + x) as usize] = 0xFF00_0000 | (r5 * 255 / 31) << 16 | (g6 * 255 / 63) << 8 | (b5 * 255 / 31);
+            }
+        }
+        (w << 8 | h) as i32
+    })
+}

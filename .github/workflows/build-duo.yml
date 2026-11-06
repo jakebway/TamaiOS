@@ -1,0 +1,152 @@
+name: Build TamaiOS IPA (Xcode 27 test, manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository (with LFS for firmware/assets)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Apply tamaios_changes.patch if it is in the repo
+        run: |
+          set -euo pipefail
+          P=tamaios_changes.patch
+          if [ ! -f "$P" ]; then
+            echo "No $P in the repo, building the code as it is."
+          elif git apply --check "$P" 2>/dev/null; then
+            git apply "$P"
+            echo "Applied $P"
+          elif git apply --check -R "$P" 2>/dev/null; then
+            echo "$P is already part of the code, skipping it."
+          else
+            echo "::error::$P does not apply to this code. Remove it or ask for a fresh one."
+            exit 1
+          fi
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Get the emulator core (tg18-emu) and apply the Bluetooth and infrared patches
+        run: |
+          set -euo pipefail
+          git clone https://github.com/oreo-fox/tg18-emu upstream
+          git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
+          git -C upstream apply ../patches/radio.patch
+          git -C upstream apply ../patches/ir_partner.patch
+
+      - name: Build Rust static library for iOS
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-ios
+          cd ffi
+          IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --release --target aarch64-apple-ios
+          mkdir -p ../ios/lib
+          cp target/aarch64-apple-ios/release/libtamaios.a ../ios/lib/
+          ls -lh ../ios/lib/
+
+      - name: Fetch firmware and assets from the private repo (if configured)
+        env:
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PRIVATE_TOKEN:-}" ]; then
+            git clone --depth 1 "https://x-access-token:${PRIVATE_TOKEN}@github.com/jakebway/TamaiOS-private.git" private
+            mkdir -p firmware assets
+            cp private/firmware/*.bin firmware/ 2>/dev/null || true
+            cp private/assets/*.zip assets/ 2>/dev/null || true
+            rm -rf private
+          else
+            echo "No PRIVATE_REPO_TOKEN secret: using firmware/ and assets/ from this repo, if any."
+          fi
+
+      - name: Bundle firmware and MyMeets assets into the app
+        run: |
+          set -euo pipefail
+          mkdir -p ios/TamaiOS/BundledFirmware ios/TamaiOS/BundledAssets
+          for f in firmware/*.bin; do
+            [ -f "$f" ] && cp "$f" ios/TamaiOS/BundledFirmware/ || true
+          done
+          if [ -f assets/MyMeets2_3_7.zip ]; then
+            cp assets/MyMeets2_3_7.zip ios/TamaiOS/BundledAssets/
+          fi
+          ls -lh ios/TamaiOS/BundledFirmware ios/TamaiOS/BundledAssets || true
+
+      - name: Draw the app icon
+        run: |
+          python3 -m pip install --quiet pillow || python3 -m pip install --quiet --break-system-packages pillow
+          python3 tools/icon.py ios/TamaiOS/Assets.xcassets/AppIcon.appiconset/icon.png
+          python3 tools/town.py ios/TamaiOS/TownBackground.png 1680 || true
+
+      - name: Generate Xcode project
+        run: |
+          cd ios
+          xcodegen generate
+
+      - name: Package the Xcode project (sources, generated project, Rust library)
+        run: |
+          set -euo pipefail
+          cd ios
+          zip -qry ../TamaiOS-Xcode-project.zip . -x "build/*" "*.ipa" "Payload/*" ".DS_Store"
+          ls -lh ../TamaiOS-Xcode-project.zip
+
+      - name: Upload Xcode project artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TamaiOS-Xcode-project-x27
+          path: TamaiOS-Xcode-project.zip
+          retention-days: 14
+
+      - name: Build unsigned IPA
+        run: |
+          set -euo pipefail
+          cd ios
+          build() {
+            xcodebuild -project TamaiOS.xcodeproj \
+              -scheme TamaiOS \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+              build
+          }
+          # iPhone Duo: apps only fill the whole screen when built with the iOS 27.1 SDK (Xcode 27.1+).
+          # Use it as soon as the runner has it; if that build fails for any reason, fall back to the default Xcode.
+          X27=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$X27" ]; then
+            echo "Building with $X27 (iPhone Duo SDK)"
+            if ! DEVELOPER_DIR="$X27/Contents/Developer" build; then
+              echo "::warning::Xcode 27 build failed, falling back to the default Xcode"
+              rm -rf build
+              build
+            fi
+          else
+            echo "Xcode 27 is not on this runner yet; building with the default Xcode"
+            build
+          fi
+          test -d build/Build/Products/Release-iphoneos/TamaiOS.app
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/TamaiOS.app Payload/
+          zip -qry TamaiOS.ipa Payload
+          unzip -t TamaiOS.ipa
+          ls -lh TamaiOS.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TamaiOS-ipa-xcode27
+          path: ios/TamaiOS.ipa
+          retention-days: 14

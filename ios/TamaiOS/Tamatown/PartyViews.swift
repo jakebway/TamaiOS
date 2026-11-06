@@ -21,9 +21,10 @@ private func tick() { UIImpactFeedbackGenerator(style: .light).impactOccurred() 
 /// blurred copy of itself filling any space around it, so it is never stretched or cropped.
 struct PixelBackdrop: View {
     let image: CGImage
+    @Environment(\.displayScale) private var displayScale
     var body: some View {
         GeometryReader { g in
-            let scale = UIScreen.main.scale
+            let scale = displayScale
             let side = min(g.size.width, g.size.height)
             let k = max(1, floor(side * scale / CGFloat(image.width)))
             let s = CGFloat(image.width) * k / scale

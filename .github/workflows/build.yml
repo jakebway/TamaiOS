@@ -111,17 +111,33 @@ jobs:
         run: |
           set -euo pipefail
           cd ios
-          xcodebuild -project TamaiOS.xcodeproj \
-            -scheme TamaiOS \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+          build() {
+            xcodebuild -project TamaiOS.xcodeproj \
+              -scheme TamaiOS \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+              build
+          }
+          # iPhone Duo: apps only fill the whole screen when built with the iOS 27.1 SDK (Xcode 27.1+).
+          # Use it as soon as the runner has it; if that build fails for any reason, fall back to the default Xcode.
+          X27=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$X27" ]; then
+            echo "Building with $X27 (iPhone Duo SDK)"
+            if ! DEVELOPER_DIR="$X27/Contents/Developer" build; then
+              echo "::warning::Xcode 27 build failed, falling back to the default Xcode"
+              rm -rf build
+              build
+            fi
+          else
+            echo "Xcode 27 is not on this runner yet; building with the default Xcode"
             build
+          fi
           test -d build/Build/Products/Release-iphoneos/TamaiOS.app
           rm -rf Payload
           mkdir -p Payload

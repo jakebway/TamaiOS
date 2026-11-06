@@ -290,7 +290,8 @@ struct DevicesSection: View {
 
     /// The Tama's own picture (taken from its profile page and kept up to date), or the egg until it is known.
     @ViewBuilder private func portrait(_ t: Toy, _ theme: Theme) -> some View {
-        if let img = UIImage(contentsOfFile: ToyStore.spriteURL(t.id).path) {
+        // a picture only counts once this Tama's own name has been read (an egg has neither yet)
+        if LiveTamaName.savedName(t.id) != nil, let img = UIImage(contentsOfFile: ToyStore.spriteURL(t.id).path) {
             Image(uiImage: Self.pixelSharp(img))
                 .interpolation(.high).resizable().scaledToFit()
                 .padding(7)

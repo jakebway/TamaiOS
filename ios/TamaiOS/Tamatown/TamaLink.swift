@@ -181,7 +181,7 @@ extension TamaLink {
 
     /// The wedding (GO BACK? › YES on the toy): the toy comes home married.
     func marry(_ packet: [UInt8], progress: (String) -> Void) throws {
-        progress("The wedding is starting… 💍")
+        progress("The wedding is starting…")
         _ = try exchange(op: 0x16, then: packet, progress: progress)
     }
 }
@@ -289,7 +289,7 @@ final class AppLink: ObservableObject {
                         let f = DateFormatter(); f.dateStyle = .medium
                         self.main {
                             var y = town.state(toy)
-                            y.married.append("\(f.string(from: Date())): \(name) married \(s.name) 💍")
+                            y.married.append("\(f.string(from: Date())): \(name) married \(s.name)")
                             y.away = false; y.pending = .none; y.suitor = nil; y.petName = nil
                             town.save(y, toy)
                             town.invalidateDeviceCache(toy)

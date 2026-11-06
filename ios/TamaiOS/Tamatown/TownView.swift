@@ -12,6 +12,7 @@ struct TownView: View {
     @State private var chosen: Suitor?
     @State private var designing = false
     @State private var importing = false
+    @State private var wedding: Suitor?
 
     private var toy: Toy? { emu.toy }
     private var packError: String? {
@@ -34,6 +35,14 @@ struct TownView: View {
         .sheet(item: $chosen) { s in
             SuitorSheet(suitor: s, tamaName: tamaName, adult: toy.flatMap { town.visitInfo($0)?.adult } ?? true) { babySex, genes in
                 propose(s, babySex: babySex, genes: genes)
+            }
+        }
+        .fullScreenCover(item: $wedding) { s in
+            WeddingView(suitor: s, tamaName: tamaName) {
+                wedding = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    NotificationCenter.default.post(name: Notification.Name("TamaiOSStartWedding"), object: nil)
+                }
             }
         }
         .sheet(isPresented: $designing) { DesignView { s in designing = false; chosen = s } }
@@ -214,9 +223,8 @@ struct TownView: View {
         chosen = nil
         guard st.away, st.pending == .none, !AppLink.shared.busy else { return }
         setPending(.marry, s, babySex: babySex, genes: genes)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            NotificationCenter.default.post(name: Notification.Name("TamaiOSStartWedding"), object: nil)
-        }
+        // the wedding (bells and a cheering crowd), then the Tama is sent home
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { wedding = s }
     }
 }
 

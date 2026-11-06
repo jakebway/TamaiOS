@@ -193,6 +193,7 @@ final class Emulator: ObservableObject {
 
     /// Run `body` with the core locked. Returns nil if no toy is running.
     @discardableResult
+    var lastLookSig = ""
     func withCore<T>(_ body: (OpaquePointer) -> T) -> T? {
         lock.lock(); defer { lock.unlock() }
         guard let h = handle else { return nil }
@@ -522,7 +523,21 @@ final class Emulator: ObservableObject {
                 if let d = withCore({ LiveTamaName.direct(core: $0, deviceID: toy) }) {
                     DispatchQueue.main.async { LiveTamaName.shared.applyDirect(d, deviceID: toy) }
                 }
-                if let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil, png != lastSpritePNG {
+                var look = [Int32](repeating: 0, count: 7)
+                if withCore({ tg_profile_look($0, &look) }) == 1 {
+                    let sig = look.map(String.init).joined(separator: ",")
+                    if sig != self.lastLookSig {
+                        self.lastLookSig = sig
+                        DispatchQueue.main.async {
+                            let town = Town.shared
+                            guard let cg = town.image(body: UInt16(look[0]), bodyColor: Int(look[4]), face: UInt16(look[1]),
+                                                       head: UInt16(look[2]), headColor: Int(look[5]), back: UInt16(look[3]), backColor: Int(look[6])),
+                                  let png = UIImage(cgImage: cg).pngData() else { self.lastLookSig = ""; return }
+                            try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
+                            NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy)
+                        }
+                    }
+                } else if let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil, png != lastSpritePNG {
                     lastSpritePNG = png
                     try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                     DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }

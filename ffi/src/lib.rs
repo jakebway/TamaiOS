@@ -1685,3 +1685,21 @@ pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32
         (w << 8 | h) as i32
     })
 }
+
+/// Look of a Tama born after a marriage (parts + colours the toy stores): out = body, face, head, back, bodyColor, headColor, backColor.
+/// Returns 1 for such a Tama, else 0.
+#[no_mangle]
+pub extern "C" fn tg_profile_look(e: *mut Emu, out: *mut i32) -> i32 {
+    if e.is_null() || out.is_null() { return 0; }
+    with(e, |e| {
+        let s = &mut e.m.sys;
+        if s.read8(0xF800_D89E) < 2 || s.read8(0xF800_D8B6) < 1 { return 0; }
+        let o = unsafe { std::slice::from_raw_parts_mut(out, 7) };
+        for i in 0..4u32 {
+            o[i as usize] = i32::from(s.read8(0xF800_DAC6 + 2 * i)) | i32::from(s.read8(0xF800_DAC7 + 2 * i)) << 8;
+        }
+        for i in 0..3u32 { o[4 + i as usize] = i32::from(s.read8(0xF800_DAC2 + i)); }
+        if o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0 { return 0; }
+        1
+    })
+}

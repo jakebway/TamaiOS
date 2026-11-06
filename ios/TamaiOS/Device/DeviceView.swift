@@ -167,10 +167,27 @@ struct DeviceView: View {
                     Spacer(minLength: 0)
                     toy(theme, m)
                     Spacer(minLength: 0)
-                    if showHints { hint(theme).padding(.bottom, 6) }
+                    if showHints { hint(theme).padding(.horizontal, 56).padding(.bottom, 6) }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 6)
+
+                // settings: bottom right (clear of the clock and battery on iPhone Duo)
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button { showSettings = true } label: {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(theme.ink)
+                                .padding(12)
+                                .background(Circle().fill(.ultraThinMaterial))
+                        }
+                        .accessibilityLabel("Settings")
+                    }
+                    .padding(.trailing, 16).padding(.bottom, 12)
+                }
 
                 if let t = emu.toast {
                     VStack {
@@ -190,6 +207,8 @@ struct DeviceView: View {
             }
             .animation(.spring(), value: emu.toast)
         }
+        // centre the toy on the whole screen (on iPhone Duo the side with the clock and battery is otherwise left out)
+        .ignoresSafeArea(.container, edges: .horizontal)
         .sheet(isPresented: $showSettings) { SettingsView().environmentObject(model).environmentObject(emu) }
         .background(Color.clear.sheet(isPresented: $showApp) { TamatownView().environmentObject(emu) })
         .onAppear {
@@ -265,13 +284,6 @@ struct DeviceView: View {
                 titleLabel(chevron: false)
             }
             Spacer()
-            Button { showSettings = true } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 18, weight: .bold))
-                    .padding(10)
-                    .background(Circle().fill(.ultraThinMaterial))
-            }
-            .accessibilityLabel("Settings")
         }
         .foregroundStyle(theme.ink)
         .padding(.horizontal, 10)

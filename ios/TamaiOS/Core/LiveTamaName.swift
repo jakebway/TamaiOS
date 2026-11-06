@@ -176,6 +176,7 @@ final class LiveTamaName: ObservableObject {
                 self.resolve()
                 return
             }
+            if self.directName == "" { self.probeStatus = "Waiting for you to name this Tama"; return }
             if self.running || emu.linkBusy || IRLink.shared.busy || emu.holdForApp || emu.appWaiting || ArcadeDiagnostics.shared.report().contains("state: active") {
                 self.probeStatus = "Deferred during a probe, connection, or arcade round"
                 self.schedule(key: key, delay: 5); return

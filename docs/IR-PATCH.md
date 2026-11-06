@@ -79,6 +79,11 @@ it is detected (Connection menu cursor at `0xF80178FC` == 1; 0 for all four Tama
 ROMs) and backed out silently like VISIT. Connection › App › Download is a different flow (Tamatown, TamaDepa) and is
 not touched.
 
+### Gift › RECEIVE is blocked on the played Tama
+When the played Tama chooses RECEIVE (role byte at `0xF80178BC` == 1), the partner would have to choose GIVE and pick an
+item, a decision the app cannot make on the headless side, so the toy would wait forever. It is detected like the
+other two cases and backed out with a single muted `C`. GIVE on the played Tama is unaffected.
+
 ### Input is dropped while a link is being set up
 Buttons pressed during setup used to queue up and then all fire at once, ruining the key sequence. While the link
 is frozen (`linkFreezeUntil`) A and B are dropped; C is kept so you can always back out.

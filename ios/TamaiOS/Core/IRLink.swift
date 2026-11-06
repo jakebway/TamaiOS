@@ -110,6 +110,19 @@ final class IRLink {
             heldFrame = px
             emu.setLinkCover(true)
         }
+        if mode == 1 && role == 1 {
+            // GIFT › RECEIVE on the Tama you play: the other Tama would have to choose a gift to give, which the app
+            // can't do, so nothing could ever arrive. Back out silently, as if the button did nothing.
+            emu.linkFreezeUntil = 0
+            starting = false
+            cooldownUntil = now + 8
+            emu.muteUntil = CACurrentMediaTime() + 1.5
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                emu.press(.c)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
+            }
+            return
+        }
         if mode == 3 && role == 0 {
             // Only the Tama you play can INVITE; the other one visits by itself. Choosing VISIT here would leave
             // this Tama "out", so back out of it and say what to do.

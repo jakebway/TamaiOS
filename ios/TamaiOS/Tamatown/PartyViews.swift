@@ -115,7 +115,7 @@ struct SuitorSheet: View {
                 }
 
                 Section(header: Text(full ? "You two had a lovely time" : "Spend time with \(suitor.name)"),
-                        footer: Text(full ? "" : "Fill all five hearts to propose.")) {
+                        footer: Text(full ? "" : (adult ? "Fill all five hearts to propose." : "\(tamaName) can only marry once grown up. Dates are fine."))) {
                     ForEach(0..<outings.count, id: \.self) { i in
                         let used = done.contains(i)
                         Button { go(i) } label: {
@@ -130,7 +130,7 @@ struct SuitorSheet: View {
                     }
                 }
 
-                if full {
+                if full && adult {
                     Section(header: Text("About the baby"),
                             footer: Text(genes == 0 ? "Mixes the parents the same way the official app did." : "Gives the baby a more random blend of both parents.")) {
                         Picker("Baby", selection: $babySex) {
@@ -144,8 +144,8 @@ struct SuitorSheet: View {
 
                 if !adult {
                     Section {
-                        Label("\(tamaName) isn't a grown-up yet — the device may refuse.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.footnote).foregroundStyle(.orange)
+                        Label("\(tamaName) isn't a grown-up yet, so can't marry. Dates are fine.", systemImage: "info.circle")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -154,7 +154,7 @@ struct SuitorSheet: View {
                 Button { onPropose(babySex, genes) } label: {
                     Text("Propose").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 6)
                 }
-                .buttonStyle(.borderedProminent).tint(.pink).disabled(!full)
+                .buttonStyle(.borderedProminent).tint(.pink).disabled(!full || !adult)
                 .padding(.horizontal, 20).padding(.vertical, 10)
                 .background(.bar)
             }

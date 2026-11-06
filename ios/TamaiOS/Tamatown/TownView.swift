@@ -121,8 +121,8 @@ struct TownView: View {
                 }
             }
             if let info, !info.adult {
-                Label("\(tamaName) isn't a grown-up yet. The official app only let adults marry — it may still work, but the device might refuse.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote).foregroundStyle(.orange)
+                Label("\(tamaName) isn't a grown-up yet, so can't marry (like the official app). Dates are still fine.", systemImage: "info.circle")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
         }
     }
@@ -209,6 +209,8 @@ struct TownView: View {
     }
 
     private func propose(_ s: Suitor, babySex: Int, genes: Int) {
+        // like the official app, only grown-ups can marry
+        if let toy, let info = town.visitInfo(toy), !info.adult { return }
         chosen = nil
         guard st.away, st.pending == .none, !AppLink.shared.busy else { return }
         setPending(.marry, s, babySex: babySex, genes: genes)

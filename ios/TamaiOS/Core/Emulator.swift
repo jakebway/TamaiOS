@@ -192,8 +192,8 @@ final class Emulator: ObservableObject {
     // MARK: core access
 
     /// Run `body` with the core locked. Returns nil if no toy is running.
-    var lastLookSig = ""
     var wasAliveForDeath = false
+    var lastNameSigReset = false
     var deadPolls = 0
     @discardableResult
     func withCore<T>(_ body: (OpaquePointer) -> T) -> T? {
@@ -386,7 +386,7 @@ final class Emulator: ObservableObject {
         var asleep = false
         var nextCarePoll = last
         var nextNamePoll = last
-        var lastSpritePNG: Data? = nil
+        var lastNameSig = ""
         var nextRadio = last
         var radioReady = false
         while !stopFlag {
@@ -521,29 +521,37 @@ final class Emulator: ObservableObject {
             lock.unlock()
 
             if now >= nextNamePoll, let toy = toyID {
-                nextNamePoll = now + 0.25
-                if let d = withCore({ LiveTamaName.direct(core: $0, deviceID: toy) }) {
-                    DispatchQueue.main.async { LiveTamaName.shared.applyDirect(d, deviceID: toy) }
+                nextNamePoll = now + 0.5
+                // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.
+                let raw: [UInt8]? = withCore { h in
+                    var out = [UInt8]()
+                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16)] as [(UInt32, Int)] {
+                        var b = [UInt8](repeating: 0, count: n)
+                        out += tg_peek(h, addr, &b, n) == 1 ? b : [UInt8](repeating: 0xEE, count: n)
+                    }
+                    return out
                 }
-                var look = [Int32](repeating: 0, count: 7)
-                if withCore({ tg_profile_look($0, &look) }) == 1 {
-                    let sig = look.map(String.init).joined(separator: ",")
-                    if sig != self.lastLookSig {
-                        self.lastLookSig = sig
+                let sig = toy + ":" + (raw ?? []).map(String.init).joined(separator: ",")
+                if let raw, sig != lastNameSig {
+                    lastNameSig = sig
+                    if let d = withCore({ LiveTamaName.direct(core: $0, deviceID: toy) }) {
+                        DispatchQueue.main.async { LiveTamaName.shared.applyDirect(d, deviceID: toy) }
+                    }
+                    var look = [Int32](repeating: 0, count: 7)
+                    if withCore({ tg_profile_look($0, &look) }) == 1 {
                         DispatchQueue.main.async {
-                            let town = Town.shared
-                            guard let cg = town.image(body: UInt16(look[0]), bodyColor: Int(look[4]), face: UInt16(look[1]),
-                                                       head: UInt16(look[2]), headColor: Int(look[5]), back: UInt16(look[3]), backColor: Int(look[6])),
-                                  let png = UIImage(cgImage: cg).pngData() else { self.lastLookSig = ""; return }
+                            guard let cg = Town.shared.image(body: UInt16(look[0]), bodyColor: Int(look[4]), face: UInt16(look[1]),
+                                                              head: UInt16(look[2]), headColor: Int(look[5]), back: UInt16(look[3]), backColor: Int(look[6])),
+                                  let png = UIImage(cgImage: cg).pngData() else { self.lastNameSigReset = true; return }
                             try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                             NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy)
                         }
+                    } else if raw[0] >= 1, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
+                        try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
+                        DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                     }
-                } else if let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil, png != lastSpritePNG {
-                    lastSpritePNG = png
-                    try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
-                    DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                 }
+                if lastNameSigReset { lastNameSigReset = false; lastNameSig = "" }
             }
             if now >= nextCarePoll {
                 nextCarePoll = now + 1

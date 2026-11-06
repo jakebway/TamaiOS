@@ -1,4 +1,4 @@
-name: Build TamaiOS IPA (Xcode 27 test, manual)
+name: Build TamaiOS IPA (fallback, older Xcode, manual)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: xcode-27
+    runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - name: Checkout repository (with LFS for firmware/assets)
@@ -101,7 +101,7 @@ jobs:
       - name: Upload Xcode project artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TamaiOS-Xcode-project-x27
+          name: TamaiOS-Xcode-project-fb
           path: TamaiOS-Xcode-project.zip
           retention-days: 14
 
@@ -147,6 +147,6 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TamaiOS-ipa-xcode27
+          name: TamaiOS-ipa-fallback
           path: ios/TamaiOS.ipa
           retention-days: 14

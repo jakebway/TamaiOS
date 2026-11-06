@@ -391,7 +391,9 @@ final class Console: ObservableObject {
     private func ramReport(_ emu: Emulator) -> String? {
         emu.withCore { h -> String in
             func b(_ a: UInt32) -> String { var x: UInt8 = 0; return tg_peek(h, a, &x, 1) == 1 ? String(x) : "?" }
-            return "stage \(b(0xF800D8B6))  character \(b(0xF800D8C4))  bathroom \(b(0xF800D888))  link mode \(b(0xF80178E4)) (0 playdate,1 gift,2 marry,3 travel)  gift role \(b(0xF80178BC))  travel role \(b(0xF80178C4)) (0 visit,1 invite)  clock drift \(tg_clock_drift(h)) s  asleep \(tg_is_asleep(h))"
+            var nm = [UInt8](repeating: 0, count: 48)
+            let nameHex = tg_peek(h, 0xF800DC30, &nm, 48) == 1 ? nm.map { String(format: "%02x", $0) }.joined() : "?"
+            return "name memory @F800DC30: \(nameHex)\n" + "stage \(b(0xF800D8B6))  character \(b(0xF800D8C4))  bathroom \(b(0xF800D888))  link mode \(b(0xF80178E4)) (0 playdate,1 gift,2 marry,3 travel)  gift role \(b(0xF80178BC))  travel role \(b(0xF80178C4)) (0 visit,1 invite)  clock drift \(tg_clock_drift(h)) s  asleep \(tg_is_asleep(h))"
         }
     }
 

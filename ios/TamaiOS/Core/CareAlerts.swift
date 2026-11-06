@@ -28,6 +28,7 @@ final class CareAlerts: ObservableObject {
     private var sicknessRequests: [String: String] = [:]
     private var hatchPolicy = HatchEventPolicy(lastStages: Prefs.d.dictionary(forKey: "care.hatch.lastStages.v1") as? [String: Int] ?? [:])
     private var hatchTokens: [String: String] = [:]
+    private var deathTokens: [String: String] = [:]
     private var hatchAcceptedAt: [String: Double] = [:]
     private var hatchMasks: [String: Int] = [:]
     private var inFlight: Set<String> = []
@@ -225,6 +226,22 @@ final class CareAlerts: ObservableObject {
         if passes % 5 == 4 { LiveTamaName.shared.requestCheck() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.waitForHatchName(event, passes: passes + 1) }
     }
+    /// The Tama has been gone (stage 0 while the toy is awake) for a full minute after being alive.
+    func observeDeath(deviceID: String, observedAt: Double) {
+        DispatchQueue.main.async {
+            guard CareSupport.supports(deviceID) else { return }
+            let token = UUID().uuidString
+            self.deathTokens[deviceID] = token
+            self.record("DEATH DETECTED stage 0 for 60 s after being alive")
+            guard self.enabled else { self.count("death skipped: settings disabled"); return }
+            guard UIApplication.shared.applicationState != .active else { self.count("death skipped: foreground"); return }
+            let event = Event(id: token, deviceID: deviceID, name: LiveTamaName.shared.name, source: .death,
+                              mask: 0, raw: -1, stage: 0, observedAt: observedAt, generation: self.generation, episode: 0)
+            guard !self.inFlight.contains(event.key) else { return }
+            self.inFlight.insert(event.key); self.attempt(event, pass: 0)
+        }
+    }
+    func clearDeath(deviceID: String) { DispatchQueue.main.async { self.deathTokens.removeValue(forKey: deviceID) } }
     func observeBathroom(raw: Int, deviceID: String, observedAt: Double) {
         DispatchQueue.main.async {
             guard CareSupport.supports(deviceID) else { return }
@@ -314,6 +331,7 @@ final class CareAlerts: ObservableObject {
         if event.source == .sickness { return sicknessPolicy.isCurrent(deviceID: event.deviceID, episode: event.episode) }
         if event.source == .bathroom { return bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.episode) }
         if event.source == .hatch { return hatchTokens[event.deviceID] == event.id }
+        if event.source == .death { return deathTokens[event.deviceID] == event.id }
         return true
     }
     private func removeRequest(_ identifier: String) {
@@ -350,6 +368,7 @@ final class CareAlerts: ObservableObject {
                     content.body = LiveTamaName.shared.verifiedName.map { "Meet " + $0 + "." } ?? "Open TamaiOS to see your Tama’s new look."
                 case .sickness: content.title = "\(event.name) is sick"; content.body = "Open TamaiOS to check on them."
                 case .bathroom: content.title = "\(event.name) went to the bathroom"; content.body = "Open TamaiOS to help them clean up."
+                case .death: content.title = "\(event.name) passed away"; content.body = "Open TamaiOS to start a new egg."
                 case .hatch: content.title = "\(event.name) is hatching!"; content.body = "Open TamaiOS to meet your new Tama."
                 default: content.title = "\(event.name) needs you!"; content.body = "Open TamaiOS to check on them."
                 }

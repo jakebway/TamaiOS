@@ -1,7 +1,7 @@
 import Foundation
 
 struct CareEventPolicy {
-    enum Source: String { case poll, sound, bathroom, hatch, sickness, growth }
+    enum Source: String { case poll, sound, bathroom, hatch, sickness, growth, death }
     static let burstWindow = 2.5
     private(set) var notifiedEpisodes: Set<String> = []
     private var lastScheduled: [String: Double] = [:]

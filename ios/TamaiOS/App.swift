@@ -284,7 +284,7 @@ struct LinkPortrait: View {
         let theme = Theme.of(toy.color)
         // a picture only counts once this Tama's own name has been read (an egg has neither yet)
         if LiveTamaName.savedName(toy.id) != nil, let img = UIImage(contentsOfFile: ToyStore.spriteURL(toy.id).path) {
-            Image(uiImage: Self.sharp(img)).interpolation(.high).resizable().scaledToFit()
+            Image(uiImage: Self.sharp(img.trimmedToArt())).interpolation(.high).resizable().scaledToFit()
                 .padding(6).frame(width: 56, height: 56)
                 .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(LinearGradient(colors: [theme.top, theme.bottom.opacity(0.75)], startPoint: .top, endPoint: .bottom)))

@@ -525,7 +525,7 @@ final class Emulator: ObservableObject {
             lock.unlock()
 
             let pollStart = CACurrentMediaTime()
-            if now >= nextNamePoll, let toy = toyID {
+            if now >= nextNamePoll, let toy = toyID, !IRLink.shared.busy, !linkCover {
                 nextNamePoll = now + 0.5
                 // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.
                 let raw: [UInt8]? = withCore { h in

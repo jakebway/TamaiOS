@@ -524,6 +524,7 @@ final class IRLink {
         var nextB = mode == 3 ? 7.0 : 1.2
         var nextWatch = 0.0
         var pressTries = 0
+        var notOnConnecting = false
         var shownP = false
         var pn = 0
         while true {
@@ -565,6 +566,12 @@ final class IRLink {
                         _ = emu.withCore { tg_press($0, TGKey.b.rawValue, CACurrentMediaTime()) }
                         DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { _ = emu.withCore { tg_release($0, TGKey.b.rawValue) } }
                         emu.note("infrared link: pressed B to start (try \(pressTries))" + (pressTries == 1 || pressTries == 4 ? ", screen:\n" + (emu.withCore { tinyScreen($0) } ?? "") : ""))
+                        // Seen on a real device: the toy was standing in its room, so B did nothing for 20 s. Say so instead.
+                        if pressTries == 3, emu.withCore({ ToyScreen.isRoom(chain: ToyScreen.chain(core: $0), deviceID: me.id) }) == true {
+                            notOnConnecting = true
+                            emu.note("infrared link: your toy is in its room, not on the connecting screen")
+                            break
+                        }
                     }
                 } else { autoB = true }
                 if pressTries >= 14 { autoB = true }
@@ -660,6 +667,8 @@ final class IRLink {
                     if !text.isEmpty { emu.say(text, seconds: 5) }
                 }
             }
+        } else if notOnConnecting {
+            emu.say("Open Connection › Tamagotchi › Playdate on your toy first, then connect.", seconds: 8)
         } else if sawTraffic {
             emu.say("Connection lost. Nothing was changed. Try again.", seconds: 7)
         }

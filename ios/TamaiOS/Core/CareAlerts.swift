@@ -370,7 +370,14 @@ final class CareAlerts: ObservableObject {
                 case .bathroom: content.title = "\(event.name) went to the bathroom"; content.body = "Open TamaiOS to help them clean up."
                 case .death: content.title = "\(event.name) passed away"; content.body = "Open TamaiOS to start a new egg."
                 case .hatch: content.title = "\(event.name) is hatching!"; content.body = "Open TamaiOS to meet your new Tama."
-                default: content.title = "\(event.name) needs you!"; content.body = "Open TamaiOS to check on them."
+                default:
+                    // seen on real Tamas: attention bit 1 = hungry, bit 2 = unhappy (both at once, or unknown, stays generic)
+                    switch event.mask & 3 {
+                    case 1: content.title = "\(event.name) is hungry!"
+                    case 2: content.title = "\(event.name) is unhappy"
+                    default: content.title = "\(event.name) needs you!"
+                    }
+                    content.body = "Open TamaiOS to check on them."
                 }
                 content.sound = .default; content.threadIdentifier = self.prefix + event.deviceID
                 content.categoryIdentifier = event.source == .growth ? "TAMAIOS_GROWTH" : (event.source == .sickness ? "TAMAIOS_SICKNESS" : (event.source == .bathroom ? "TAMAIOS_BATHROOM" : (event.source == .hatch ? "TAMAIOS_HATCH" : "TAMAIOS_CARE")))

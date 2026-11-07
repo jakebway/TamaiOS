@@ -186,6 +186,8 @@ final class Emulator: ObservableObject {
     private(set) var stats = (ticks: 0, lastTickMs: 0.0, frames: 0)
     /// Loop gaps over 50 ms while on screen (what a dropped frame looks like from inside).
     var stalls = (count: 0, maxMs: 0.0, notes: 0)
+    /// timing counters for the diag screen: emulation time vs real time, slow ticks, time spent in the side polls
+    var perf = (tickMs: 0.0, dtMs: 0.0, maxTickMs: 0.0, slow: 0, pollMs: 0.0, maxPollMs: 0.0, publishMs: 0.0, maxPublishMs: 0.0)
     private let saveQueue = DispatchQueue(label: "TamaiOS autosave", qos: .utility)
     var appLog: [String] = []
 
@@ -490,6 +492,8 @@ final class Emulator: ObservableObject {
             // during a Bluetooth transfer the device runs 3x faster, so it's over sooner
             code = tg_tick(h, dt)   // normal speed: transfers are already instant, and turbo made animations jerky
             stats.lastTickMs = (CACurrentMediaTime() - t0) * 1000
+            perf.tickMs += stats.lastTickMs; perf.dtMs += dt * 1000; perf.maxTickMs = max(perf.maxTickMs, stats.lastTickMs)
+            if stats.lastTickMs > 40 { perf.slow += 1 }
             stats.ticks += 1
             flags = tg_take_flags(h)
             n = tg_take_audio(h, audioBuf, 44100)
@@ -520,6 +524,7 @@ final class Emulator: ObservableObject {
             }
             lock.unlock()
 
+            let pollStart = CACurrentMediaTime()
             if now >= nextNamePoll, let toy = toyID {
                 nextNamePoll = now + 0.5
                 // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.
@@ -579,10 +584,17 @@ final class Emulator: ObservableObject {
                     CareAlerts.shared.observeBathroom(raw: bathroomRaw, deviceID: toy.id, observedAt: observedAt)
                 }
             }
+            let pollMs = (CACurrentMediaTime() - pollStart) * 1000
+            perf.pollMs += pollMs; perf.maxPollMs = max(perf.maxPollMs, pollMs)
             if !linkCover && CACurrentMediaTime() >= muteUntil { audio.push(audioBuf, n) }      // no beeps while a link is set up
             // skip frames identical to the one on screen: saves an image allocation per redraw
             if published, isDark == lastDark, pixels == lastPixels { published = false }
-            if published { lastPixels = pixels; publish(pixels, dark: isDark) }
+            if published {
+                let pt = CACurrentMediaTime()
+                lastPixels = pixels; publish(pixels, dark: isDark)
+                let ms = (CACurrentMediaTime() - pt) * 1000
+                perf.publishMs += ms; perf.maxPublishMs = max(perf.maxPublishMs, ms)
+            }
             if radioChanged {
                 let r = radioReady
                 note(r ? "device is waiting for the app" : "device stopped waiting for the app")

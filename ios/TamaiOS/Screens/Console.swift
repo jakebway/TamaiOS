@@ -302,6 +302,8 @@ final class Console: ObservableObject {
         case "perf":
             let s = emu.stats
             return "ticks: \(s.ticks)  last tick: \(String(format: "%.2f", s.lastTickMs)) ms  frames published: \(s.frames)  audio queued: \(emu.audio.queued)  underruns: \(emu.audio.underruns)  stalls >50ms: \(emu.stalls.count) (worst \(Int(emu.stalls.maxMs)) ms)"
+                + "\nemulation used \(Int(emu.perf.tickMs / max(emu.perf.dtMs, 1) * 100))% of real time (tick avg \(String(format: "%.1f", emu.perf.tickMs / Double(max(s.ticks, 1)))) ms, worst \(Int(emu.perf.maxTickMs)) ms, slow ticks >40ms: \(emu.perf.slow))"
+                + "\nside polls: avg \(String(format: "%.2f", emu.perf.pollMs / Double(max(s.ticks, 1)))) ms, worst \(String(format: "%.1f", emu.perf.maxPollMs)) ms  frame publish: worst \(String(format: "%.1f", emu.perf.maxPublishMs)) ms"
 
         case "redraw":
             emu.forceRedraw()

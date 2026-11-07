@@ -15,6 +15,14 @@ enum ToyScreen {
         (0x0FA, "Family"), (0x12C, "Explore My Town"), (0x162, "Travel"), (0x222, "Item Box"), (0x240, "Notebook"),
     ]
 
+    /// Deeper screens inside Connection: (connection list, Tamagotchi list, mode list, playdate). Gift, Marry and
+    /// Travel sit at fixed distances from Playdate on every firmware.
+    private static let link: [String: (UInt32, UInt32, UInt32, UInt32)] = [
+        "wondergarden": (0x2017_BCEB, 0x2017_BD7F, 0x2017_9CBB, 0x2017_A739),
+        "magic": (0x2017_B57F, 0x2017_B613, 0x2017_958B, 0x2017_9FCD),
+        "fairy": (0x2017_9B3F, 0x2017_9BD3, 0x2017_7B4B, 0x2017_858D),
+    ]
+
     static func chain(core h: OpaquePointer) -> [UInt32] {
         var buf = [UInt32](repeating: 0, count: 16)
         let n = Int(tg_call_chain(h, &buf, 16))
@@ -26,6 +34,11 @@ enum ToyScreen {
         guard let m = maps.first(where: { deviceID.contains($0.key) })?.value else { return nil }
         guard let i = c.firstIndex(of: m.main) else { return c.isEmpty ? nil : "room" }
         guard i + 1 < c.count else { return "menu" }
+        if let l = link.first(where: { deviceID.contains($0.key) })?.value {
+            let named: [UInt32: String] = [l.3: "Playdate", l.3 + 0xE4C: "Gift", l.3 + 0x768: "Marry", l.3 + 0x87C: "Travel",
+                                           l.2: "Connection › choosing", l.1: "Connection › Tamagotchi", l.0: "Connection"]
+            if let hit = c.reversed().first(where: { named[$0] != nil }) { return named[hit] }
+        }
         let d = c[i + 1]
         if d == m.grid { return "menu" }
         if let item = items.first(where: { m.item0 + $0.0 == d }) { return item.1 }

@@ -407,11 +407,13 @@ final class IRLink {
                 tg_set_never_sleep(v, 0)
                 tg_wake(v)
                 tickAll(v, 25, audio)
+                var trace = [String]()      // which screen the partner is on after each key (read from the firmware, for the log)
                 for k in head + tail {
                     tg_press(v, k.rawValue, CACurrentMediaTime())
                     tickAll(v, 8, audio)
                     tg_release(v, k.rawValue)
                     tickAll(v, 22, audio)
+                    trace.append("\(k)" + ":" + (ToyScreen.name(chain: ToyScreen.chain(core: v), deviceID: partner.id) ?? "?"))
                 }
                 if inviteScan { tickAll(v, 70, audio) }      // the CONNECTING screen takes a moment
                 tickAll(v, 25, audio)
@@ -425,7 +427,7 @@ final class IRLink {
                     }
                     return true
                 }
-                emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })" + ", asleep=\(tg_is_asleep(v)), screen:\n" + tinyScreen(v))
+                emu.note("infrared link: \(partner.name) didn't reach the waiting screen with ending \(tail.map { "\($0)" })" + ", asleep=\(tg_is_asleep(v)), steps: " + trace.joined(separator: " ") + ", screen:\n" + tinyScreen(v))
             }
             return false
         }

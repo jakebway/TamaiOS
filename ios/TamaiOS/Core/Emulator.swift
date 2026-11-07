@@ -675,15 +675,19 @@ final class Emulator: ObservableObject {
 
     private func careSample() -> (mask: Int, raw: Int, stage: Int, character: Int, signature: String) {
         let sample = withCore { h -> (Int, Int, Int, Int, String) in
-            let mask = Int(tg_profile_attention(h))
+            var mask = Int(tg_profile_attention(h))
             guard mask >= 0 else { return (mask, -1, -1, -1, "") }
+            // Toothache (15 snacks): the firmware sets bit 1 of F800D87A; treat it like sickness.
+            var tooth: UInt8 = 0
+            let toothache = tg_peek(h, 0xF800_D87A, &tooth, 1) == 1 && tooth & 0x02 != 0
+            if toothache { mask |= 0x08 }
             var raw: UInt8 = 0, stage: UInt8 = 0
             var character = [UInt8](repeating: 0, count: 4), signature = [UInt8](repeating: 0, count: 4)
             let rawOK = tg_peek(h, 0xF800_D870, &raw, 1), stageOK = tg_peek(h, 0xF800_D8B6, &stage, 1)
             let charOK = character.withUnsafeMutableBufferPointer { tg_peek(h, 0xF800_D8C4, $0.baseAddress, 4) }
             let sigOK = signature.withUnsafeMutableBufferPointer { tg_peek(h, 0xF800_D8B0, $0.baseAddress, 4) }
             let id = Int(UInt32(character[0]) | UInt32(character[1]) << 8 | UInt32(character[2]) << 16 | UInt32(character[3]) << 24)
-            return (mask, rawOK == 1 ? Int(raw) : -1, stageOK == 1 ? Int(stage) : -1,
+            return (mask, rawOK == 1 ? Int(raw) | (toothache ? 0x100 : 0) : -1, stageOK == 1 ? Int(stage) : -1,
                     charOK == 1 ? id : -1, sigOK == 1 ? signature.map { String(format: "%02X", $0) }.joined() : "")
         }
         return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1, sample?.3 ?? -1, sample?.4 ?? "")

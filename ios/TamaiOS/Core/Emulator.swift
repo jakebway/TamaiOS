@@ -197,6 +197,9 @@ final class Emulator: ObservableObject {
     var wasAliveForDeath = false
     var lastNameSigReset = false
     var deadPolls = 0
+    /// The last few screen readings (twice a second), newest last, for the diagnostics.
+    var screenHistory: [String] = []
+    private var lastScreenNote = ""
     @discardableResult
     func withCore<T>(_ body: (OpaquePointer) -> T) -> T? {
         lock.lock(); defer { lock.unlock() }
@@ -388,6 +391,7 @@ final class Emulator: ObservableObject {
         var asleep = false
         var nextCarePoll = last
         var nextNamePoll = last
+        var nextScreenPoll = last
         var lastNameSig = ""
         var nextRadio = last
         var radioReady = false
@@ -525,6 +529,18 @@ final class Emulator: ObservableObject {
             lock.unlock()
 
             let pollStart = CACurrentMediaTime()
+            if now >= nextScreenPoll, let toy = toyID {
+                nextScreenPoll = now + 0.5
+                let chain = withCore { ToyScreen.chain(core: $0) } ?? []
+                let label = ToyScreen.name(chain: chain, deviceID: toy) ?? "unknown"
+                let entry = label + " [" + chain.map { String($0, radix: 16) }.joined(separator: ">") + "]"
+                if entry != lastScreenNote {
+                    lastScreenNote = entry
+                    let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+                    screenHistory.append(f.string(from: Date()) + " " + entry)
+                    if screenHistory.count > 12 { screenHistory.removeFirst(screenHistory.count - 12) }
+                }
+            }
             if now >= nextNamePoll, let toy = toyID, !IRLink.shared.busy, !linkCover {
                 nextNamePoll = now + 0.5
                 // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.

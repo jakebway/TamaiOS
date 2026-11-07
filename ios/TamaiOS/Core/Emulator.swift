@@ -9,7 +9,7 @@ enum Prefs {
         d.register(defaults: [
             "soundOn": true, "volume": 0.6, "haptics": true, "liveInBackground": true,
             "callAlerts": true, "keepAwake": true, "neverSleep": true, "showHints": true,
-            "p.tick_ms": 4.0, "p.sleep_tick_ms": 40.0, "p.audio_min_ms": 30.0, "p.audio_max_ms": 80.0,
+            "p.tick_ms": 4.0, "p.sleep_tick_ms": 40.0, "p.audio_min_ms": 70.0, "p.audio_max_ms": 180.0,
             "p.gap_s": 2.0, "p.autosave_s": 180.0, "p.fps": 60.0, "p.call_gap_s": 600.0,
         ])
     }

@@ -392,6 +392,11 @@ final class Console: ObservableObject {
 
     private func ramReport(_ emu: Emulator) -> String? {
         emu.withCore { h -> String in
+            func u(_ a: UInt32, _ n: Int) -> String {
+                var x = [UInt8](repeating: 0, count: n)
+                guard tg_peek(h, a, &x, n) == 1 else { return "?" }
+                return String(x.enumerated().reduce(UInt64(0)) { $0 | UInt64($1.element) << (8 * UInt64($1.offset)) })
+            }
             func b(_ a: UInt32) -> String { var x: UInt8 = 0; return tg_peek(h, a, &x, 1) == 1 ? String(x) : "?" }
             var nm = [UInt8](repeating: 0, count: 48)
             let nameHex = tg_peek(h, 0xF800DC30, &nm, 48) == 1 ? nm.map { String(format: "%02x", $0) }.joined() : "?"
@@ -417,7 +422,7 @@ final class Console: ObservableObject {
             let screenLine = "screen: \(ToyScreen.name(chain: chain, deviceID: emu.toy?.id ?? "") ?? "unknown")  call chain: " + chain.map { String($0, radix: 16) }.joined(separator: " > ") + "\n"
                 + "screen changes (last 20):\n" + emu.screenHistory.joined(separator: "\n") + "\n"
             let textRuns = screenLine + careLine + "text-like runs in RAM (glyph codes):\n" + runs.joined(separator: "\n") + "\n"
-            return textRuns + "name memory @F800DC30: \(nameHex)\nname key @F800D864: \(keyTxt) (table: 0 first Tama … Wonder Garden 2 = Clubutchi, Magic/Fairy 1 = Marupitchi)\n" + "hunger \(b(0xF800D869))/6  happy \(b(0xF800D875))/100  weight \(b(0xF800D89C))  snacks \(b(0xF800D874))/15  toothache \({ var x: UInt8 = 0; return tg_peek(h, 0xF800D87A, &x, 1) == 1 ? (x & 2 != 0 ? "yes" : "no") : "?" }())  attention \(b(0xF800D870))\n" + "stage \(b(0xF800D8B6))  character \(b(0xF800D8C4))  bathroom \(b(0xF800D888))  link mode \(b(0xF80178E4)) (0 playdate,1 gift,2 marry,3 travel)  gift role \(b(0xF80178BC))  travel role \(b(0xF80178C4)) (0 visit,1 invite)  clock drift \(tg_clock_drift(h)) s  asleep \(tg_is_asleep(h))"
+            return textRuns + "name memory @F800DC30: \(nameHex)\nname key @F800D864: \(keyTxt) (table: 0 first Tama … Wonder Garden 2 = Clubutchi, Magic/Fairy 1 = Marupitchi)\n" + "age \(u(0xF800D89A, 2)) y  points \(u(0xF800D884, 4)) G  generation \(u(0xF800D89E, 2))\n" + "hunger \(b(0xF800D869))/6  happy \(b(0xF800D875))/100  weight \(b(0xF800D89C))  snacks \(b(0xF800D874))/15  toothache \({ var x: UInt8 = 0; return tg_peek(h, 0xF800D87A, &x, 1) == 1 ? (x & 2 != 0 ? "yes" : "no") : "?" }())  attention \(b(0xF800D870))\n" + "stage \(b(0xF800D8B6))  character \(b(0xF800D8C4))  bathroom \(b(0xF800D888))  link mode \(b(0xF80178E4)) (0 playdate,1 gift,2 marry,3 travel)  gift role \(b(0xF80178BC))  travel role \(b(0xF80178C4)) (0 visit,1 invite)  clock drift \(tg_clock_drift(h)) s  asleep \(tg_is_asleep(h))"
         }
     }
 

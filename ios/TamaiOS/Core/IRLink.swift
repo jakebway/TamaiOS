@@ -367,6 +367,21 @@ final class IRLink {
         return rows.joined(separator: "\n")
     }
 
+    /// The room has three views that B cycles (room › outside › clock › room); C does not leave the
+    /// outside view or the clock, and A on the clock switches 12/24-hour time. Before blind key presses,
+    /// press B until the firmware's view byte (F800D804) says the plain room view.
+    fileprivate func toRoomView(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>) -> Int {
+        var presses = 0
+        for _ in 0..<3 {
+            var view: UInt8 = 0
+            guard tg_peek(p, 0xF800_D804, &view, 1) == 1, view == 1 || view == 2 else { break }
+            tg_press(p, TGKey.b.rawValue, CACurrentMediaTime()); tickAll(p, 8, audio)
+            tg_release(p, TGKey.b.rawValue); tickAll(p, 60, audio)
+            presses += 1
+        }
+        return presses
+    }
+
     fileprivate func tickAll(_ p: OpaquePointer, _ n: Int, _ audio: UnsafeMutablePointer<Int16>) {
         for _ in 0..<n {
             _ = tg_tick(p, 0.02); _ = tg_take_audio(p, audio, 44100)
@@ -417,6 +432,8 @@ final class IRLink {
                     tickAll(v, 10, audio); waitedTicks += 10
                 }
                 if waitedTicks > 50 { emu.note("infrared link: \(partner.name) needed about \(waitedTicks / 50) s to finish its last scene before the link") }
+                let viewPresses = toRoomView(v, audio)
+                if viewPresses > 0 { emu.note("infrared link: \(partner.name) was on the outside view or clock; pressed B \(viewPresses)x to get back to the room") }
                 var trace = [String]()      // which screen the partner is on after each key (read from the firmware, for the log)
                 for k in head + tail {
                     tg_press(v, k.rawValue, CACurrentMediaTime())
@@ -852,6 +869,7 @@ extension IRLink {
                 tg_destroy(v)
                 break
             }
+            _ = toRoomView(v, audio)
             let keys: [TGKey] = [.c, .c, .c, .c, .a, .a, .a, .a, .a, .b] + ending
             for k in keys {
                 tg_press(v, k.rawValue, CACurrentMediaTime())

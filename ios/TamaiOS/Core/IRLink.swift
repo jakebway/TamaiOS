@@ -423,7 +423,7 @@ final class IRLink {
                     tickAll(v, 8, audio)
                     tg_release(v, k.rawValue)
                     tickAll(v, 22, audio)
-                    trace.append("\(k)" + ":" + (ToyScreen.name(chain: ToyScreen.chain(core: v), deviceID: partner.id) ?? "?"))
+                    trace.append("\(k)" + ":" + (ToyScreen.label(core: v, chain: ToyScreen.chain(core: v), deviceID: partner.id) ?? "?"))
                 }
                 if inviteScan { tickAll(v, 70, audio) }      // the CONNECTING screen takes a moment
                 tickAll(v, 25, audio)

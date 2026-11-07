@@ -42,6 +42,16 @@ enum ToyScreen {
         return Array(buf.prefix(max(0, n)))
     }
 
+    /// Like name(chain:), but splits the room loop into its three views using the
+    /// firmware's view byte (F800D804: 0 room, 1 outside, 2 clock; B cycles them).
+    static func label(core h: OpaquePointer, chain c: [UInt32], deviceID: String) -> String? {
+        guard let n = name(chain: c, deviceID: deviceID) else { return nil }
+        guard n == "room" else { return n }
+        var v: UInt8 = 0
+        guard tg_peek(h, 0xF800_D804, &v, 1) == 1 else { return n }
+        switch v { case 1: return "outside"; case 2: return "clock"; default: return n }
+    }
+
     /// A short name for the screen, or nil when the firmware isn't one we have mapped.
     static func name(chain c: [UInt32], deviceID: String) -> String? {
         guard let m = maps.first(where: { deviceID.contains($0.key) })?.value else { return nil }

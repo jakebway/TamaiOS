@@ -531,9 +531,12 @@ final class Emulator: ObservableObject {
             let pollStart = CACurrentMediaTime()
             if now >= nextScreenPoll, let toy = toyID {
                 nextScreenPoll = now + 0.5
-                let chain = withCore { ToyScreen.chain(core: $0) } ?? []
+                let read = withCore { h -> ([UInt32], String?) in
+                    let c = ToyScreen.chain(core: h); return (c, ToyScreen.label(core: h, chain: c, deviceID: toy))
+                }
+                let chain = read?.0 ?? []
                 // an empty stack is just the moment the CPU is inside an interrupt: keep the last reading
-                let label = ToyScreen.name(chain: chain, deviceID: toy) ?? "unknown"
+                let label = read?.1 ?? "unknown"
                 let entry = label + " [" + chain.map { String($0, radix: 16) }.joined(separator: ">") + "]"
                 if !chain.isEmpty, label != lastScreenNote {
                     lastScreenNote = label

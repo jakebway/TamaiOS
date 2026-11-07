@@ -413,7 +413,9 @@ final class Console: ObservableObject {
             var care = [UInt8](repeating: 0, count: 0x40)
             let careHex = tg_peek(h, 0xF800_D864, &care, care.count) == 1 ? care.map { String(format: "%02x", $0) }.joined() : "?"
             let careLine = "care block @F800D864 (+0x0C = attention bits): \(careHex)\n"
-            let textRuns = careLine + "text-like runs in RAM (glyph codes):\n" + runs.joined(separator: "\n") + "\n"
+            let chain = ToyScreen.chain(core: h)
+            let screenLine = "screen: \(ToyScreen.name(chain: chain, deviceID: emu.toy?.id ?? "") ?? "unknown")  call chain: " + chain.map { String($0, radix: 16) }.joined(separator: " > ") + "\n"
+            let textRuns = screenLine + careLine + "text-like runs in RAM (glyph codes):\n" + runs.joined(separator: "\n") + "\n"
             return textRuns + "name memory @F800DC30: \(nameHex)\nname key @F800D864: \(keyTxt) (table: 0 first Tama … Wonder Garden 2 = Clubutchi, Magic/Fairy 1 = Marupitchi)\n" + "stage \(b(0xF800D8B6))  character \(b(0xF800D8C4))  bathroom \(b(0xF800D888))  link mode \(b(0xF80178E4)) (0 playdate,1 gift,2 marry,3 travel)  gift role \(b(0xF80178BC))  travel role \(b(0xF80178C4)) (0 visit,1 invite)  clock drift \(tg_clock_drift(h)) s  asleep \(tg_is_asleep(h))"
         }
     }

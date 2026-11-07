@@ -49,6 +49,7 @@ int32_t tg_set_param(Emu *e, const char *name, double v);
 int32_t tg_peek(Emu *e, uint32_t addr, uint8_t *out, size_t n);
 int32_t tg_profile_sprite(Emu *e, int32_t rom, uint32_t *out);
 int32_t tg_profile_look(Emu *e, int32_t *out);
+int32_t tg_call_chain(Emu *e, uint32_t *out, size_t max);
 int32_t tg_poke(Emu *e, uint32_t addr, const uint8_t *data, size_t n);
 void tg_script_press(Emu *e, int32_t key, double delay);
 void tg_read_cstr(Emu *e, uint32_t addr, uint8_t **out, size_t *out_len);

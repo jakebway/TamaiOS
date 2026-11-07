@@ -1722,3 +1722,34 @@ pub extern "C" fn tg_profile_look(e: *mut Emu, out: *mut i32) -> i32 {
         1
     })
 }
+
+/// The firmware's call stack, outermost call first: each entry is a return address on the main
+/// (supervisor) stack. Every screen of the toy runs its own loop, so this chain says which screen is up
+/// (room, menu, profile, connection, …) without looking at the picture. Returns how many were written.
+#[no_mangle]
+pub extern "C" fn tg_call_chain(e: *mut Emu, out: *mut u32, max: usize) -> i32 {
+    if e.is_null() || out.is_null() || max == 0 { return 0; }
+    with(e, |e| {
+        let st = e.m.cpu.state();
+        let sp = if st[16] & 0x1F == 0x13 { st[13] } else { st[17 + 2 * 3] };
+        const TOP: u32 = 0xF801_7A00;
+        if !(0xF801_7000..TOP).contains(&sp) { return 0; }
+        let s = &mut e.m.sys;
+        let mut found = Vec::new();
+        let mut a = sp & !3;
+        while a < TOP {
+            let v = s.read32(a);
+            a += 4;
+            if v & 1 == 0 || !(0x2000_0000..0x2080_0000).contains(&v) { continue; }
+            let c = (v & !1) - 4;
+            let (h1, h2) = (s.read16(c), s.read16(c + 2));
+            let bl = h1 & 0xF800 == 0xF000 && h2 & 0xD000 == 0xD000;
+            let blx = h2 & 0xFF87 == 0x4780;
+            if bl || blx { found.push(v); }
+        }
+        let o = unsafe { std::slice::from_raw_parts_mut(out, max) };
+        let n = found.len().min(max);
+        for (i, v) in found.iter().rev().take(n).enumerate() { o[i] = *v; }
+        n as i32
+    })
+}

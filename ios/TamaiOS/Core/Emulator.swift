@@ -534,11 +534,11 @@ final class Emulator: ObservableObject {
                 let chain = withCore { ToyScreen.chain(core: $0) } ?? []
                 let label = ToyScreen.name(chain: chain, deviceID: toy) ?? "unknown"
                 let entry = label + " [" + chain.map { String($0, radix: 16) }.joined(separator: ">") + "]"
-                if entry != lastScreenNote {
-                    lastScreenNote = entry
+                if label != lastScreenNote {
+                    lastScreenNote = label
                     let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
                     screenHistory.append(f.string(from: Date()) + " " + entry)
-                    if screenHistory.count > 12 { screenHistory.removeFirst(screenHistory.count - 12) }
+                    if screenHistory.count > 20 { screenHistory.removeFirst(screenHistory.count - 20) }
                 }
             }
             if now >= nextNamePoll, let toy = toyID, !IRLink.shared.busy, !linkCover {

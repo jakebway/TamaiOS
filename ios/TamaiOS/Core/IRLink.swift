@@ -734,7 +734,7 @@ extension IRLink {
         DispatchQueue.main.async { startActiveNameRead(identity: identity) }
     }
     private static func startActiveNameRead(identity: String) {
-        guard let model = AppModel.current, let toy = model.emu.toy,
+        guard !LiveTamaName.shared.directAvailable, let model = AppModel.current, let toy = model.emu.toy,
               !model.emu.loading, !shared.busy, !model.emu.holdForApp, !model.emu.appWaiting,
               UIApplication.shared.applicationState == .active else { return }
         ProfileNameReader.shared.read(emu: model.emu, key: nil, spriteURL: ToyStore.spriteURL(toy.id)) { r in
@@ -761,7 +761,9 @@ extension IRLink {
         // (a Tama may have hatched or been renamed while you played another device).
         let todo = model.toys.filter { !Town.shared.state($0).away && ($0.id != current || LiveTamaName.savedName($0.id) == nil) }
         let urgent = todo.filter { missing($0) }
-        let later = recheck ? todo.filter { !missing($0) && !namesChecked.contains($0.id) } : []
+        // (No re-read of known devices any more: the active device's name and picture follow the firmware live, so a
+        // device is always up to date the moment it is played. The screen reader only fills in devices with nothing yet.)
+        let later: [Toy] = []
         guard !urgent.isEmpty || !later.isEmpty else { return }
         func read(_ t: Toy) {
             namesChecked.insert(t.id)

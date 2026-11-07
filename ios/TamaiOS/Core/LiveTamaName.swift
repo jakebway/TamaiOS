@@ -118,6 +118,8 @@ final class LiveTamaName: ObservableObject {
         }
     }
     private var directName: String? = nil
+    /// True while the firmware itself is telling us the name (or that the newborn isn't named yet): no screen reading needed.
+    var directAvailable: Bool { directName != nil }
     var verifiedName: String? { probeName.isEmpty ? nil : probeName }
     private init() {
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in

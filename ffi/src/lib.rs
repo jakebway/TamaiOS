@@ -1682,6 +1682,20 @@ pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32
                 o[(y * 64 + x) as usize] = 0xFF00_0000 | (r5 * 255 / 31) << 16 | (g6 * 255 / 63) << 8 | (b5 * 255 / 31);
             }
         }
+        // a lone pixel with nothing around it is a leftover in the art, not part of the picture
+        let snapshot: Vec<u32> = o.to_vec();
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                if snapshot[(y * 64 + x) as usize] == 0 { continue; }
+                let mut near = false;
+                for dy in -1..=1 { for dx in -1..=1 {
+                    if dx == 0 && dy == 0 { continue; }
+                    let (nx, ny) = (x + dx, y + dy);
+                    if nx >= 0 && ny >= 0 && nx < w as i32 && ny < h as i32 && snapshot[(ny * 64 + nx) as usize] != 0 { near = true; }
+                } }
+                if !near { o[(y * 64 + x) as usize] = 0; }
+            }
+        }
         (w << 8 | h) as i32
     })
 }

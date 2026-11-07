@@ -23,6 +23,19 @@ enum ToyScreen {
         "fairy": (0x2017_9B3F, 0x2017_9BD3, 0x2017_7B4B, 0x2017_858D),
     ]
 
+    /// The room's own loop (the code that draws the Tama's room) sits in this address window on each firmware;
+    /// the menu loop is more than 0x5D8 below it, and scenes (visits, link screens) run deeper in the stack.
+    private static let roomWindow: [String: ClosedRange<UInt32>] = [
+        "wondergarden": 0x2014_3200...0x2014_36FF,
+        "magic": 0x2014_3F00...0x2014_44FF,
+        "fairy": 0x2014_2500...0x2014_2AFF,
+    ]
+    /// True when the toy is just standing in its room: no menu, no link screen, no visit or other scene playing.
+    static func isRoom(chain c: [UInt32], deviceID: String) -> Bool {
+        guard let w = roomWindow.first(where: { deviceID.contains($0.key) })?.value, let first = c.first else { return false }
+        return w.contains(first)
+    }
+
     static func chain(core h: OpaquePointer) -> [UInt32] {
         var buf = [UInt32](repeating: 0, count: 16)
         let n = Int(tg_call_chain(h, &buf, 16))

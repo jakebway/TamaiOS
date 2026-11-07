@@ -407,6 +407,16 @@ final class IRLink {
                 tg_set_never_sleep(v, 0)
                 tg_wake(v)
                 tickAll(v, 25, audio)
+                // A partner saved in the middle of a visit or link scene would swallow the button presses (they
+                // would land inside the scene). Let it finish and settle in its room first, like waiting for the
+                // real toy to be idle. Seen in testing: pressing at once after a link failed, after ~10 s it worked.
+                var settled = 0, waitedTicks = 0
+                while settled < 2 && waitedTicks < 1800 {
+                    if ToyScreen.isRoom(chain: ToyScreen.chain(core: v), deviceID: partner.id) { settled += 1 } else { settled = 0 }
+                    if settled >= 2 { break }
+                    tickAll(v, 10, audio); waitedTicks += 10
+                }
+                if waitedTicks > 50 { emu.note("infrared link: \(partner.name) needed about \(waitedTicks / 50) s to finish its last scene before the link") }
                 var trace = [String]()      // which screen the partner is on after each key (read from the firmware, for the log)
                 for k in head + tail {
                     tg_press(v, k.rawValue, CACurrentMediaTime())

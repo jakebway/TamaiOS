@@ -1678,6 +1678,11 @@ pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32
                 let i = ((b >> (4 * (x & 1))) & 15) as usize;
                 if i == 0 { continue; }
                 let Some(&v) = colors.get(i) else { continue };
+                // pure red marks a single spot the toy paints over itself: it is not part of the Tama, so take the colour beside it
+                if v == 0x001f && x > 0 {
+                    o[(y * 64 + x) as usize] = o[(y * 64 + x - 1) as usize];
+                    continue;
+                }
                 let (b5, g6, r5) = (u32::from(v >> 11) & 31, u32::from(v >> 5) & 63, u32::from(v) & 31);
                 o[(y * 64 + x) as usize] = 0xFF00_0000 | (r5 * 255 / 31) << 16 | (g6 * 255 / 63) << 8 | (b5 * 255 / 31);
             }

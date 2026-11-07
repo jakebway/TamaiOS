@@ -42,6 +42,6 @@ enum ToyScreen {
         let d = c[i + 1]
         if d == m.grid { return "menu" }
         if let item = items.first(where: { m.item0 + $0.0 == d }) { return item.1 }
-        return "menu item 0x" + String(d, radix: 16)
+        return "menu"                                           // the cursor is moving between items
     }
 }

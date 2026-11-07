@@ -532,9 +532,10 @@ final class Emulator: ObservableObject {
             if now >= nextScreenPoll, let toy = toyID {
                 nextScreenPoll = now + 0.5
                 let chain = withCore { ToyScreen.chain(core: $0) } ?? []
+                // an empty stack is just the moment the CPU is inside an interrupt: keep the last reading
                 let label = ToyScreen.name(chain: chain, deviceID: toy) ?? "unknown"
                 let entry = label + " [" + chain.map { String($0, radix: 16) }.joined(separator: ">") + "]"
-                if label != lastScreenNote {
+                if !chain.isEmpty, label != lastScreenNote {
                     lastScreenNote = label
                     let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
                     screenHistory.append(f.string(from: Date()) + " " + entry)

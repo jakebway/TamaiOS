@@ -20,13 +20,23 @@ jobs:
           git -C upstream apply ../patches/radio.patch
           git -C upstream apply ../patches/ir_partner.patch
           cargo build --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --bin tg18cli
+      - name: Native timer and same-checkpoint regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p upstream/core/tests audit-results
+          cp tools/native_timer_audit.rs upstream/core/tests/tamaios_timer_audit.rs
+          TAMAIOS_AUDIT_FIRMWARE="$GITHUB_WORKSPACE/firmware" timeout 300 cargo test --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --test tamaios_timer_audit -- --nocapture --test-threads=1 2>&1 | tee audit-results/native-tests.txt
       - name: Run snapshot validation and timer diagnostics
+        if: always()
         run: python3 tools/timer_diagnostics.py
-      - name: Upload non-sensitive summary only
+      - name: Upload diagnostic summaries
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: headless-smoke-summary
-          path: audit-results/summary.json
+          path: |
+            audit-results/summary.json
+            audit-results/native-tests.txt
           if-no-files-found: warn
           retention-days: 7

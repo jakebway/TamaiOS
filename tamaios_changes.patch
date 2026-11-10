@@ -11,7 +11,7 @@
          let start = Date()
          var last = Date()
          while true {
-@@ -14,18 +18,27 @@
+@@ -14,18 +18,26 @@
                  last = Date()
                  let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
                  if expected >= 0 && buffer.count < expected && tag != 0x4DF0 {
@@ -42,7 +42,7 @@
                      buffer += n
                  }
                  continue
-@@ -34,7 +47,7 @@
+@@ -34,7 +46,7 @@
              if !gotAny && now.timeIntervalSince(start) > firstTimeout { throw LinkError.noAnswer }
              if gotAny && now.timeIntervalSince(last) > idleTimeout {
                  trace("IDLE TIMEOUT acked=\(acked) received=\(buffer.count) expected=\(expected)")

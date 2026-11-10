@@ -8,7 +8,7 @@ import tempfile
 root = pathlib.Path.cwd()
 out = root / 'partner-results'
 out.mkdir(exist_ok=True)
-report = {'commit': os.environ['GITHUB_SHA'], 'passed': False, 'scope': 'Actual partner radioAnswer replay plus post-visit release policy; no firmware homecoming, save success, worker concurrency or phone timing claim'}
+report = {'commit': os.environ['GITHUB_SHA'], 'passed': False, 'scope': 'Partner reply, scene-release policy and audio-buffer replays; no firmware homecoming, save success, worker concurrency, energy measurement or phone lifecycle claim'}
 log = []
 def command(args):
     p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
@@ -74,6 +74,82 @@ def replay(work, name, implementation):
     command(['swiftc', '-swift-version', '5', str(source), '-o', str(binary)])
     p = subprocess.run([str(binary)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
     return {'exit_code': p.returncode, 'output': p.stdout.splitlines()}
+def audio_buffer_replay(work):
+    def extract(text, marker):
+        start = text.index(marker)
+        end = text.index('{', start) + 1
+        depth = 1
+        while depth and end < len(text):
+            depth += (text[end] == '{') - (text[end] == '}')
+            end += 1
+        if depth: raise ValueError('audio source extraction failed')
+        return text[start:end]
+    audio = (root / 'ios/TamaiOS/Core/Audio.swift').read_text()
+    policies = (root / 'ios/TamaiOS/Core/CareEventPolicy.swift').read_text()
+    actual = '\n'.join(extract(audio, marker) for marker in ['    private func setForegroundAudible(', '    private func pull(', '    func push(', '    var queued:'])
+    fixture = r'''import Foundation
+import os
+'''+extract(policies, 'struct ForegroundPlaybackPolicy {')+r'''
+final class AudioOut {
+ static let rate = 44100.0
+ let cap = 88200
+ let ring = UnsafeMutablePointer<Float>.allocate(capacity: 88200)
+ let lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+ var head = 0, count = 0, underruns = 0
+ var priming = true, muted = false, foregroundAudible = false
+ var minFill = 0.0, maxFill = 1.0
+ init() { ring.initialize(repeating: 0, count: cap); lock.initialize(to: os_unfair_lock()) }
+ deinit { ring.deinitialize(count: cap); ring.deallocate(); lock.deinitialize(count: 1); lock.deallocate() }
+ func transition(_ active: Bool) { setForegroundAudible(active) }
+ func enqueue(_ samples: [Int16]) { samples.withUnsafeBufferPointer { b in if let p = b.baseAddress { push(p, b.count) } } }
+ func render(_ n: Int) -> [Float] {
+  var out = [Float](repeating: 9, count: n)
+  out.withUnsafeMutableBufferPointer { pull($0.baseAddress!, n) }
+  return out
+ }
+'''+actual+r'''
+}
+let replay = AudioOut()
+let wave: [Int16] = [-32768,-16384,0,16384,32767]
+let expected = wave.map { Float($0) / 32768.0 }
+var checks = 0
+func check(_ ok: Bool, _ message: String) { checks += 1; if !ok { fatalError("AUDIO BUFFER FAIL: " + message) } }
+check(replay.queued == 0, "initially empty")
+replay.transition(true); replay.enqueue(wave)
+check(replay.queued == wave.count, "foreground samples queued")
+check(replay.render(wave.count) == expected, "foreground conversion and playback preserved")
+replay.enqueue(wave); replay.transition(false)
+check(replay.queued == 0, "background transition clears queue")
+let storage = Array(UnsafeBufferPointer(start: replay.ring, count: replay.cap))
+for _ in 0..<200 { replay.enqueue(wave) }
+check(replay.queued == 0, "background samples never accumulate")
+check(Array(UnsafeBufferPointer(start: replay.ring, count: replay.cap)) == storage, "background push never writes sample storage")
+check(replay.render(8) == [Float](repeating: 0, count: 8), "background renders silence")
+replay.transition(true)
+check(replay.render(8) == [Float](repeating: 0, count: 8), "no old beep after foreground return")
+replay.enqueue(wave)
+check(replay.render(wave.count) == expected, "new foreground audio resumes")
+replay.muted = true; replay.enqueue(wave)
+check(replay.render(wave.count) == [Float](repeating: 0, count: wave.count), "foreground mute remains effective")
+replay.muted = false
+wave.withUnsafeBufferPointer { replay.push($0.baseAddress!, 0) }
+check(replay.queued == 0, "zero-length push remains harmless")
+for _ in 0..<10 {
+ replay.transition(false); replay.enqueue(wave)
+ check(replay.queued == 0, "repeated background transition stays empty")
+ check(replay.render(wave.count) == [Float](repeating: 0, count: wave.count), "repeated background remains silent")
+ replay.transition(true); replay.enqueue(wave)
+ check(replay.render(wave.count) == expected, "repeated foreground playback recovers")
+}
+print("AUDIO BUFFER CHECKS PASSED: " + String(checks))
+print("Scope: actual buffer methods with synthetic samples and native locks; not AVAudioEngine lifecycle, notification delivery, energy measurement or a thread-race proof")
+'''
+    source = pathlib.Path(work) / 'audio-buffer.swift'
+    binary = pathlib.Path(work) / 'audio-buffer'
+    source.write_text(fixture)
+    command(['swiftc', '-swift-version', '5', str(source), '-o', str(binary)])
+    p = subprocess.run([str(binary)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    return {'exit_code': p.returncode, 'output': p.stdout.splitlines(), 'source_sha256': hashlib.sha256(audio.encode()).hexdigest(), 'scope': 'Source-extracted buffer replay only; no battery saving or iOS background-execution guarantee'}
 try:
     with tempfile.TemporaryDirectory() as work:
         report['before'] = replay(work, 'before', method())
@@ -91,7 +167,8 @@ try:
         command(['swiftc', '-swift-version', '5', 'ios/TamaiOS/Core/SceneReleasePolicy.swift', 'tools/scene_release_audit.swift', '-o', str(binary)])
         p = subprocess.run([str(binary)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         report['scene_release'] = {'exit_code': p.returncode, 'output': p.stdout.splitlines(), 'scope': 'Actual release policy with synthetic observations plus source-placement assertions; not a firmware, save-completion or concurrency test'}
-        report['passed'] = report['after']['exit_code'] == 0 and p.returncode == 0
+        report['audio_buffer'] = audio_buffer_replay(work)
+        report['passed'] = report['after']['exit_code'] == 0 and p.returncode == 0 and report['audio_buffer']['exit_code'] == 0
 except Exception as exc:
     report['error'] = type(exc).__name__ + ': ' + str(exc)
 report['log_tail'] = log[-30:]

@@ -467,6 +467,7 @@ final class Console: ObservableObject {
             "-- perf --", run("perf", emu: emu),
             "-- settings --", run("params", emu: emu),
             "-- core status --", run("status", emu: emu),
+            "-- recent memory changes (F800Dxxx, steady timers left out) --", emu.memLog.suffix(40).joined(separator: "\n"),
             "-- firmware log (quiet, last 15) --", quietLog(emu, 15),
             "-- app log (last 150) --", run("applog 150", emu: emu),
             "-- town --", run("town", emu: emu),

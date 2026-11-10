@@ -639,6 +639,7 @@ final class Emulator: ObservableObject {
                         }
                     } else { self.deadPolls = 0 }
                 }
+                recordMemoryChanges()
                 let sample = careSample(), bathroomRaw = bathroomSample(), tummyRaw = tummySample()
                 let observedAt = ProcessInfo.processInfo.systemUptime, expectedID = toyID
                 DispatchQueue.main.async {
@@ -740,6 +741,31 @@ final class Emulator: ObservableObject {
                     charOK == 1 ? id : -1, sigOK == 1 ? signature.map { String(format: "%02X", $0) }.joined() : "")
         }
         return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1, sample?.3 ?? -1, sample?.4 ?? "")
+    }
+    /// Every second: which bytes of the Tama's memory changed (apart from the steady timers), kept for the diag so that a
+    /// moment like the tummy growl can be found from what the toy did to its memory.
+    private var memPrev: [UInt8] = []
+    private var memPrevID = ""
+    private(set) var memLog: [String] = []
+    private func recordMemoryChanges() {
+        guard let toy = toyID else { return }
+        let cur: [UInt8]? = withCore { h in
+            var b = [UInt8](repeating: 0, count: 0x300)
+            return tg_peek(h, 0xF800_D800, &b, 0x300) == 1 ? b : nil
+        } ?? nil
+        guard let cur else { return }
+        defer { memPrev = cur; memPrevID = toy }
+        guard memPrevID == toy, memPrev.count == cur.count else { return }
+        let noisy: Set<Int> = [0x21, 0x6A, 0x6C, 0x6D, 0x76, 0x77, 0x78, 0x80, 0x94, 0xDD, 0xF4]
+        var parts: [String] = []
+        for i in 0..<cur.count where cur[i] != memPrev[i] && !noisy.contains(i) {
+            parts.append(String(format: "%03X:%d>%d", i, memPrev[i], cur[i]))
+            if parts.count >= 14 { break }
+        }
+        guard !parts.isEmpty else { return }
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+        let line = f.string(from: Date()) + " D" + parts.joined(separator: " D")
+        DispatchQueue.main.async { self.memLog.append(line); if self.memLog.count > 60 { self.memLog.removeFirst(self.memLog.count - 60) } }
     }
     /// F800D88A counts down from about 19 to 0 after a meal has been digested; the Tama goes to the bathroom (F800D888 = 1) when it
     /// reaches 0, so it going above 0 is the toy's own "the tummy is rumbling" moment (found in the test harness on Wonder Garden).

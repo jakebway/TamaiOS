@@ -248,17 +248,18 @@ final class CareAlerts: ObservableObject {
         }
     }
     func clearDeath(deviceID: String) { DispatchQueue.main.async { self.deathTokens.removeValue(forKey: deviceID) } }
-    private var tummyTimer: [String: Int] = [:]
+    private var tummyArmed: [String: Bool] = [:]
     private var tummyEpisode: [String: Int] = [:]
-    /// The toy's digestion countdown (F800D88A) starts when its tummy begins to rumble and ends with the bathroom visit.
-    /// Seeing it start (0 → above 0) while the Tama is not on the toilet already is the early warning.
+    /// The toy's digestion countdown (F800D88A, about 19 down to 0) ends with the bathroom visit. The last stretch of it
+    /// (5 or less, around a minute) is the warning to take the Tama to the bathroom before it goes.
     func observeTummy(timer: Int, bathroom: Int, deviceID: String, observedAt: Double) {
         DispatchQueue.main.async {
             guard CareSupport.supports(deviceID), timer >= 0 else { return }
-            let previous = self.tummyTimer[deviceID]; self.tummyTimer[deviceID] = timer
-            guard let previous, previous == 0, timer > 0, bathroom == 0 else { return }
+            if timer == 0 || timer > 5 { self.tummyArmed[deviceID] = true; return }
+            guard self.tummyArmed[deviceID] == true, bathroom == 0 else { return }
+            self.tummyArmed[deviceID] = false
             self.tummyEpisode[deviceID, default: 0] += 1
-            self.record("TUMMY RUMBLE countdown F800D88A 0->\(timer)")
+            self.record("TUMMY WARNING countdown F800D88A = \(timer)")
             guard self.enabled else { return }
             guard UIApplication.shared.applicationState != .active else { self.count("tummy skipped: foreground"); return }
             let event = Event(id: UUID().uuidString, deviceID: deviceID, name: LiveTamaName.shared.name,
@@ -394,8 +395,8 @@ final class CareAlerts: ObservableObject {
                     content.title = "\(event.name) grew up!"
                     content.body = LiveTamaName.shared.verifiedName.map { "Meet " + $0 + "." } ?? "Open TamaiOS to see your Tama’s new look."
                 case .sickness: content.title = event.raw >= 0 && event.raw & 0x100 != 0 ? "\(event.name) has a toothache" : "\(event.name) is sick"; content.body = "Open TamaiOS to check on them."
-                case .tummy: content.title = "\(event.name) has to go to the bathroom soon"; content.body = "Their tummy is rumbling. Open TamaiOS to be ready."
-                case .tummy: content.title = "\(event.name) has to go to the bathroom soon"; content.body = "Their tummy is rumbling. Open TamaiOS to be ready."
+                case .tummy: content.title = "\(event.name) has to go to the bathroom"; content.body = "Their tummy is rumbling. Open TamaiOS and take them before they go."
+                case .tummy: content.title = "\(event.name) has to go to the bathroom"; content.body = "Their tummy is rumbling. Open TamaiOS and take them before they go."
                 case .bathroom: content.title = "\(event.name) went to the bathroom"; content.body = "Open TamaiOS to help them clean up."
                 case .death: content.title = "\(event.name) passed away"; content.body = "Open TamaiOS to start a new egg."
                 case .hatch: content.title = "\(event.name) is hatching!"; content.body = "Open TamaiOS to meet your new Tama."

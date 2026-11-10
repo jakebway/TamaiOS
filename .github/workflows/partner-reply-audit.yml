@@ -1,0 +1,58 @@
+name: Headless partner reply validation
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/firmware-grounded-validation]
+    paths:
+      - tamaios_changes.patch
+      - ios/TamaiOS/Core/IRLink.swift
+      - tools/partner_reply_audit.py
+      - .github/workflows/partner-reply-audit.yml
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare actual parser before and after the cumulative patch
+        run: python3 tools/partner_reply_audit.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: partner-reply-results
+          path: partner-results/report.json
+          if-no-files-found: warn
+          retention-days: 7
+  publish:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: partner-reply-results
+          path: reports
+      - name: Publish before/after findings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          p = pathlib.Path('reports/report.json')
+          report = json.loads(p.read_text()) if p.exists() else {'commit': os.environ['GITHUB_SHA'], 'passed': False, 'error': 'No replay report produced'}
+          report['job_result'] = os.environ['TEST_RESULT']
+          report['run_id'] = os.environ['GITHUB_RUN_ID']
+          body = pathlib.Path('partner-report.md')
+          body.write_text('```json\n' + json.dumps(report, indent=2) + '\n```\n')
+          subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS partner reply audit ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(body)], check=True)
+          PY

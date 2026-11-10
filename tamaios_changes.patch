@@ -104,3 +104,51 @@
 -        guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else { throw ImportError.unreadable("Finish the current operation before resetting.") }
 +        guard let toy = emu.toy, emu.canReplaceDevice else { throw ImportError.unreadable("Finish the current operation before resetting.") }
          let fm = FileManager.default
+--- a/ios/TamaiOS/Core/IRLink.swift
++++ b/ios/TamaiOS/Core/IRLink.swift
+@@ -101,27 +101,38 @@
+     fileprivate func radioAnswer(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, firstTicks: Int = 200, idleTicks: Int = 200) -> [UInt8]? {
+         var gotAny = false, acked = false
+         var buffer: [UInt8] = [], expected = -1
++        func validReply() -> [UInt8]? {
++            expected < 0 || buffer.count == expected ? buffer : nil
++        }
+         var waited = 0
+         while true {
+             if let n = radioRead(p) {
+                 gotAny = true; waited = 0
+                 let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
+-                if expected >= 0 && buffer.count < expected && tag != 0x4DF0 { buffer += n }
++                if expected >= 0 && buffer.count < expected && tag != 0x4DF0 {
++                    guard n.count <= expected - buffer.count else { return nil }
++                    buffer += n
++                }
+                 else if tag == 0x0CF0 {
++                    guard n.count >= 4 else { return nil }
+                     acked = true
+                     let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
+-                    if status == 0x0200 { return buffer }
+-                    _ = radioWrite(p, [0xF0, 0x8E, 0x0D], audio)
++                    if status == 0x0200 { return validReply() }
++                    guard radioWrite(p, [0xF0, 0x8E, 0x0D], audio) else { return nil }
+                 } else if tag == 0x0DF0 {
+-                    expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
++                    guard n.count >= 4 else { return nil }
++                    expected = Int(UInt16(n[2]) | UInt16(n[3]) << 8)
+                     buffer = []
+-                } else if tag == 0x4DF0 || tag == 0x5CF0 { return buffer }
+-                else if expected >= 0 { buffer += n }
++                } else if tag == 0x4DF0 || tag == 0x5CF0 { return validReply() }
++                else if expected >= 0 {
++                    guard n.count <= expected - buffer.count else { return nil }
++                    buffer += n
++                }
+                 continue
+             }
+             tickAll(p, 1, audio)
+             waited += 1
+             if !gotAny && waited > firstTicks { return nil }
+-            if gotAny && waited > idleTicks { return acked ? buffer : nil }
++            if gotAny && waited > idleTicks { return acked ? validReply() : nil }
+         }
+     }

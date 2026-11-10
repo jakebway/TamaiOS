@@ -596,12 +596,15 @@ final class Emulator: ObservableObject {
             }
             if now >= nextCarePoll {
                 nextCarePoll = now + 1
-                if let toy = toyID, let (st, gen, asleep) = withCore({ h -> (UInt8, UInt8, Int32) in
-                    var a: UInt8 = 0, b: UInt8 = 0
-                    _ = tg_peek(h, 0xF800D8B6, &a, 1); _ = tg_peek(h, 0xF800D89E, &b, 1)
-                    return (a, b, tg_is_asleep(h))
+                if let toy = toyID, let (st, gen, asleep, chr) = withCore({ h -> (UInt8, UInt8, Int32, UInt8) in
+                    var a: UInt8 = 0, b: UInt8 = 0, c: UInt8 = 0
+                    _ = tg_peek(h, 0xF800D8B6, &a, 1); _ = tg_peek(h, 0xF800D89E, &b, 1); _ = tg_peek(h, 0xF800D8C4, &c, 1)
+                    return (a, b, tg_is_asleep(h), c)
                 }) {
                     if st >= 1 { self.wasAliveForDeath = true; self.deadPolls = 0; CareAlerts.shared.clearDeath(deviceID: toy) }
+                    // An egg is also stage 0 (the new egg after a marriage keeps generation >= 1) but has no character
+                    // yet (F800D8C4 = 0); a Tama that died still has one. An egg can never die, so it must never count.
+                    else if chr == 0 { self.deadPolls = 0 }
                     else if gen >= 1 && asleep == 0 && self.wasAliveForDeath {
                         self.deadPolls += 1
                         if self.deadPolls >= 60 {

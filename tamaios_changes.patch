@@ -152,3 +152,24 @@
 +            if gotAny && waited > idleTicks { return acked ? validReply() : nil }
          }
      }
+--- a/ios/TamaiOS/Core/LiveTamaName.swift
++++ b/ios/TamaiOS/Core/LiveTamaName.swift
+@@ -101,3 +101,7 @@
+     func observe(deviceID: String, stage: Int, character: Int, signature: String) {
++        guard stage == 0 || ((1...255).contains(stage) && character >= 0 && !signature.isEmpty) else {
++            probeStatus = "Ignored incomplete live identity sample; retained verified name"
++            return
++        }
+         self.deviceID = deviceID; self.stage = stage; self.character = character; self.signature = signature
+         let key = LiveNamePolicy.key(deviceID: deviceID, stage: stage, character: character, signature: signature)
+--- a/ios/TamaiOS/Core/CareAlerts.swift
++++ b/ios/TamaiOS/Core/CareAlerts.swift
+@@ -101,3 +101,8 @@
+         DispatchQueue.main.async {
++            guard AppModel.current?.emu.toy?.id == deviceID else {
++                self.count("skipped: stale observation device")
++                self.record("SKIP observation: device changed before processing")
++                return
++            }
+             let previousIdentity = LiveTamaName.shared.identity
+             let previousVerifiedName = previousIdentity?.hasPrefix(deviceID + "." + signature + ".") == true ? LiveTamaName.shared.verifiedName : nil

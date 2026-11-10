@@ -8,9 +8,10 @@ import sys
 
 root = pathlib.Path.cwd()
 kind = sys.argv[1]
+variant = os.environ.get('TAMAIOS_TIMER_VARIANT', 'baseline')
 out = root / 'integration-results'
 out.mkdir(exist_ok=True)
-report = {'group': kind, 'commit': os.environ['GITHUB_SHA'], 'passed': False, 'scope': 'Real FFI startup/isolation/snapshot only; synthetic unused-SRAM marker, no connection gameplay' if kind == 'ffi' else 'Unsigned iOS compilation only; no installation or phone lifecycle test'}
+report = {'group': kind, 'variant': variant, 'commit': os.environ['GITHUB_SHA'], 'passed': False, 'scope': 'Real FFI startup/isolation/snapshot only; synthetic unused-SRAM marker, no connection gameplay' if kind == 'ffi' else 'Unsigned iOS compilation only; no installation or phone lifecycle test'}
 log = []
 def run(args, timeout=300, cwd=None):
     try:
@@ -23,6 +24,8 @@ def run(args, timeout=300, cwd=None):
     if proc.returncode:
         raise RuntimeError('command failed with exit ' + str(proc.returncode))
 try:
+    if variant not in ['baseline', 'candidate']:
+        raise ValueError('unknown timer variant')
     run(['git', 'clone', 'https://github.com/oreo-fox/tg18-emu', 'upstream'])
     run(['git', '-C', 'upstream', 'checkout', '41204c92e98a8882d5c90a9876d8990f3b63e285'])
     report['core_commit'] = subprocess.check_output(['git', '-C', 'upstream', 'rev-parse', 'HEAD'], text=True).strip()
@@ -31,6 +34,11 @@ try:
         path = root / 'patches' / name
         report['patches'][name] = hashlib.sha256(path.read_bytes()).hexdigest()
         run(['git', '-C', 'upstream', 'apply', '../patches/' + name])
+    if variant == 'candidate':
+        candidate = root / 'tools/timer_snapshot_history.patch'
+        run(['git', '-C', 'upstream', 'apply', '--check', str(candidate)])
+        run(['git', '-C', 'upstream', 'apply', str(candidate)])
+        report['candidate_patch_sha256'] = hashlib.sha256(candidate.read_bytes()).hexdigest()
     patch = root / 'tamaios_changes.patch'
     if patch.exists():
         run(['git', 'apply', '--check', str(patch)])

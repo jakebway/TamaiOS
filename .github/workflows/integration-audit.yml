@@ -12,8 +12,16 @@ jobs:
       matrix:
         include:
           - kind: ffi
+            variant: baseline
             os: ubuntu-latest
           - kind: ios
+            variant: baseline
+            os: macos-latest
+          - kind: ffi
+            variant: candidate
+            os: ubuntu-latest
+          - kind: ios
+            variant: candidate
             os: macos-latest
     runs-on: ${{ matrix.os }}
     timeout-minutes: 55
@@ -22,12 +30,14 @@ jobs:
         with:
           lfs: true
           persist-credentials: false
-      - name: Run integration group
+      - name: Run isolated integration variant
+        env:
+          TAMAIOS_TIMER_VARIANT: ${{ matrix.variant }}
         run: python3 tools/run_integration_audit.py ${{ matrix.kind }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: integration-${{ matrix.kind }}
+          name: integration-${{ matrix.variant }}-${{ matrix.kind }}
           path: integration-results/
           retention-days: 7
           if-no-files-found: warn
@@ -45,20 +55,31 @@ jobs:
         with:
           pattern: integration-*
           path: reports
-          merge-multiple: true
-      - name: Publish integration results
+          merge-multiple: false
+      - name: Publish separate baseline and candidate results
         env:
           GH_TOKEN: ${{ github.token }}
           MATRIX_RESULT: ${{ needs.checks.result }}
         run: |
           python3 - <<'PY'
           import json, os, pathlib, subprocess
-          groups = {}
-          for kind in ['ffi', 'ios']:
-              p = pathlib.Path('reports') / (kind + '.json')
-              groups[kind] = json.loads(p.read_text()) if p.exists() else {'passed': False, 'error': 'No report produced; inspect startup/checkout/upload'}
-          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'matrix_result': os.environ['MATRIX_RESULT'], 'groups': groups, 'limits': 'No merge, no app installation, no paired gameplay or notification delivery guarantee. No firmware, snapshots or app binaries published.'}
+          variants = {}
+          for variant in ['baseline', 'candidate']:
+              groups = {}
+              for kind in ['ffi', 'ios']:
+                  p = pathlib.Path('reports') / ('integration-' + variant + '-' + kind) / (kind + '.json')
+                  group = json.loads(p.read_text()) if p.exists() else {'passed': False, 'error': 'No report produced; inspect startup/checkout/upload'}
+                  if group.get('variant') != variant or group.get('commit') != os.environ['GITHUB_SHA']:
+                      group['passed'] = False
+                      group['report_identity_error'] = True
+                  if variant == 'candidate' and not group.get('candidate_patch_sha256'):
+                      group['passed'] = False
+                      group['candidate_evidence_missing'] = True
+                  groups[kind] = group
+              variants[variant] = groups
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'matrix_result': os.environ['MATRIX_RESULT'], 'groups': variants['baseline'], 'candidate_groups': variants['candidate'], 'limits': 'Candidate patch is opt-in inside integration CI only; shared app build core patches are unchanged. No merge, installation, paired gameplay or notification delivery guarantee. No firmware, snapshots or app binaries published.'}
           body = pathlib.Path('integration-report.md')
           body.write_text('```json\n' + json.dumps(report, indent=2) + '\n```\n')
           subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS integration audit ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(body)], check=True)
+          raise SystemExit(0 if all(group.get('passed') is True for groups in variants.values() for group in groups.values()) else 1)
           PY

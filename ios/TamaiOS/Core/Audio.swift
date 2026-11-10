@@ -82,6 +82,11 @@ final class AudioOut {
     func push(_ s: UnsafePointer<Int16>, _ n: Int) {
         guard n > 0 else { return }
         os_unfair_lock_lock(lock)
+        // Background output is silent: skip conversion and speaker-buffer writes.
+        guard foregroundAudible else {
+            os_unfair_lock_unlock(lock)
+            return
+        }
         for k in 0..<n {
             if count == cap { head = (head + 1) % cap; count -= 1 }
             ring[(head + count) % cap] = Float(s[k]) / 32768.0

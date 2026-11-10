@@ -1,0 +1,11 @@
+--- a/core/src/sys.rs
++++ b/core/src/sys.rs
+@@ -400,6 +400,7 @@
+                 self.timer_elapsed(n) / self.timer_period(n)
+             } else {
+-                0
++                // A stopped timer's serialized history is not an active schedule.
++                self.timers[n].periods_seen
+             };
+         }
+     }

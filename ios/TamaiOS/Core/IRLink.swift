@@ -14,6 +14,7 @@ final class IRLink {
     /// A link is being set up or running: nothing may change the toy's clock or state meanwhile.
     var busy: Bool { active || starting || CACurrentMediaTime() < quietUntil }
     fileprivate var quietUntil = 0.0      // the visit scene keeps playing after the infrared stops: no background reading then
+    private var sceneReleasePolicy = SceneReleasePolicy()
     private var cooldownUntil = 0.0
     private var lastEnd = 0.0
     private var heldFrame: [UInt32]? = nil     // the CONNECTING picture the screen is held on during a Travel invitation
@@ -66,8 +67,19 @@ final class IRLink {
 
     /// Called from the run loop (core locked) whenever the radio state is polled.
     func watch(emu: Emulator, handle h: OpaquePointer, deviceID: String, now: Double) {
-        guard !active, !starting else { return }
-        guard IRLink.waiting(h) else {
+        guard !active, !starting else {
+            _ = sceneReleasePolicy.observe(now: now, deadline: quietUntil, deviceID: deviceID,
+                operationBusy: true, room: false, waiting: false)
+            return
+        }
+        let waiting = IRLink.waiting(h)
+        let room = now < quietUntil && ToyScreen.isRoom(chain: ToyScreen.chain(core: h), deviceID: deviceID)
+        if let reason = sceneReleasePolicy.observe(now: now, deadline: quietUntil, deviceID: deviceID,
+            operationBusy: false, room: room, waiting: waiting) {
+            quietUntil = 0
+            emu.note("infrared scene lock released: " + reason)
+        }
+        guard waiting else {
             // you backed out of the WAITING screen: the next time you open it, try again right away
             if now >= lastEnd + 3 { cooldownUntil = 0 }
             return
@@ -80,8 +92,13 @@ final class IRLink {
             cooldownUntil = now + 8
             emu.muteUntil = CACurrentMediaTime() + 1.5
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard emu.toy?.id == deviceID, !emu.loading else { return }
+                emu.say("This Download connection isn’t supported in TamaiOS. Use Connection › App › Download for items.", seconds: 7)
                 emu.press(.c)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    guard emu.toy?.id == deviceID, !emu.loading else { return }
+                    emu.release(.c)
+                }
             }
             return
         }
@@ -132,8 +149,13 @@ final class IRLink {
             emu.muteUntil = CACurrentMediaTime() + 1.5
             // a single C goes back to the INVITE / VISIT list, so it looks as if the button did nothing
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard emu.toy?.id == deviceID, !emu.loading else { return }
+                emu.say("Only Invite is supported on the active Tama. Choose Invite; the other Tama will visit.", seconds: 7)
                 emu.press(.c)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    guard emu.toy?.id == deviceID, !emu.loading else { return }
+                    emu.release(.c)
+                }
             }
             return
         }
@@ -217,28 +239,40 @@ final class IRLink {
     fileprivate func radioAnswer(_ p: OpaquePointer, _ audio: UnsafeMutablePointer<Int16>, firstTicks: Int = 200, idleTicks: Int = 200) -> [UInt8]? {
         var gotAny = false, acked = false
         var buffer: [UInt8] = [], expected = -1
+        func validReply() -> [UInt8]? {
+            expected < 0 || buffer.count == expected ? buffer : nil
+        }
         var waited = 0
         while true {
             if let n = radioRead(p) {
                 gotAny = true; waited = 0
                 let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
-                if expected >= 0 && buffer.count < expected && tag != 0x4DF0 { buffer += n }
+                if expected >= 0 && buffer.count < expected && tag != 0x4DF0 {
+                    let remaining = expected - buffer.count
+                    guard n.count <= remaining || (n.count == 20 && remaining < 20) else { return nil }
+                    buffer += n.prefix(remaining)
+                }
                 else if tag == 0x0CF0 {
+                    guard n.count >= 4 else { return nil }
                     acked = true
                     let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
-                    if status == 0x0200 { return buffer }
-                    _ = radioWrite(p, [0xF0, 0x8E, 0x0D], audio)
+                    if status == 0x0200 { return validReply() }
+                    guard radioWrite(p, [0xF0, 0x8E, 0x0D], audio) else { return nil }
                 } else if tag == 0x0DF0 {
-                    expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
+                    guard n.count >= 4 else { return nil }
+                    expected = Int(UInt16(n[2]) | UInt16(n[3]) << 8)
                     buffer = []
-                } else if tag == 0x4DF0 || tag == 0x5CF0 { return buffer }
-                else if expected >= 0 { buffer += n }
+                } else if tag == 0x4DF0 || tag == 0x5CF0 { return validReply() }
+                else if expected >= 0 {
+                    guard n.count <= expected - buffer.count else { return nil }
+                    buffer += n
+                }
                 continue
             }
             tickAll(p, 1, audio)
             waited += 1
             if !gotAny && waited > firstTicks { return nil }
-            if gotAny && waited > idleTicks { return acked ? buffer : nil }
+            if gotAny && waited > idleTicks { return acked ? validReply() : nil }
         }
     }
 

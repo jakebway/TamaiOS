@@ -100,6 +100,7 @@ final class AppModel: ObservableObject {
     }
 
     func play(_ toy: Toy) {
+        guard emu.canReplaceDevice else { emu.say("Finish the current operation before changing devices."); return }
         Prefs.d.set(toy.id, forKey: "currentToy")
         emu.load(toy)
         objectWillChange.send()
@@ -122,6 +123,7 @@ final class AppModel: ObservableObject {
     }
 
     func remove(_ toy: Toy) {
+        guard emu.canReplaceDevice else { emu.say("Finish the current operation before deleting a device."); return }
         if emu.toy?.id == toy.id { emu.unload(); emu.toy = nil }
         ToyStore.delete(toy.id)
         toys = ToyStore.list()
@@ -148,6 +150,7 @@ final class AppModel: ObservableObject {
 
     /// Restore a backup into `toy`; false if it doesn't fit that device's ROM.
     func restoreBackup(_ data: Data, into toy: Toy) -> Bool {
+        guard emu.canReplaceDevice else { emu.say("Finish the current operation before restoring a device."); return false }
         if emu.toy?.id == toy.id { let ok = emu.restoreBackup(data); if ok { forgetName(toy.id) }; return ok }
         guard let rom = try? Data(contentsOf: ToyStore.romURL(toy.id)) else { return false }
         let fits = rom.withUnsafeBytes { r in data.withUnsafeBytes { s in
@@ -169,6 +172,7 @@ final class AppModel: ObservableObject {
 
     /// Erase `toy` and start it fresh, whichever device is running.
     func reset(_ toy: Toy) throws {
+        guard emu.canReplaceDevice else { throw ImportError.unreadable("Finish the current operation before resetting.") }
         if emu.toy?.id == toy.id { try resetCurrentDevice(); return }
         guard !IRLink.shared.active else { throw ImportError.unreadable("Finish the infrared link first.") }
         let fm = FileManager.default
@@ -191,7 +195,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetCurrentDevice() throws {
-        guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else { throw ImportError.unreadable("Finish the current operation before resetting.") }
+        guard let toy = emu.toy, emu.canReplaceDevice else { throw ImportError.unreadable("Finish the current operation before resetting.") }
         let fm = FileManager.default
         let working = ToyStore.dir(toy.id)
         let staging = ToyStore.root.appendingPathComponent(".reset-" + UUID().uuidString, isDirectory: true)

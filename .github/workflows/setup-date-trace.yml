@@ -1,0 +1,105 @@
+name: Short every-step setup-date trace
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/firmware-grounded-validation]
+    paths:
+      - tools/setup_date_trace.rs
+      - .github/workflows/setup-date-trace.yml
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Reuse exact survey helpers with a short entry point
+        run: |
+          set -euo pipefail
+          mkdir -p ffi/examples trace-results trace-frames
+          python3 tools/prepare_core.py --variant legacy | tee trace-results/core-preparation.json
+          python3 - <<'PY'
+          import pathlib
+          source = pathlib.Path('tools/firmware_fixture_survey.rs').read_text()
+          marker = 'fn main() {'
+          assert source.count(marker) == 1
+          source = source.replace(marker, '#[allow(dead_code)]\nfn original_survey_main() {', 1)
+          entry = pathlib.Path('tools/setup_date_trace.rs').read_text()
+          pathlib.Path('ffi/examples/setup_date_trace.rs').write_text(source + '\n' + entry)
+          PY
+      - name: Run only the short setup prefixes
+        env:
+          TAMAIOS_AUDIT_FIRMWARE: ${{ github.workspace }}/firmware
+          TAMAIOS_SURVEY_OUTPUT: ${{ github.workspace }}/trace-results/survey.json
+          TAMAIOS_SURVEY_FRAMES: ${{ github.workspace }}/trace-frames
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path ffi/Cargo.toml --example setup_date_trace 2>&1 | tee trace-results/run.txt
+      - name: OCR every phase-tagged setup observation
+        run: swift tools/fixture_ocr.swift trace-results/survey.json trace-results/ocr.json
+      - name: Remove temporary frames
+        if: always()
+        run: rm -rf trace-frames
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: setup-date-trace
+          path: trace-results/
+          retention-days: 7
+          if-no-files-found: warn
+  publish:
+    needs: trace
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: setup-date-trace
+          path: reports
+      - name: Publish paired early setup checkpoints
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRACE_RESULT: ${{ needs.trace.result }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'job_result': os.environ['TRACE_RESULT'], 'scope': 'Paired early-setup control and one normal-button birthday-field increment; date values require OCR verification.', 'key_legend': {'0': 'A', '1': 'B', '2': 'C'}}
+          raw = pathlib.Path('reports/survey.json')
+          ocr_path = pathlib.Path('reports/ocr.json')
+          manifest = pathlib.Path('reports/core-preparation.json')
+          if manifest.exists():
+              try: report['core_preparation'] = json.loads(manifest.read_text())
+              except ValueError: report['core_preparation_error'] = 'Invalid or incomplete manifest'
+          ocr = {}
+          if ocr_path.exists():
+              for row in json.loads(ocr_path.read_text()).get('runs', []):
+                  ocr[(row['firmware'], row['plan'])] = [{'action': s.get('action'), 'frame_fnv32': s.get('frame_fnv32'), 'lines': [{'text': str(line.get('text', ''))[:80], 'confidence': line.get('confidence')} for line in s.get('lines', [])[:4]], 'ocr_error': s.get('error')} for s in row.get('samples', [])]
+          if raw.exists():
+              report['survey_sha256'] = hashlib.sha256(raw.read_bytes()).hexdigest()
+              report['runs'] = [{'firmware': row['firmware'], 'plan': row['plan'], 'planned_keys': row['planned_keys'], 'stopped_code': row['stopped_code'], 'observations_count': len(row.get('observations', [])), 'samples': ocr.get((row['firmware'], row['plan']), [])} for row in json.loads(raw.read_text()).get('runs', [])]
+          else: report['error'] = 'No trace report produced; no setup conclusions available'
+          pathlib.Path('setup-trace-full.json').write_text(json.dumps(report, indent=2) + '\n')
+          body = '```json\n' + json.dumps(report, separators=(',', ':'), ensure_ascii=True) + '\n```\n'
+          if len(body) > 50000:
+              body = '```json\n' + json.dumps({'commit': report['commit'], 'job_result': report['job_result'], 'details_omitted': True, 'full_summary_artifact': 'setup-date-publication'}) + '\n```\n'
+          pathlib.Path('setup-trace.md').write_text(body)
+          subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS setup date trace ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', 'setup-trace.md'], check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: setup-date-publication
+          path: |
+            setup-trace-full.json
+            setup-trace.md
+          retention-days: 7
+          if-no-files-found: warn

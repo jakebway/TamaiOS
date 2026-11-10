@@ -35,13 +35,10 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Get the emulator core (tg18-emu) and apply the Bluetooth and infrared patches
+      - name: Prepare promoted hash-verified emulator core
         run: |
           set -euo pipefail
-          git clone https://github.com/oreo-fox/tg18-emu upstream
-          git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
-          git -C upstream apply ../patches/radio.patch
-          git -C upstream apply ../patches/ir_partner.patch
+          python3 tools/prepare_core.py --variant promoted
 
       - name: Build Rust static library for iOS
         run: |

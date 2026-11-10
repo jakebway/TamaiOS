@@ -129,7 +129,7 @@ final class Emulator: ObservableObject {
     var daytimeMode: Bool { DaytimeClock.enabled(toy?.id) }
 
     func setDaytimeMode(_ enabled: Bool) {
-        guard let toy, !clockChanging, !loading, !linkBusy, !appWaiting else {
+        guard let toy, canReplaceDevice else {
             say("Please wait a moment, then try again.")
             return
         }
@@ -229,7 +229,23 @@ final class Emulator: ObservableObject {
 
     // MARK: loading
 
+    var canReplaceDevice: Bool {
+        !loading && !linkBusy && !clockChanging && !IRLink.shared.busy
+            && !AppLink.shared.busy && !AppLink.shared.openForDownload
+            && !appWaiting && !holdForApp
+    }
+
     func load(_ toy: Toy, completion: ((Bool) -> Void)? = nil) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.load(toy, completion: completion) }
+            return
+        }
+        guard canReplaceDevice else {
+            say("Finish the current operation before changing devices.")
+            completion?(false)
+            return
+        }
+        loading = true
         unload()
         holdRestoredUntil = FileManager.default.fileExists(atPath: ToyStore.lastFrameURL(toy.id).path) ? CACurrentMediaTime() + 4 : 0
         // paint the toy's own last picture straight away (before the first screen is drawn), not a black screen

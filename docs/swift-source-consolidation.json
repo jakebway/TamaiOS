@@ -1,0 +1,41 @@
+{
+  "base_commit": "700f7c85062508b851d53b2782bd23ff03262960",
+  "bootstrap_commit": "0c26af66a2ee389e8aad8bd199a686826f719c9d",
+  "retired_patch_blob": "459ba2a75a3d2cc5947435d89a85149e6108e010",
+  "swift_matches_previous_build_input": true,
+  "expected_built_swift_sha256": {
+    "ios/TamaiOS/App.swift": "2b6c3a8765ca145a69fc8d812e0f9b99bb11dededc0f1baf33565454a06be26e",
+    "ios/TamaiOS/Core/Audio.swift": "2a56848e21bac04d12a6a43a8b2132b28811d3b5e63028ab9816ef27d31071a1",
+    "ios/TamaiOS/Core/CareAlerts.swift": "032b2378bbcef8a2e3356a742d2b319682630fdc3caf325027491534242656c5",
+    "ios/TamaiOS/Core/CareEventPolicy.swift": "c823f879727937338ac6848d4283ad25ec5b7f29db78404c43076405065e0020",
+    "ios/TamaiOS/Core/DaytimeClock.swift": "762cf73b669480b8d56c9ef5e5360c4ea37d4960da1535764341205f22396cec",
+    "ios/TamaiOS/Core/Emulator.swift": "00e23cce40948db792b9e5747bd9aa1561c7e03297b71b553fe512b87e8bf6d0",
+    "ios/TamaiOS/Core/IRLink.swift": "f1b6b49e910beb50d4bb41aa6ef46eb25b6e8ccdbf73684b13128e3a94699365",
+    "ios/TamaiOS/Core/LCD.swift": "8bc7302bcfa60b1399389401643460374f760bf493c1cc2955571e3edc140900",
+    "ios/TamaiOS/Core/LiveTamaName.swift": "1199ca3262c39a6daa1ea5b2a052a1e30a0dc1b4c230c756870c48d2b7ff3806",
+    "ios/TamaiOS/Core/ProfileNameReader.swift": "48790d1bc03b794012d0295d895a75da44ec92d34d5dcfbc60ac1fa427de9099",
+    "ios/TamaiOS/Core/SceneReleasePolicy.swift": "d07f19ab9bc9d0283902431f59984f66d09038a8b5828927e99b0d1af54a8212",
+    "ios/TamaiOS/Core/Store.swift": "fc327a71a4bfdd473f44a8ef44ce595d18ab83a86d11eb74101f6c2b29c67872",
+    "ios/TamaiOS/Core/ToyScreen.swift": "5dbfbb8bb29eac96f32a49cfe50546841dbe87e591b3785bae0ad2255485e0f0",
+    "ios/TamaiOS/Device/DeviceView.swift": "d5b525328230cc4d2498b4d9553f9e31db68f3b88007ef9d089b98e94a8b68a3",
+    "ios/TamaiOS/Screens/AddToyView.swift": "33a3e1a5f9fe54a68e2f47d50953da182710839438493910401b803200b58b33",
+    "ios/TamaiOS/Screens/Console.swift": "188110cdbd3b4892e05b940b8869712a0e99f350099408a91b3a0d85dc439244",
+    "ios/TamaiOS/Screens/SettingsView.swift": "e6d189f45a776101fe787c8d1a3e9fdb279f7f186d85b56a5bd35725fc41549b",
+    "ios/TamaiOS/Tamatown/ArcadeView.swift": "d3f3522d9516e24cdd1a44ed199c066c8bfc1e4e3eca77389ebe7403f3848a9b",
+    "ios/TamaiOS/Tamatown/CustomItemMaker.swift": "87c0b4bb0112995db11cd96c2716f3190ce3de9c7bd2668aa7f1e9f19c67b168",
+    "ios/TamaiOS/Tamatown/PartyViews.swift": "e856b03790ec631aa54e7cc48538fdedae4240c25da33799aef2a2168c8fa26b",
+    "ios/TamaiOS/Tamatown/TamaDepaView.swift": "9c3940e0545623a648c61ff238a3cfb8a651c8836c209b59cae31eace6add1e7",
+    "ios/TamaiOS/Tamatown/TamaLink.swift": "3e9ce63f8be9bbc818efdb4a5f4cf4ff37a961e58d51b62df01af5d71c8e23be",
+    "ios/TamaiOS/Tamatown/TamatownView.swift": "20977be7789b38a683f05364c1abf27762a6eb3675d93072490f95eafcfa7093",
+    "ios/TamaiOS/Tamatown/Town.swift": "eaf5c0e107302645a992811538fb8f227afd48621f77c10ed6af2312995219c6",
+    "ios/TamaiOS/Tamatown/TownView.swift": "aef220ca33271faff79753e43c1d287349ad235f248a91d7f217844ffe9a8196",
+    "ios/TamaiOS/Tamatown/TownWanderers.swift": "e800d80b2f8c91f95598bbec98cfa071e28dcca24a479cef804c326545ac5624"
+  },
+  "unchanged_core_sha256": {
+    "patches/radio.patch": "9148d2851a55439d3a0443b70a3832d58b0f548a1cd8780497c7dd935bfb00bd",
+    "patches/ir_partner.patch": "09641a926267255724aeb726403fd3f07e64c27ef86e4b0b5127557a96e241da",
+    "tools/timer_snapshot_history.patch": "1532c0d91cff33fae3ef4eb45d297099dbb3ff75816f68d4faf8b25d92e6e87e",
+    "tools/prepare_core.py": "08655ae38a961016f818596b77494d97c565b5df17dcdefbc61323f34ec311da"
+  },
+  "scope": "Byte-equivalent Swift consolidation; no egg/death fix, main merge, installation or notification-delivery claim"
+}

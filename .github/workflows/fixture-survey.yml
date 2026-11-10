@@ -1,0 +1,141 @@
+name: Headless firmware fixture discovery
+run-name: Controlled post-wake survey (${{ github.sha }})
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/firmware-grounded-validation]
+    paths:
+      - tools/firmware_fixture_survey.rs
+      - tools/fixture_ocr.swift
+      - ffi/**
+      - patches/**
+      - firmware/**
+      - .github/workflows/fixture-survey.yml
+permissions:
+  contents: read
+jobs:
+  survey:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Prepare the exact patched core
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/oreo-fox/tg18-emu upstream
+          git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
+          git -C upstream apply ../patches/radio.patch
+          git -C upstream apply ../patches/ir_partner.patch
+          mkdir -p ffi/examples survey-results survey-frames
+          cp tools/firmware_fixture_survey.rs ffi/examples/audit_fixture_survey.rs
+      - name: Run bounded fresh-device input plans
+        shell: bash
+        env:
+          TAMAIOS_AUDIT_FIRMWARE: ${{ github.workspace }}/firmware
+          TAMAIOS_SURVEY_OUTPUT: ${{ github.workspace }}/survey-results/survey.json
+          TAMAIOS_SURVEY_FRAMES: ${{ github.workspace }}/survey-frames
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path ffi/Cargo.toml --example audit_fixture_survey 2>&1 | tee survey-results/run.txt
+      - name: Recognize setup text without publishing images
+        run: swift tools/fixture_ocr.swift survey-results/survey.json survey-results/ocr.json
+      - name: Remove temporary images
+        if: always()
+        run: rm -rf survey-frames
+      - name: Upload text reports only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-survey
+          path: survey-results/
+          retention-days: 7
+          if-no-files-found: warn
+  publish:
+    needs: survey
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: fixture-survey
+          path: reports
+      - name: Publish size-bounded discovery summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SURVEY_RESULT: ${{ needs.survey.result }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          def publication(report):
+              full = json.dumps(report, indent=2, ensure_ascii=True) + '\n'
+              identity = {'full_summary_artifact': 'fixture-publication-summary', 'full_summary_sha256': hashlib.sha256(full.encode()).hexdigest()}
+              summary = json.loads(full)
+              summary['publication'] = {**identity, 'details_reduced': False}
+              def render(value):
+                  return '```json\n' + json.dumps(value, ensure_ascii=True, separators=(',', ':')) + '\n```\n'
+              body = render(summary)
+              if len(body) > 50000:
+                  summary['publication']['details_reduced'] = True
+                  for row in summary.get('runs', []):
+                      row['screen_text_samples'] = row.get('screen_text_samples', [])[-3:]
+                      for sample in row['screen_text_samples']:
+                          sample.pop('call_chain', None)
+                          sample['lines'] = [{'text': str(line.get('text', ''))[:80], 'confidence': line.get('confidence')} for line in sample.get('lines', [])[:4]]
+                  body = render(summary)
+              if len(body) > 50000:
+                  summary = {key: report.get(key) for key in ['commit', 'run_id', 'job_result']}
+                  summary.update(scope='Discovery only; full details retained in the text artifact, not omitted as a success claim.', run_count=len(report.get('runs', [])), publication={**identity, 'details_reduced': True, 'run_details_omitted': True})
+                  body = render(summary)
+              assert len(body) <= 50000
+              return body, full
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'job_result': os.environ['SURVEY_RESULT'], 'scope': 'Discovery only. OCR may be wrong; module readiness and raw fields are not semantic proof.'}
+          ocr_path = pathlib.Path('reports/ocr.json')
+          ocr = {}
+          if ocr_path.exists():
+              for row in json.loads(ocr_path.read_text()).get('runs', []):
+                  samples = row.get('samples', [])
+                  selected = samples[:2] + samples[max(2, len(samples)-3):]
+                  for sample in selected:
+                      sample['lines'] = sample.get('lines', [])[:6]
+                  ocr[(row['firmware'], row['plan'])] = selected
+          p = pathlib.Path('reports/survey.json')
+          if p.exists():
+              source = json.loads(p.read_text())
+              rows = []
+              for row in source.get('runs', []):
+                  obs = row.get('observations', [])
+                  final = dict(obs[-1]) if obs else None
+                  if final: final.pop('frame_file', None)
+                  rows.append({'firmware': row['firmware'], 'plan': row['plan'], 'stop_reason': row['stop_reason'], 'stopped_code': row['stopped_code'], 'observations_count': len(obs), 'completed_input_free_wait_seconds': row.get('completed_input_free_wait_seconds'), 'wake_attempted': row.get('wake_attempted'), 'final': final, 'screen_text_samples': ocr.get((row['firmware'], row['plan']), [])})
+              report['runs'] = rows
+              report['full_report_sha256'] = hashlib.sha256(p.read_bytes()).hexdigest()
+              report['ocr_report_available'] = ocr_path.exists()
+          else:
+              report['error'] = 'No survey JSON produced'
+              log = pathlib.Path('reports/run.txt')
+              if log.exists(): report['log_tail'] = log.read_text(errors='replace').splitlines()[-40:]
+          text, full = publication(report)
+          pathlib.Path('fixture-full-report.json').write_text(full)
+          body = pathlib.Path('fixture-report.md')
+          body.write_text(text)
+          subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS fixture survey ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(body)], check=True)
+          PY
+      - name: Retain complete publication summary even if posting fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-publication-summary
+          path: |
+            fixture-full-report.json
+            fixture-report.md
+          retention-days: 7
+          if-no-files-found: warn

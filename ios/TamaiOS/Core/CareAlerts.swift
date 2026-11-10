@@ -132,6 +132,11 @@ final class CareAlerts: ObservableObject {
                  observedAt: Double = ProcessInfo.processInfo.systemUptime, raw: Int = -1, stage: Int = -1,
                  character: Int = -1, signature: String = "") {
         DispatchQueue.main.async {
+            guard AppModel.current?.emu.toy?.id == deviceID else {
+                self.count("skipped: stale observation device")
+                self.record("SKIP observation: device changed before processing")
+                return
+            }
             let previousIdentity = LiveTamaName.shared.identity
             let previousVerifiedName = previousIdentity?.hasPrefix(deviceID + "." + signature + ".") == true ? LiveTamaName.shared.verifiedName : nil
             LiveTamaName.shared.observe(deviceID: deviceID, stage: stage, character: character, signature: signature)

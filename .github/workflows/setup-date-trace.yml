@@ -31,7 +31,7 @@ jobs:
           entry = pathlib.Path('tools/setup_date_trace.rs').read_text()
           pathlib.Path('ffi/examples/setup_date_trace.rs').write_text(source + '\n' + entry)
           PY
-      - name: Run only the short setup prefix
+      - name: Run only the short setup prefixes
         env:
           TAMAIOS_AUDIT_FIRMWARE: ${{ github.workspace }}/firmware
           TAMAIOS_SURVEY_OUTPUT: ${{ github.workspace }}/trace-results/survey.json
@@ -65,14 +65,14 @@ jobs:
         with:
           name: setup-date-trace
           path: reports
-      - name: Publish all early setup checkpoints
+      - name: Publish paired early setup checkpoints
         env:
           GH_TOKEN: ${{ github.token }}
           TRACE_RESULT: ${{ needs.trace.result }}
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, subprocess
-          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'job_result': os.environ['TRACE_RESULT'], 'scope': 'Setup observations only; no date changes or verified date-field semantics.', 'key_legend': {'0': 'A', '1': 'B', '2': 'C'}}
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'job_result': os.environ['TRACE_RESULT'], 'scope': 'Paired early-setup control and one normal-button birthday-field increment; date values require OCR verification.', 'key_legend': {'0': 'A', '1': 'B', '2': 'C'}}
           raw = pathlib.Path('reports/survey.json')
           ocr_path = pathlib.Path('reports/ocr.json')
           manifest = pathlib.Path('reports/core-preparation.json')
@@ -82,10 +82,10 @@ jobs:
           ocr = {}
           if ocr_path.exists():
               for row in json.loads(ocr_path.read_text()).get('runs', []):
-                  ocr[row['firmware']] = [{'action': s.get('action'), 'frame_fnv32': s.get('frame_fnv32'), 'lines': [{'text': str(line.get('text', ''))[:80], 'confidence': line.get('confidence')} for line in s.get('lines', [])[:4]], 'ocr_error': s.get('error')} for s in row.get('samples', [])]
+                  ocr[(row['firmware'], row['plan'])] = [{'action': s.get('action'), 'frame_fnv32': s.get('frame_fnv32'), 'lines': [{'text': str(line.get('text', ''))[:80], 'confidence': line.get('confidence')} for line in s.get('lines', [])[:4]], 'ocr_error': s.get('error')} for s in row.get('samples', [])]
           if raw.exists():
               report['survey_sha256'] = hashlib.sha256(raw.read_bytes()).hexdigest()
-              report['runs'] = [{'firmware': row['firmware'], 'planned_keys': row['planned_keys'], 'stopped_code': row['stopped_code'], 'observations_count': len(row.get('observations', [])), 'samples': ocr.get(row['firmware'], [])} for row in json.loads(raw.read_text()).get('runs', [])]
+              report['runs'] = [{'firmware': row['firmware'], 'plan': row['plan'], 'planned_keys': row['planned_keys'], 'stopped_code': row['stopped_code'], 'observations_count': len(row.get('observations', [])), 'samples': ocr.get((row['firmware'], row['plan']), [])} for row in json.loads(raw.read_text()).get('runs', [])]
           else: report['error'] = 'No trace report produced; no setup conclusions available'
           pathlib.Path('setup-trace-full.json').write_text(json.dumps(report, indent=2) + '\n')
           body = '```json\n' + json.dumps(report, separators=(',', ':'), ensure_ascii=True) + '\n```\n'

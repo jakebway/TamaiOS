@@ -3,8 +3,24 @@ on:
   workflow_dispatch:
   push:
     branches: [audit/firmware-grounded-validation]
+    paths:
+      - ffi/**
+      - ios/**
+      - firmware/**
+      - patches/**
+      - tamaios_changes.patch
+      - tools/prepare_core.py
+      - tools/timer_snapshot_history.patch
+      - tools/run_integration_audit.py
+      - tools/ffi_integration_audit.rs
+      - tools/icon.py
+      - .github/workflows/integration-audit.yml
+      - .github/workflows/build*.yml
 permissions:
   contents: read
+concurrency:
+  group: integration-audit-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   checks:
     strategy:
@@ -77,7 +93,7 @@ jobs:
                       group['candidate_evidence_missing'] = True
                   groups[kind] = group
               variants[variant] = groups
-          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'matrix_result': os.environ['MATRIX_RESULT'], 'groups': variants['baseline'], 'candidate_groups': variants['candidate'], 'limits': 'Candidate patch is opt-in inside integration CI only; shared app build core patches are unchanged. No merge, installation, paired gameplay or notification delivery guarantee. No firmware, snapshots or app binaries published.'}
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'matrix_result': os.environ['MATRIX_RESULT'], 'groups': variants['baseline'], 'candidate_groups': variants['candidate'], 'limits': 'Integration variants compare legacy and timer-fixed cores inside CI. Release workflow definitions separately select the promoted shared helper. No merge, installation, paired gameplay or notification delivery guarantee. No firmware, snapshots or app binaries published.'}
           body = pathlib.Path('integration-report.md')
           body.write_text('```json\n' + json.dumps(report, indent=2) + '\n```\n')
           subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS integration audit ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(body)], check=True)

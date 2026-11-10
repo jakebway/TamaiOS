@@ -3,8 +3,24 @@ on:
   workflow_dispatch:
   push:
     branches: [audit/firmware-grounded-validation]
+    paths:
+      - ios/**
+      - ffi/**
+      - patches/**
+      - tamaios_changes.patch
+      - tools/prepare_core.py
+      - tools/timer_snapshot_history.patch
+      - tools/run_expanded_audit.py
+      - tools/expanded_ir_audit.rs
+      - tools/expanded_policy_audit.swift
+      - tools/operation_policy_audit.swift
+      - tools/transport_replay_audit.swift
+      - .github/workflows/expanded-audit.yml
 permissions:
   contents: read
+concurrency:
+  group: expanded-audit-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   checks:
     strategy:

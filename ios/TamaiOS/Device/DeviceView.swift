@@ -204,9 +204,9 @@ struct DeviceView: View {
                             .background(Capsule().fill(.ultraThickMaterial))
                             .shadow(radius: 8)
                             .padding(.top, 60).padding(.horizontal, 20)
-                            // the toy is centred across the whole screen (safe area ignored), so keep the pop-up out of the
+                            // the toy is centred across the whole screen (safe area ignored), so keep the pop-up centred on it and out of the
                             // side strip with the clock and battery on iPhone Duo
-                            .padding(.leading, Self.windowInsets.left).padding(.trailing, Self.windowInsets.right)
+                            .padding(.horizontal, max(Self.windowInsets.left, Self.windowInsets.right))   // equal on both sides: stays centred on the toy
                             .onTapGesture { emu.toast = nil }
                         Spacer()
                     }

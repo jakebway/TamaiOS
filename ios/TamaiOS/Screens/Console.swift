@@ -456,7 +456,7 @@ final class Console: ObservableObject {
         let info = Bundle.main.infoDictionary
         var lines = [
             "== TamaiOS diagnostics ==",
-            "app: \(info?["CFBundleShortVersionString"] ?? "?") (\(info?["CFBundleVersion"] ?? "?"))  iOS: \(UIDevice.current.systemVersion)  \(deviceModel())  tz: \(TimeZone.current.identifier)",
+            "app: \(AppVersion.text)  iOS: \(UIDevice.current.systemVersion)  \(deviceModel())  tz: \(TimeZone.current.identifier)",
             "date: \(Date())",
             "active: \(emu.toy.map { "\($0.name) / \($0.romName) / \($0.id)" } ?? "none")  stopped: \(emu.stopped.map { "\($0.code)" } ?? "no")  loading: \(emu.loading)  dark: \(emu.dark)",
             "-- daytime --", daytimeReport(),

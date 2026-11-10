@@ -113,8 +113,9 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink { ConsoleView() } label: { Label("Console", systemImage: "terminal.fill") }
-                } header: { Text("Help") } footer: {
-                    Text("TamaiOS \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
+                    NavigationLink { CreditsView() } label: { Label("Credits", systemImage: "heart.text.square.fill") }
+                } header: { Text("Help & About") } footer: {
+                    Text("TamaiOS \(AppVersion.text)")
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 10)
                 }

@@ -59,6 +59,7 @@ final class CareAlerts: ObservableObject {
             if source == .bathroom { return deviceID + ".bathroom." + String(episode) }
             if source == .sickness { return deviceID + ".sickness." + String(episode) }
             if source == .growth { return deviceID + ".growth." + String(episode) }
+            if source == .tummy { return deviceID + ".tummy." + String(episode) }
             return deviceID
         }
     }
@@ -247,6 +248,26 @@ final class CareAlerts: ObservableObject {
         }
     }
     func clearDeath(deviceID: String) { DispatchQueue.main.async { self.deathTokens.removeValue(forKey: deviceID) } }
+    private var tummyTimer: [String: Int] = [:]
+    private var tummyEpisode: [String: Int] = [:]
+    /// The toy's digestion countdown (F800D88A) starts when its tummy begins to rumble and ends with the bathroom visit.
+    /// Seeing it start (0 → above 0) while the Tama is not on the toilet already is the early warning.
+    func observeTummy(timer: Int, bathroom: Int, deviceID: String, observedAt: Double) {
+        DispatchQueue.main.async {
+            guard CareSupport.supports(deviceID), timer >= 0 else { return }
+            let previous = self.tummyTimer[deviceID]; self.tummyTimer[deviceID] = timer
+            guard let previous, previous == 0, timer > 0, bathroom == 0 else { return }
+            self.tummyEpisode[deviceID, default: 0] += 1
+            self.record("TUMMY RUMBLE countdown F800D88A 0->\(timer)")
+            guard self.enabled else { return }
+            guard UIApplication.shared.applicationState != .active else { self.count("tummy skipped: foreground"); return }
+            let event = Event(id: UUID().uuidString, deviceID: deviceID, name: LiveTamaName.shared.name,
+                              source: .tummy, mask: 0, raw: timer, stage: -1, observedAt: observedAt,
+                              generation: self.generation, episode: self.tummyEpisode[deviceID] ?? 0)
+            guard !self.inFlight.contains(event.key) else { return }
+            self.inFlight.insert(event.key); self.attempt(event, pass: 0)
+        }
+    }
     func observeBathroom(raw: Int, deviceID: String, observedAt: Double) {
         DispatchQueue.main.async {
             guard CareSupport.supports(deviceID) else { return }
@@ -335,6 +356,7 @@ final class CareAlerts: ObservableObject {
         }
         if event.source == .sickness { return sicknessPolicy.isCurrent(deviceID: event.deviceID, episode: event.episode) }
         if event.source == .bathroom { return bathroomPolicy.isCurrent(deviceID: event.deviceID, episode: event.episode) }
+        if event.source == .tummy { return tummyEpisode[event.deviceID] == event.episode && bathroomRaw[event.deviceID] != 1 }
         if event.source == .hatch { return hatchTokens[event.deviceID] == event.id }
         if event.source == .death { return deathTokens[event.deviceID] == event.id }
         return true
@@ -372,6 +394,8 @@ final class CareAlerts: ObservableObject {
                     content.title = "\(event.name) grew up!"
                     content.body = LiveTamaName.shared.verifiedName.map { "Meet " + $0 + "." } ?? "Open TamaiOS to see your Tama’s new look."
                 case .sickness: content.title = event.raw >= 0 && event.raw & 0x100 != 0 ? "\(event.name) has a toothache" : "\(event.name) is sick"; content.body = "Open TamaiOS to check on them."
+                case .tummy: content.title = "\(event.name) has to go to the bathroom soon"; content.body = "Their tummy is rumbling. Open TamaiOS to be ready."
+                case .tummy: content.title = "\(event.name) has to go to the bathroom soon"; content.body = "Their tummy is rumbling. Open TamaiOS to be ready."
                 case .bathroom: content.title = "\(event.name) went to the bathroom"; content.body = "Open TamaiOS to help them clean up."
                 case .death: content.title = "\(event.name) passed away"; content.body = "Open TamaiOS to start a new egg."
                 case .hatch: content.title = "\(event.name) is hatching!"; content.body = "Open TamaiOS to meet your new Tama."
@@ -385,7 +409,7 @@ final class CareAlerts: ObservableObject {
                     content.body = "Open TamaiOS to check on them."
                 }
                 content.sound = .default; content.threadIdentifier = self.prefix + event.deviceID
-                content.categoryIdentifier = event.source == .growth ? "TAMAIOS_GROWTH" : (event.source == .sickness ? "TAMAIOS_SICKNESS" : (event.source == .bathroom ? "TAMAIOS_BATHROOM" : (event.source == .hatch ? "TAMAIOS_HATCH" : "TAMAIOS_CARE")))
+                content.categoryIdentifier = event.source == .growth ? "TAMAIOS_GROWTH" : (event.source == .sickness ? "TAMAIOS_SICKNESS" : ((event.source == .bathroom || event.source == .tummy) ? "TAMAIOS_BATHROOM" : (event.source == .hatch ? "TAMAIOS_HATCH" : "TAMAIOS_CARE")))
                 content.userInfo = ["deviceID": event.deviceID, "careEventID": event.id, "careSource": event.source.rawValue]
                 let request = UNNotificationRequest(identifier: self.prefix + event.deviceID + "-" + event.id, content: content, trigger: nil)
                 self.record("REQUEST event=\(event.id) source=\(event.source.rawValue) name=\(event.name) raw=\(event.raw) mask=\(event.mask)")

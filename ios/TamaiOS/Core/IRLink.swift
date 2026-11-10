@@ -696,6 +696,7 @@ final class IRLink {
         if finished {
             fixClock(p, partner, audio)
             saveSnapshot(p, partner)
+            if mode == 2 { EggWatch.mark(partner.id); EggWatch.mark(me.id) }
         }
         emu.note("infrared link: \(trace.count) frames, \(bytes) bytes; last frames:\n" + trace.suffix(30).joined(separator: "\n"))
         let who = IRLink.tamaLabel(partner)
@@ -802,7 +803,10 @@ extension IRLink {
         DispatchQueue.main.async { startActiveNameRead(identity: identity) }
     }
     private static func startActiveNameRead(identity: String) {
-        guard !LiveTamaName.shared.directAvailable, let model = AppModel.current, let toy = model.emu.toy,
+        // the name is usually known from memory, but the picture of a Tama the toy draws itself (born from a marriage)
+        // can only come from its profile page
+        guard let model = AppModel.current, let toy = model.emu.toy,
+              !LiveTamaName.shared.directAvailable || !FileManager.default.fileExists(atPath: ToyStore.spriteURL(toy.id).path),
               !model.emu.loading, !shared.busy, !model.emu.holdForApp, !model.emu.appWaiting,
               UIApplication.shared.applicationState == .active else { return }
         ProfileNameReader.shared.read(emu: model.emu, key: nil, spriteURL: ToyStore.spriteURL(toy.id)) { r in

@@ -87,6 +87,15 @@ final class AppModel: ObservableObject {
             for t in toys { try? FileManager.default.removeItem(at: ToyStore.spriteURL(t.id)) }
             Prefs.d.set(true, forKey: "spriteFormat.v2")
         }
+        // Tamas born from a marriage were shown as the grown-up picture built from their parts, not the baby the toy draws:
+        // take every picture again from the profile page.
+        if !Prefs.d.bool(forKey: "spriteSource.v3") {
+            for t in toys {
+                try? FileManager.default.removeItem(at: ToyStore.spriteURL(t.id))
+                Prefs.d.removeObject(forKey: "tamaIdentity.v1." + t.id)
+            }
+            Prefs.d.set(true, forKey: "spriteSource.v3")
+        }
         Town.shared.loadIfPresent()
         if let t = currentToy { emu.load(t) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { IRLink.refreshNames(recheck: false) }   // first fill: right away

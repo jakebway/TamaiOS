@@ -453,6 +453,14 @@ final class Town: ObservableObject {
     private var stateCache: [String: State] = [:]
     private var visitCache: [String: (name: String, adult: Bool, sex: Int)?] = [:]
 
+    /// Two babies hatched after the latest marriage: say so in its entry (once).
+    func noteTwins(_ toy: Toy) {
+        var s = state(toy)
+        guard let last = s.married.last, !last.hasSuffix("(twins)") else { return }
+        s.married[s.married.count - 1] = last + " (twins)"
+        save(s, toy)
+    }
+
     func state(_ toy: Toy) -> State {
         cacheLock.lock(); defer { cacheLock.unlock() }
         if let c = stateCache[toy.id] { return c }

@@ -306,6 +306,7 @@ final class AppLink: ObservableObject {
                             town.save(y, toy)
                             town.invalidateDeviceCache(toy)
                         }
+                        EggWatch.mark(toy.id)
                         emu.note("married \(s.name)")
                         msg = ""
                     } else {

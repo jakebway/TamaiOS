@@ -270,6 +270,10 @@ final class Emulator: ObservableObject {
         let meta = (try? String(contentsOf: ToyStore.flashMetaURL(toy.id), encoding: .utf8)) ?? ""
         var elapsed = 0.0
         let empty = Data()
+        // a device that is waiting for its egg to hatch is opened without playing its time away through, so the
+        // hatching is seen instead of being skipped
+        tg_set_egg_hold(EggWatch.pending(toy.id) ? 1 : 0)
+        defer { tg_set_egg_hold(0) }
         let h: OpaquePointer? = rom.withUnsafeBytes { r in
             (snap ?? empty).withUnsafeBytes { s in
                 (flash ?? empty).withUnsafeBytes { f in
@@ -574,13 +578,21 @@ final class Emulator: ObservableObject {
                 // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.
                 let raw: [UInt8]? = withCore { h in
                     var out = [UInt8]()
-                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16)] as [(UInt32, Int)] {
+                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16), (0xF800DBE8, 1)] as [(UInt32, Int)] {
                         var b = [UInt8](repeating: 0, count: n)
                         out += tg_peek(h, addr, &b, n) == 1 ? b : [UInt8](repeating: 0xEE, count: n)
                     }
                     return out
                 }
                 let sig = toy + ":" + (raw ?? []).map(String.init).joined(separator: ",")
+                // Twins: the toy sets F800DBE8 to 1 when two babies hatch (the second one's colours are kept at F800DBFC) and
+                // clears it once the first is named, after which the other twin lives on the toy's Family page.
+                if let raw, raw.count > 33, raw[33] == 1 {
+                    DispatchQueue.main.async {
+                        guard let t = self.toy, t.id == toy else { return }
+                        Town.shared.noteTwins(t)
+                    }
+                }
                 if let raw, sig != lastNameSig {
                     lastNameSig = sig
                     if let d = withCore({ LiveTamaName.direct(core: $0, deviceID: toy) }) {
@@ -588,12 +600,18 @@ final class Emulator: ObservableObject {
                     }
                     var look = [Int32](repeating: 0, count: 7)
                     if withCore({ tg_profile_look($0, &look) }) == 1 {
+                        // A Tama born from a marriage is drawn by the toy itself (a baby is not the grown-up picture built from
+                        // its parts), so the card picture is taken from the profile page: drop the old one and read it again.
+                        try? FileManager.default.removeItem(at: ToyStore.spriteURL(toy))
                         DispatchQueue.main.async {
-                            guard let cg = Town.shared.image(body: UInt16(look[0]), bodyColor: Int(look[4]), face: UInt16(look[1]),
-                                                              head: UInt16(look[2]), headColor: Int(look[5]), back: UInt16(look[3]), backColor: Int(look[6])),
-                                  let png = UIImage(cgImage: cg).pngData() else { self.lastNameSigReset = true; return }
-                            try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                             NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy)
+                            for d in [6.0, 25.0, 70.0] {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + d) {
+                                    guard AppModel.current?.emu.toy?.id == toy,
+                                          !FileManager.default.fileExists(atPath: ToyStore.spriteURL(toy).path) else { return }
+                                    IRLink.refreshActiveName()
+                                }
+                            }
                         }
                     } else if raw[0] >= 1, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
                         try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
@@ -621,7 +639,7 @@ final class Emulator: ObservableObject {
                         }
                     } else { self.deadPolls = 0 }
                 }
-                let sample = careSample(), bathroomRaw = bathroomSample()
+                let sample = careSample(), bathroomRaw = bathroomSample(), tummyRaw = tummySample()
                 let observedAt = ProcessInfo.processInfo.systemUptime, expectedID = toyID
                 DispatchQueue.main.async {
                     guard let toy = self.toy, toy.id == expectedID else { return }
@@ -629,6 +647,7 @@ final class Emulator: ObservableObject {
                         source: .poll, observedAt: observedAt, raw: sample.raw, stage: sample.stage,
                         character: sample.character, signature: sample.signature)
                     CareAlerts.shared.observeBathroom(raw: bathroomRaw, deviceID: toy.id, observedAt: observedAt)
+                    CareAlerts.shared.observeTummy(timer: tummyRaw, bathroom: bathroomRaw, deviceID: toy.id, observedAt: observedAt)
                 }
             }
             let pollMs = (CACurrentMediaTime() - pollStart) * 1000
@@ -721,6 +740,16 @@ final class Emulator: ObservableObject {
                     charOK == 1 ? id : -1, sigOK == 1 ? signature.map { String(format: "%02X", $0) }.joined() : "")
         }
         return (sample?.0 ?? -1, sample?.1 ?? -1, sample?.2 ?? -1, sample?.3 ?? -1, sample?.4 ?? "")
+    }
+    /// F800D88A counts down from about 19 to 0 after a meal has been digested; the Tama goes to the bathroom (F800D888 = 1) when it
+    /// reaches 0, so it going above 0 is the toy's own "the tummy is rumbling" moment (found in the test harness on Wonder Garden).
+    private func tummySample() -> Int {
+        guard CareSupport.supports(toyID ?? "") else { return -1 }
+        return withCore { h -> Int in
+            guard tg_profile_attention(h) >= 0 else { return -1 }
+            var raw: UInt8 = 0
+            return tg_peek(h, 0xF800_D88A, &raw, 1) == 1 ? Int(raw) : -1
+        } ?? -1
     }
     private func bathroomSample() -> Int {
         guard CareSupport.supports(toyID ?? "") else { return -1 }
@@ -937,5 +966,16 @@ enum Notifier {
     static func postCall(name: String) {
         guard let id = AppModel.current?.emu.toy?.id else { return }
         CareAlerts.shared.observe(mask: 16, deviceID: id, name: name)
+    }
+}
+
+
+/// Devices whose Tama just married: the new egg hatches the next time the device is open, in front of you.
+enum EggWatch {
+    private static let window = 1800.0
+    static func mark(_ deviceID: String) { Prefs.d.set(Date().timeIntervalSince1970, forKey: "eggWatch.v1." + deviceID) }
+    static func pending(_ deviceID: String) -> Bool {
+        let t = Prefs.d.double(forKey: "eggWatch.v1." + deviceID)
+        return t > 0 && Date().timeIntervalSince1970 - t < window
     }
 }

@@ -7,6 +7,14 @@ pub mod mm;
 use std::ffi::{c_char, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set by the app right before a device that is waiting for its egg to hatch is opened: the time it was away is
+/// added to its clock without playing it through, so the hatching plays in front of you instead of being skipped.
+static EGG_HOLD: AtomicBool = AtomicBool::new(false);
+#[no_mangle]
+pub extern "C" fn tg_set_egg_hold(on: i32) { EGG_HOLD.store(on != 0, Ordering::SeqCst); }
+
 
 use tg18::cpu::Bus;
 use tg18::save::{self, SaveMeta};
@@ -392,7 +400,10 @@ fn boot(rom: Vec<u8>, snap: Option<Vec<u8>>, flash: Option<Vec<u8>>, meta: Optio
                 e.boot_note = "Resumed from autosave".into();
                 let mut moved = 0.0;
                 if away > 30.0 {
-                    if advance_clock(&mut e, away) {
+                    if EGG_HOLD.load(Ordering::SeqCst) {
+                        e.m.sys.rtc.base_ticks += (away * 32768.0) as i64;
+                        moved = away;
+                    } else if advance_clock(&mut e, away) {
                         moved = away;
                     } else {
                         e.m.sys.rtc.base_ticks += (away * 32768.0) as i64;

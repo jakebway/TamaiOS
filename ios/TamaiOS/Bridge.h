@@ -54,6 +54,7 @@ int32_t tg_poke(Emu *e, uint32_t addr, const uint8_t *data, size_t n);
 void tg_script_press(Emu *e, int32_t key, double delay);
 void tg_read_cstr(Emu *e, uint32_t addr, uint8_t **out, size_t *out_len);
 void tg_set_wall_clock(Emu *e, double rtc_now);
+void tg_set_egg_hold(int on);
 
 /* Bluetooth module: the built-in phone app talks through these */
 void tg_radio_enable(Emu *e, int32_t on);

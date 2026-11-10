@@ -198,16 +198,21 @@ struct DesignView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                stage
-                chips
-                List {
-                    if part != 1 {
-                        Section(header: Text("\(names[part]) colour")) { colours }
+            GeometryReader { g in
+                let wide = g.size.width >= 640
+                Group {
+                    if wide {
+                        HStack(alignment: .top, spacing: 0) {
+                            VStack(spacing: 12) { header; tabs }
+                                .frame(width: min(340, g.size.width * 0.4))
+                                .padding(.top, 8)
+                            pickers
+                        }
+                    } else {
+                        VStack(spacing: 0) { header; tabs.padding(.bottom, 6); pickers }
                     }
-                    Section(header: Text("\(names[part]) style")) { genesGrid }
                 }
-                .listStyle(.insetGrouped)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Design your own")
@@ -226,92 +231,106 @@ struct DesignView: View {
         }
     }
 
-    // MARK: top: the character, built live
+    // MARK: top: the character (small) with its name, always visible
 
-    private var stage: some View {
-        VStack(spacing: 10) {
-            ZStack(alignment: .topTrailing) {
-                GeometryReader { g in
-                    ZStack(alignment: .bottom) {
-                        DressingRoom()
-                        CharacterPicture(image: town.image(s))
-                            .frame(width: g.size.width * 0.62, height: g.size.width * 0.62)
-                            .padding(.bottom, g.size.width * 0.04)
-                    }
+    private var header: some View {
+        HStack(spacing: 12) {
+            GeometryReader { g in
+                ZStack(alignment: .bottom) {
+                    DressingRoom()
+                    CharacterPicture(image: town.image(s))
+                        .frame(width: g.size.width * 0.66, height: g.size.width * 0.66)
+                        .padding(.bottom, g.size.width * 0.04)
                 }
-                .aspectRatio(1, contentMode: .fit)
-                .frame(width: 190, height: 190)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                HStack(spacing: 8) {
-                    Button { surprise(first: false) } label: {
-                        Image(systemName: "dice.fill").font(.body).padding(9).background(Circle().fill(.thinMaterial))
-                    }
-                    .accessibilityLabel("Surprise me")
+            }
+            .frame(width: 104, height: 104)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    TextField("Name (A–Z)", text: Binding(get: { s.name }, set: { s.name = String($0.uppercased().filter { $0.isLetter && $0.isASCII }.prefix(8)) }))
+                        .font(.system(.body, design: .rounded).weight(.semibold))
+                        .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                    Text("\(s.name.count)/8").font(.caption).foregroundStyle(.secondary)
                 }
-                .padding(8)
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+                Button { surprise(first: false) } label: {
+                    Label("Surprise me", systemImage: "dice.fill").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
             }
-            HStack(spacing: 8) {
-                TextField("Name (A–Z)", text: Binding(get: { s.name }, set: { s.name = String($0.uppercased().filter { $0.isLetter && $0.isASCII }.prefix(8)) }))
-                    .font(.system(.body, design: .rounded).weight(.semibold))
-                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
-                Text("\(s.name.count)/8").font(.caption).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
         }
-        .padding(.horizontal, 16).padding(.top, 8)
+        .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
     }
 
-    /// The four genes on their own, each in its colour: tap one to change it.
-    private var chips: some View {
-        HStack(spacing: 8) {
-            ForEach(0..<4, id: \.self) { i in
-                Button { part = i; tick() } label: {
-                    VStack(spacing: 4) {
-                        GenePicture(image: town.layer(i, id: gene(i), color: colour(i)))
-                            .frame(height: 42).padding(.horizontal, 4)
-                        Text(names[i]).font(.caption.weight(.semibold))
-                            .foregroundStyle(part == i ? Color.accentColor : Color.secondary)
+    /// One standard segmented control: Body | Face | Head | Back.
+    private var tabs: some View {
+        Picker("Part", selection: Binding(get: { part }, set: { part = $0; tick() })) {
+            ForEach(0..<4, id: \.self) { Text(names[$0]).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 16)
+    }
+
+    // MARK: below: the only part that scrolls
+
+    private var pickers: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if part != 1 {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("\(names[part]) colour").font(.footnote.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+                        colours
                     }
-                    .frame(maxWidth: .infinity).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(part == i ? Color.accentColor : Color.clear, lineWidth: 2))
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("\(names[part]) style").font(.footnote.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+                    genesGrid
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    /// The 13 colours the toy knows, as plain round swatches.
+    private var colours: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 10)], spacing: 10) {
+            ForEach(0..<13, id: \.self) { i in
+                let sel = colour(part) == i
+                Button { setColor(i) } label: {
+                    Circle().fill(Town.swatch(i))
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.2), lineWidth: 1))
+                        .frame(width: 40, height: 40)
+                        .padding(4)
+                        .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: sel ? 3 : 0))
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Colour \(i + 1)")
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-    }
-
-    // MARK: below: colours and genes for the chosen part
-
-    private var colours: some View {
-        ColourWheel(selected: Binding(get: { colour(part) }, set: { setColor($0) }))
-            .frame(width: 220, height: 220)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
     }
 
     private var genesGrid: some View {
         let list = part == 0 ? town.bodyIDs : town.ids
-        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8)], spacing: 8) {
+        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 10)], spacing: 10) {
             ForEach(list, id: \.self) { gid in
                 let sel = gene(part) == gid
                 Button { setPart(gid) } label: {
                     GenePicture(image: town.layer(part, id: gid, color: colour(part)))
-                        .frame(width: 46, height: 46)
-                        .frame(maxWidth: .infinity, minHeight: 60)
+                        .frame(width: 52, height: 52)
+                        .frame(maxWidth: .infinity, minHeight: 68)
                         .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(sel ? Color.accentColor.opacity(0.16) : Color(.tertiarySystemGroupedBackground)))
+                            .fill(sel ? Color.accentColor.opacity(0.16) : Color(.secondarySystemGroupedBackground)))
                         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .stroke(sel ? Color.accentColor : Color.clear, lineWidth: 2))
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.vertical, 4)
     }
+
 
     // MARK: state
 
@@ -335,7 +354,7 @@ struct DesignView: View {
 }
 
 
-// MARK: - dressing room and colour wheel
+// MARK: - dressing room
 
 /// The same backdrop every time a partner is made: a boutique fitting room (wall, curtain, mirror, wooden floor and a rug).
 struct DressingRoom: View {
@@ -392,97 +411,5 @@ struct DressingRoom: View {
                     .padding(.bottom, h * 0.03)
             }
         }
-    }
-}
-
-/// A round colour picker. A Tama's body, head and back can only be painted in the 13 colours the toy knows, so
-/// the wheel is made of exactly those: bright colours go around the ring in rainbow order, whites, greys and
-/// blacks sit in the middle. Tap or drag to choose.
-struct ColourWheel: View {
-    @Binding var selected: Int
-
-    private struct Entry { let index: Int; let color: Color; let hue: Double; let sat: Double; let bri: Double }
-    private static let entries: [Entry] = (0..<13).map { i in
-        let c = Town.swatch(i)
-        var h: CGFloat = 0, sa: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        UIColor(c).getHue(&h, saturation: &sa, brightness: &b, alpha: &a)
-        return Entry(index: i, color: c, hue: Double(h), sat: Double(sa), bri: Double(b))
-    }
-    private static let ring: [Entry] = entries.filter { $0.sat >= 0.2 }.sorted { $0.hue < $1.hue }
-    private static let centre: [Entry] = entries.filter { $0.sat < 0.2 }.sorted { $0.bri > $1.bri }
-
-    var body: some View {
-        GeometryReader { g in
-            let side = min(g.size.width, g.size.height)
-            let outer = side / 2, inner = outer * 0.5
-            let n = Double(Self.ring.count)
-            ZStack {
-                ForEach(Array(Self.ring.enumerated()), id: \.element.index) { k, e in
-                    let a0 = Angle.degrees(Double(k) / n * 360 - 90 - 180 / n), a1 = Angle.degrees(Double(k + 1) / n * 360 - 90 - 180 / n)
-                    let on = selected == e.index
-                    WheelWedge(start: a0, end: a1, innerRatio: 0.5)
-                        .fill(e.color)
-                        .overlay(WheelWedge(start: a0, end: a1, innerRatio: 0.5).stroke(Color.white, lineWidth: on ? 4 : 1.5))
-                        .scaleEffect(on ? 1.06 : 1)
-                        .zIndex(on ? 1 : 0)
-                }
-                // the neutrals in the middle
-                let cols = Self.centre.count <= 3 ? Self.centre.count : 3
-                let rows = (Self.centre.count + cols - 1) / max(1, cols)
-                VStack(spacing: 6) {
-                    ForEach(0..<rows, id: \.self) { r in
-                        HStack(spacing: 6) {
-                            ForEach(0..<cols, id: \.self) { c in
-                                let i = r * cols + c
-                                if i < Self.centre.count {
-                                    let e = Self.centre[i]
-                                    Circle().fill(e.color)
-                                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 1))
-                                        .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: selected == e.index ? 3 : 0).padding(-3))
-                                        .frame(width: inner * 0.5, height: inner * 0.5)
-                                } else { Color.clear.frame(width: inner * 0.5, height: inner * 0.5) }
-                            }
-                        }
-                    }
-                }
-            }
-            .frame(width: side, height: side)
-            .position(x: g.size.width / 2, y: g.size.height / 2)
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-                let cx = g.size.width / 2, cy = g.size.height / 2
-                let dx = Double(v.location.x - cx), dy = Double(v.location.y - cy)
-                let r = (dx * dx + dy * dy).squareRoot()
-                guard r <= Double(outer) * 1.1 else { return }
-                var pick: Int?
-                if r < Double(inner) {
-                    // nearest of the neutral circles
-                    let cols = Self.centre.count <= 3 ? Self.centre.count : 3
-                    let rows = (Self.centre.count + cols - 1) / max(1, cols)
-                    let cell = Double(inner) * 0.5 + 6
-                    let col = Int(((dx + cell * Double(cols) / 2) / cell).rounded(.down)), row = Int(((dy + cell * Double(rows) / 2) / cell).rounded(.down))
-                    let i = max(0, min(rows - 1, row)) * cols + max(0, min(cols - 1, col))
-                    if i < Self.centre.count { pick = Self.centre[i].index }
-                } else if !Self.ring.isEmpty {
-                    var deg = atan2(dy, dx) * 180 / .pi + 90 + 180 / n      // 0 at the top of the first wedge
-                    deg = deg.truncatingRemainder(dividingBy: 360); if deg < 0 { deg += 360 }
-                    pick = Self.ring[min(Self.ring.count - 1, Int(deg / 360 * n))].index
-                }
-                if let pick, pick != selected { selected = pick; UIImpactFeedbackGenerator(style: .light).impactOccurred() }
-            })
-        }
-        .accessibilityLabel("Colour wheel")
-    }
-}
-
-private struct WheelWedge: Shape {
-    var start: Angle, end: Angle, innerRatio: CGFloat
-    func path(in r: CGRect) -> Path {
-        let c = CGPoint(x: r.midX, y: r.midY), o = min(r.width, r.height) / 2, i = o * innerRatio
-        var p = Path()
-        p.addArc(center: c, radius: o, startAngle: start, endAngle: end, clockwise: false)
-        p.addArc(center: c, radius: i, startAngle: end, endAngle: start, clockwise: true)
-        p.closeSubpath()
-        return p
     }
 }

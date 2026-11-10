@@ -14,7 +14,9 @@ jobs:
           - kind: ir
             os: ubuntu-latest
           - kind: policy
-            os: macos-14
+            os: macos-latest
+          - kind: transport
+            os: macos-latest
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -40,6 +42,7 @@ jobs:
       issues: write
     steps:
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           pattern: expanded-*
           path: reports
@@ -47,14 +50,15 @@ jobs:
       - name: Publish combined expanded results
         env:
           GH_TOKEN: ${{ github.token }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
         run: |
           python3 - <<'PY'
           import json, os, pathlib, subprocess
           groups = {}
-          for kind in ['ir', 'policy']:
+          for kind in ['ir', 'policy', 'transport']:
               path = pathlib.Path('reports') / (kind + '.json')
-              groups[kind] = json.loads(path.read_text()) if path.exists() else {'passed': False, 'error': 'No report produced'}
-          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'groups': groups, 'limits': 'No app code changed; no Bluetooth/IR gameplay or iOS delivery guarantee. Existing headless audit remains separate.'}
+              groups[kind] = json.loads(path.read_text()) if path.exists() else {'passed': False, 'error': 'No report produced; check job startup, checkout and artifact upload'}
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'matrix_result': os.environ['CHECKS_RESULT'], 'groups': groups, 'limits': 'No app code changed; no Bluetooth/IR gameplay or iOS delivery guarantee. Existing headless audit remains separate.'}
           body = pathlib.Path('expanded-report.md')
           body.write_text('```json\n' + json.dumps(report, indent=2) + '\n```\n')
           subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS expanded audit ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(body)], check=True)

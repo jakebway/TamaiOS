@@ -1,0 +1,89 @@
+name: Headless firmware fixture discovery
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/firmware-grounded-validation]
+permissions:
+  contents: read
+jobs:
+  survey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+      - name: Prepare the exact patched core
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/oreo-fox/tg18-emu upstream
+          git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
+          git -C upstream apply ../patches/radio.patch
+          git -C upstream apply ../patches/ir_partner.patch
+          mkdir -p ffi/examples survey-results
+          cp tools/firmware_fixture_survey.rs ffi/examples/audit_fixture_survey.rs
+      - name: Run bounded fresh-device input plans
+        id: run
+        shell: bash
+        env:
+          TAMAIOS_AUDIT_FIRMWARE: ${{ github.workspace }}/firmware
+          TAMAIOS_SURVEY_OUTPUT: ${{ github.workspace }}/survey-results/survey.json
+        run: |
+          set -euo pipefail
+          timeout 600 cargo run --release --manifest-path ffi/Cargo.toml --example audit_fixture_survey 2>&1 | tee survey-results/run.txt
+      - name: Upload survey report only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-survey
+          path: survey-results/
+          retention-days: 7
+          if-no-files-found: warn
+  publish:
+    needs: survey
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: fixture-survey
+          path: reports
+      - name: Publish bounded discovery summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SURVEY_RESULT: ${{ needs.survey.result }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'job_result': os.environ['SURVEY_RESULT'], 'scope': 'Discovery only. Module readiness is not a verified connection; raw fields are not semantic proofs.'}
+          p = pathlib.Path('reports/survey.json')
+          if p.exists():
+              source = json.loads(p.read_text())
+              rows = []
+              for row in source.get('runs', []):
+                  obs = row.get('observations', [])
+                  transitions = []
+                  previous = None
+                  for item in obs:
+                      current = (item.get('stage_raw'), item.get('radio_setup_done'))
+                      if current != previous:
+                          transitions.append(item)
+                          previous = current
+                  rows.append({'firmware': row['firmware'], 'plan': row['plan'], 'stop_reason': row['stop_reason'], 'stopped_code': row['stopped_code'], 'observations_count': len(obs), 'stage_or_setup_changes': transitions[:8], 'final': obs[-1] if obs else None})
+              report['runs'] = rows
+              report['full_report_sha256'] = hashlib.sha256(p.read_bytes()).hexdigest()
+          else:
+              report['error'] = 'No survey JSON produced'
+              log = pathlib.Path('reports/run.txt')
+              if log.exists(): report['log_tail'] = log.read_text(errors='replace').splitlines()[-40:]
+          body = pathlib.Path('fixture-report.md')
+          body.write_text('```json\n' + json.dumps(report, indent=2) + '\n```\n')
+          subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS fixture survey ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(body)], check=True)
+          PY

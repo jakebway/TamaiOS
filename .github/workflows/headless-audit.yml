@@ -20,8 +20,8 @@ jobs:
           git -C upstream apply ../patches/radio.patch
           git -C upstream apply ../patches/ir_partner.patch
           cargo build --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --bin tg18cli
-      - name: Run isolated snapshot validation
-        run: python3 tools/headless_audit.py
+      - name: Run snapshot validation and timer diagnostics
+        run: python3 tools/timer_diagnostics.py
       - name: Upload non-sensitive summary only
         if: always()
         uses: actions/upload-artifact@v4

@@ -6,6 +6,14 @@ import subprocess
 root = pathlib.Path('audit-results')
 root.mkdir(exist_ok=True)
 report = {'commit': os.environ['GITHUB_SHA'], 'branch': os.environ['GITHUB_REF_NAME'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'steps': {name: os.environ.get(name, 'unknown') for name in ['PREPARE', 'TIMER', 'ISOLATION', 'SNAPSHOT']}, 'scope': 'Native core tests only. Isolation uses synthetic data. Radio snapshot characterization passing confirms an omission, not working connection persistence. Bluetooth/IR gameplay, notifications and iOS remain unverified.'}
+manifest = root / 'core-preparation.json'
+if manifest.exists():
+    try:
+        report['core_preparation'] = json.loads(manifest.read_text())
+    except (ValueError, OSError) as exc:
+        report['core_preparation'] = {'error': 'Preparation manifest unreadable', 'error_type': type(exc).__name__}
+else:
+    report['core_preparation'] = {'error': 'No preparation manifest produced; patch delivery unverified'}
 summary = root / 'summary.json'
 if summary.exists():
     source = json.loads(summary.read_text())

@@ -18,17 +18,15 @@ jobs:
         with:
           lfs: true
           persist-credentials: false
-      - name: Prepare pinned patched core
+      - name: Prepare promoted hash-verified core
         id: prepare
         shell: bash
         run: |
           set -euo pipefail
-          git clone https://github.com/oreo-fox/tg18-emu upstream
-          git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
-          git -C upstream apply ../patches/radio.patch
-          git -C upstream apply ../patches/ir_partner.patch
+          mkdir -p audit-results
+          python3 tools/prepare_core.py --variant promoted | tee audit-results/core-preparation.json
           cargo build --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --bin tg18cli
-          mkdir -p upstream/core/tests audit-results
+          mkdir -p upstream/core/tests
           cp tools/native_timer_audit.rs upstream/core/tests/tamaios_timer_audit.rs
           cp tools/native_isolation_audit.rs upstream/core/tests/tamaios_isolation_audit.rs
       - name: Timer and firmware continuation tests

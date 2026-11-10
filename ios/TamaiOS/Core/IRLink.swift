@@ -135,8 +135,13 @@ final class IRLink {
             cooldownUntil = now + 8
             emu.muteUntil = CACurrentMediaTime() + 1.5
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard emu.toy?.id == deviceID, !emu.loading else { return }
+                emu.say("Receive isn’t supported on the active Tama. Choose Give; the other Tama will receive.", seconds: 7)
                 emu.press(.c)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    guard emu.toy?.id == deviceID, !emu.loading else { return }
+                    emu.release(.c)
+                }
             }
             return
         }

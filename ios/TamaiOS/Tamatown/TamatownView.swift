@@ -277,9 +277,10 @@ struct TownScene: View {
     let open: Bool
     let go: (TownPlace) -> Void
     @ObservedObject var town = Town.shared
+    @EnvironmentObject var emu: Emulator
     @State private var sim = WanderSim()
     /// The Tamas walking around are the ones you can date at Tama ♥ Party.
-    private var walkers: [Suitor] { Array(town.suitors.prefix(5)) }
+    private var walkers: [Suitor] { town.crowd(emu.toy, limit: 8) }
     static let sparkX: [CGFloat] = [0.08, 0.22, 0.36, 0.55, 0.68, 0.83, 0.93, 0.47, 0.15]
     static let sparkY: [CGFloat] = [0.10, 0.06, 0.15, 0.05, 0.12, 0.07, 0.18, 0.22, 0.24]
 
@@ -375,7 +376,7 @@ struct TownScene: View {
     private func walkersLayer(_ w: CGFloat, _ h: CGFloat) -> some View {
         TimelineView(.animation(minimumInterval: 1.0 / 24)) { tl in
             let now = tl.date.timeIntervalSinceReferenceDate
-            let singles = Array(town.suitors.prefix(6))
+            let singles = town.crowd(emu.toy, limit: 10)
             let _ = sim.sync(singles, now: now)
             let _ = sim.step(now: now)
             ZStack {

@@ -32,11 +32,19 @@ struct TownView: View {
         }
         .onAppear { town.loadIfPresent() }
         .sheet(item: $chosen) { s in
-            SuitorSheet(suitor: s, tamaName: tamaName, adult: toy.flatMap { town.visitInfo($0)?.adult } ?? true) { babySex, genes in
-                propose(s, babySex: babySex, genes: genes)
+            let saved = town.partner(s.id, toy)
+            SuitorSheet(suitor: s, tamaName: tamaName, adult: toy.flatMap { town.visitInfo($0)?.adult } ?? true,
+                        onPropose: { babySex, genes in propose(s, babySex: babySex, genes: genes) },
+                        savedHearts: saved?.hearts ?? 0, savedDone: saved?.done ?? [],
+                        onProgress: saved == nil ? nil : { hearts, done in if let t = toy { town.updatePartner(s.id, hearts: hearts, done: done, t) } })
+        }
+        .sheet(isPresented: $designing) {
+            DesignView { s in
+                designing = false
+                if let t = toy { town.addPartner(s, t) }
+                chosen = s
             }
         }
-        .sheet(isPresented: $designing) { DesignView { s in designing = false; chosen = s } }
         .sheet(isPresented: $importing) {
             DocumentPicker { u in
                 if let d = try? Data(contentsOf: u) { town.importPack(d) }
@@ -134,6 +142,33 @@ struct TownView: View {
                 Spacer()
                 Button { withAnimation { town.shuffle() } } label: { Label("Shuffle", systemImage: "shuffle") }
                     .buttonStyle(.bordered)
+            }
+            let mine = town.partners(toy)
+            if !mine.isEmpty {
+                Text("Your partners").font(.system(.subheadline, design: .rounded).weight(.bold)).foregroundStyle(.secondary)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
+                    ForEach(mine) { p in
+                        Button { chosen = p.suitor } label: {
+                            VStack(spacing: 4) {
+                                CharacterPicture(image: town.image(p.suitor)).frame(width: 80, height: 80)
+                                Text(p.suitor.name).font(.system(.subheadline, design: .rounded).weight(.heavy))
+                                HStack(spacing: 2) {
+                                    ForEach(0..<5, id: \.self) { i in
+                                        Image(systemName: i < p.hearts ? "heart.fill" : "heart").font(.system(size: 9)).foregroundStyle(.pink)
+                                    }
+                                }
+                            }
+                            .padding(8)
+                            .frame(maxWidth: .infinity, minHeight: 136)
+                            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.pink.opacity(0.10)))
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button(role: .destructive) { if let t = toy { town.removePartner(p.id, t) } } label: { Label("Remove", systemImage: "trash") }
+                        }
+                    }
+                }
+                Text("Singles nearby").font(.system(.subheadline, design: .rounded).weight(.bold)).foregroundStyle(.secondary).padding(.top, 4)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 12)], spacing: 12) {
                 ForEach(town.suitors) { s in

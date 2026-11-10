@@ -61,6 +61,10 @@ struct SuitorSheet: View {
     let tamaName: String
     let adult: Bool
     let onPropose: (_ babySex: Int, _ genes: Int) -> Void
+    /// For a partner you designed: where the dating left off, and a way to keep it.
+    var savedHearts = 0
+    var savedDone: [Int] = []
+    var onProgress: ((_ hearts: Int, _ done: [Int]) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var town = Town.shared
     @State private var babySex = 2
@@ -162,7 +166,10 @@ struct SuitorSheet: View {
             .navigationTitle("Date")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-            .onAppear { said = "Hi \(tamaName)! Shall we hang out?" }
+            .onAppear {
+                hearts = savedHearts; done = Set(savedDone)
+                said = savedHearts > 0 ? "Welcome back, \(tamaName)! I missed you." : "Hi \(tamaName)! Shall we hang out?"
+            }
         }
     }
 
@@ -173,6 +180,7 @@ struct SuitorSheet: View {
         said = (i == favourite ? "My favourite! " : "") + outings[i].line
         scene = full ? SuitorSheet.loveScene : outings[i].scene
         if full { said = "\(tamaName)… I think I'm in love." }
+        onProgress?(hearts, done.sorted())
         tick()
     }
 }

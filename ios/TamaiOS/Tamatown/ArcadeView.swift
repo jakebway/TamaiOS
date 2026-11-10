@@ -216,7 +216,7 @@ struct ArcadeView: View {
     private func prepareSprites() {
         guard spritePool.isEmpty else { return }
         let started = ProcessInfo.processInfo.systemUptime
-        var candidates = Array(town.suitors.prefix(12))
+        var candidates = town.crowd(emu.toy, limit: 16)
         if candidates.isEmpty, let fallback = town.randomSuitor(mix: false) { candidates = [fallback] }
         var prepared: [Sprite] = []
         for candidate in candidates {

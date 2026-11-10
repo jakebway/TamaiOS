@@ -272,16 +272,69 @@ final class Town: ObservableObject {
         return image(s) == nil ? nil : s
     }
 
+    /// How many singles live in town (the grid, the people walking about and the Arcade game use them).
+    static let crowdSize = 18
+
     func shuffle() {
         var out: [Suitor] = []
         var tries = 0
-        while out.count < 8 && tries < 60 {
+        while out.count < Town.crowdSize && tries < 240 {
             tries += 1
-            if let s = randomSuitor(mix: out.count >= 6), !out.contains(where: { $0.body == s.body && !s.isMix }) {
+            if let s = randomSuitor(mix: out.count >= Town.crowdSize * 2 / 3),
+               !out.contains(where: { $0.name == s.name || ($0.body == s.body && !s.isMix && !$0.isMix) }) {
                 out.append(s)
             }
         }
         suitors = out
+    }
+
+    // MARK: partners you designed (kept for as long as this generation of your Tama lasts)
+
+    /// A partner made with "Design your own", with how far the dating has got. It stays until the Tama marries
+    /// (a new generation), so you can keep seeing them on later visits.
+    struct Partner: Codable, Identifiable, Equatable {
+        var suitor: Suitor
+        var hearts = 0
+        var done: [Int] = []
+        var generation: Int
+        var id: UUID { suitor.id }
+    }
+
+    /// The current generation of this toy: each marriage starts the next.
+    func generation(_ toy: Toy) -> Int { state(toy).married.count }
+
+    /// Partners designed for the Tama as it is now.
+    func partners(_ toy: Toy?) -> [Partner] {
+        guard let toy else { return [] }
+        let st = state(toy)
+        return (st.partners ?? []).filter { $0.generation == st.married.count }
+    }
+
+    func partner(_ id: UUID, _ toy: Toy?) -> Partner? { partners(toy).first { $0.id == id } }
+
+    func addPartner(_ suitor: Suitor, _ toy: Toy) {
+        var x = state(toy)
+        guard !(x.partners ?? []).contains(where: { $0.id == suitor.id }) else { return }
+        x.partners = (x.partners ?? []).filter { $0.generation == x.married.count } + [Partner(suitor: suitor, generation: x.married.count)]
+        save(x, toy)
+    }
+
+    func updatePartner(_ id: UUID, hearts: Int, done: [Int], _ toy: Toy) {
+        var x = state(toy)
+        guard let i = x.partners?.firstIndex(where: { $0.id == id }) else { return }
+        x.partners?[i].hearts = hearts; x.partners?[i].done = done
+        save(x, toy)
+    }
+
+    func removePartner(_ id: UUID, _ toy: Toy) {
+        var x = state(toy)
+        x.partners = x.partners?.filter { $0.id != id }
+        save(x, toy)
+    }
+
+    /// Everyone who wanders the town: your own partners first, then the singles.
+    func crowd(_ toy: Toy?, limit: Int) -> [Suitor] {
+        Array((partners(toy).map(\.suitor) + suitors).prefix(limit))
     }
 
     // MARK: per-toy state (the Tama away in town, a wedding waiting)
@@ -298,6 +351,8 @@ final class Town: ObservableObject {
         /// The Tamagotchi's own name (from its last visit).
         var petName: String? = nil
         var pointGifts: [PointGift]? = nil
+        /// Partners designed in Tama ♥ Party, kept for this generation.
+        var partners: [Partner]? = nil
     }
 
     struct PointGift: Codable, Identifiable, Equatable {

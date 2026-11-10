@@ -38,7 +38,12 @@ fn main() {
     let mut runs = Vec::new();
     for path in files {
         let rom = std::fs::read(&path).unwrap();
-        let plans: Vec<(&str, Vec<i32>)> = vec![("confirm", vec![1; 30]), ("back_then_confirm", [vec![2; 4], vec![1; 30]].concat()), ("cycle_then_confirm", (0..20).flat_map(|_| [0, 1]).collect())];
+        let plans: Vec<(&str, Vec<i32>)> = vec![
+            ("confirm", vec![1; 30]),
+            ("back_then_confirm", [vec![2; 4], vec![1; 30]].concat()),
+            ("cycle_then_confirm", (0..20).flat_map(|_| [0, 1]).collect()),
+            ("confirm_name_then_wait", [vec![2; 4], vec![1; 31]].concat()),
+        ];
         for (plan, keys) in plans {
             let tag = format!("{}-{plan}", path.file_name().unwrap().to_string_lossy());
             let mut elapsed = 0.0;
@@ -65,9 +70,20 @@ fn main() {
                 }
             }
             tg_release_all(h.0);
-            runs.push(json!({"firmware": path.file_name().unwrap().to_string_lossy(), "plan": plan, "planned_keys": keys, "stop_reason": reason, "stopped_code": stopped_code, "observations": observations}));
+            let mut completed_input_free_wait_seconds = 0;
+            if plan == "confirm_name_then_wait" && stopped_code.is_none() && reason == "action_budget_reached" {
+                match advance(&h, 15000) {
+                    Ok(()) => {
+                        completed_input_free_wait_seconds = 300;
+                        reason = "bounded_post_confirmation_wait_complete_not_setup_proof";
+                    }
+                    Err(code) => { stopped_code = Some(code); reason = "post_confirmation_wait_non_ok"; }
+                }
+                observations.push(sample(&h, &tag, keys.len() + 1));
+            }
+            runs.push(json!({"firmware": path.file_name().unwrap().to_string_lossy(), "plan": plan, "planned_keys": keys, "completed_input_free_wait_seconds": completed_input_free_wait_seconds, "stop_reason": reason, "stopped_code": stopped_code, "observations": observations}));
         }
     }
-    let report = json!({"scope": "Exploratory fresh-device inputs and temporary OCR frames; no RAM edits, verified screen semantics, connection or gameplay pass claimed", "runs": runs});
+    let report = json!({"scope": "Exploratory fresh-device inputs and temporary OCR frames; final observation of confirm_name_then_wait follows 300 input-free emulated seconds only when its bounded wait completes. No RAM edits, verified screen semantics, connection or gameplay pass claimed", "runs": runs});
     std::fs::write(std::env::var("TAMAIOS_SURVEY_OUTPUT").expect("output path"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 }

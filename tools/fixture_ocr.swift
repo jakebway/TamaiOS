@@ -11,8 +11,11 @@ for row in source["runs"] as? [[String: Any]] ?? [] {
     var samples: [[String: Any]] = []
     for (index, item) in observations.enumerated() {
         let action = item["action"] as? Int ?? -1
-        guard action % 5 == 0 || index == observations.count - 1 else { continue }
+        guard action % 5 == 0 || item["phase"] != nil || index == observations.count - 1 else { continue }
         var sample: [String: Any] = ["action": action, "frame_fnv32": item["frame_fnv32"] ?? "unknown"]
+        for key in ["phase", "target_seconds_after_wake", "interval_completed", "tick_error", "asleep", "dark_return", "stage_raw", "view_raw", "mode_raw", "radio_setup_done", "call_chain"] {
+            if let value = item[key] { sample[key] = value }
+        }
         do {
             guard let path = item["frame_file"] as? String,
                   let imageSource = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),

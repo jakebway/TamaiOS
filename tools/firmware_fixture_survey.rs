@@ -43,6 +43,7 @@ fn main() {
             ("back_then_confirm", [vec![2; 4], vec![1; 30]].concat()),
             ("cycle_then_confirm", (0..20).flat_map(|_| [0, 1]).collect()),
             ("confirm_name_then_wait", [vec![2; 4], vec![1; 31]].concat()),
+            ("confirm_name_then_wake", [vec![2; 4], vec![1; 31]].concat()),
         ];
         for (plan, keys) in plans {
             let tag = format!("{}-{plan}", path.file_name().unwrap().to_string_lossy());
@@ -71,7 +72,8 @@ fn main() {
             }
             tg_release_all(h.0);
             let mut completed_input_free_wait_seconds = 0;
-            if plan == "confirm_name_then_wait" && stopped_code.is_none() && reason == "action_budget_reached" {
+            let mut wake_attempted = false;
+            if matches!(plan, "confirm_name_then_wait" | "confirm_name_then_wake") && stopped_code.is_none() && reason == "action_budget_reached" {
                 match advance(&h, 15000) {
                     Ok(()) => {
                         completed_input_free_wait_seconds = 300;
@@ -79,11 +81,31 @@ fn main() {
                     }
                     Err(code) => { stopped_code = Some(code); reason = "post_confirmation_wait_non_ok"; }
                 }
-                observations.push(sample(&h, &tag, keys.len() + 1));
+                let mut observation = sample(&h, &tag, keys.len() + 1);
+                observation["phase"] = json!("post_wait");
+                observations.push(observation);
             }
-            runs.push(json!({"firmware": path.file_name().unwrap().to_string_lossy(), "plan": plan, "planned_keys": keys, "completed_input_free_wait_seconds": completed_input_free_wait_seconds, "stop_reason": reason, "stopped_code": stopped_code, "observations": observations}));
+            if plan == "confirm_name_then_wake" && completed_input_free_wait_seconds == 300 && stopped_code.is_none() {
+                if tg_is_asleep(h.0) == 1 {
+                    wake_attempted = true;
+                    tg_wake(h.0);
+                    reason = "bounded_wake_observations_complete_not_room_proof";
+                    for (index, (ticks, seconds)) in [(25usize, 0.5f64), (75, 2.0), (400, 10.0)].iter().enumerate() {
+                        let error = advance(&h, *ticks).err();
+                        let mut observation = sample(&h, &tag, keys.len() + 2 + index);
+                        observation["phase"] = json!("post_wake");
+                        observation["target_seconds_after_wake"] = json!(seconds);
+                        observation["interval_completed"] = json!(error.is_none());
+                        observation["tick_error"] = json!(error);
+                        observations.push(observation);
+                        if let Some(code) = error { stopped_code = Some(code); reason = "post_wake_non_ok"; break; }
+                    }
+                } else { reason = "wake_skipped_baseline_not_asleep"; }
+            }
+            tg_release_all(h.0);
+            runs.push(json!({"firmware": path.file_name().unwrap().to_string_lossy(), "plan": plan, "planned_keys": keys, "completed_input_free_wait_seconds": completed_input_free_wait_seconds, "wake_attempted": wake_attempted, "stop_reason": reason, "stopped_code": stopped_code, "observations": observations}));
         }
     }
-    let report = json!({"scope": "Exploratory fresh-device inputs and temporary OCR frames; final observation of confirm_name_then_wait follows 300 input-free emulated seconds only when its bounded wait completes. No RAM edits, verified screen semantics, connection or gameplay pass claimed", "runs": runs});
+    let report = json!({"scope": "Exploratory fresh devices. Wait controls retained; wake plan calls tg_wake once only after a completed 300-second wait and asleep baseline, then targets 0.5, 2 and 10 seconds without further input. Never-sleep unchanged. No RAM edits, verified room semantics, connection or gameplay pass claimed", "runs": runs});
     std::fs::write(std::env::var("TAMAIOS_SURVEY_OUTPUT").expect("output path"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 }

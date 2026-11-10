@@ -186,3 +186,28 @@
 +            }
              let previousIdentity = LiveTamaName.shared.identity
              let previousVerifiedName = previousIdentity?.hasPrefix(deviceID + "." + signature + ".") == true ? LiveTamaName.shared.verifiedName : nil
+--- a/ios/TamaiOS/Core/IRLink.swift
++++ b/ios/TamaiOS/Core/IRLink.swift
+@@ -16,2 +16,3 @@
+     fileprivate var quietUntil = 0.0      // the visit scene keeps playing after the infrared stops: no background reading then
++    private var sceneReleasePolicy = SceneReleasePolicy()
+     private var cooldownUntil = 0.0
+--- a/ios/TamaiOS/Core/IRLink.swift
++++ b/ios/TamaiOS/Core/IRLink.swift
+@@ -101,3 +101,14 @@
+     func watch(emu: Emulator, handle h: OpaquePointer, deviceID: String, now: Double) {
+-        guard !active, !starting else { return }
+-        guard IRLink.waiting(h) else {
++        guard !active, !starting else {
++            _ = sceneReleasePolicy.observe(now: now, deadline: quietUntil, deviceID: deviceID,
++                operationBusy: true, room: false, waiting: false)
++            return
++        }
++        let waiting = IRLink.waiting(h)
++        let room = now < quietUntil && ToyScreen.isRoom(chain: ToyScreen.chain(core: h), deviceID: deviceID)
++        if let reason = sceneReleasePolicy.observe(now: now, deadline: quietUntil, deviceID: deviceID,
++            operationBusy: false, room: room, waiting: waiting) {
++            quietUntil = 0
++            emu.note("infrared scene lock released: " + reason)
++        }
++        guard waiting else {

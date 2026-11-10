@@ -3,12 +3,19 @@ on:
   workflow_dispatch:
   push:
     branches: [audit/firmware-grounded-validation]
+    paths:
+      - tools/firmware_fixture_survey.rs
+      - tools/fixture_ocr.swift
+      - ffi/**
+      - patches/**
+      - firmware/**
+      - .github/workflows/fixture-survey.yml
 permissions:
   contents: read
 jobs:
   survey:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: macos-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,18 +29,23 @@ jobs:
           git -C upstream checkout 41204c92e98a8882d5c90a9876d8990f3b63e285
           git -C upstream apply ../patches/radio.patch
           git -C upstream apply ../patches/ir_partner.patch
-          mkdir -p ffi/examples survey-results
+          mkdir -p ffi/examples survey-results survey-frames
           cp tools/firmware_fixture_survey.rs ffi/examples/audit_fixture_survey.rs
       - name: Run bounded fresh-device input plans
-        id: run
         shell: bash
         env:
           TAMAIOS_AUDIT_FIRMWARE: ${{ github.workspace }}/firmware
           TAMAIOS_SURVEY_OUTPUT: ${{ github.workspace }}/survey-results/survey.json
+          TAMAIOS_SURVEY_FRAMES: ${{ github.workspace }}/survey-frames
         run: |
           set -euo pipefail
-          timeout 600 cargo run --release --manifest-path ffi/Cargo.toml --example audit_fixture_survey 2>&1 | tee survey-results/run.txt
-      - name: Upload survey report only
+          cargo run --release --manifest-path ffi/Cargo.toml --example audit_fixture_survey 2>&1 | tee survey-results/run.txt
+      - name: Recognize setup text without publishing images
+        run: swift tools/fixture_ocr.swift survey-results/survey.json survey-results/ocr.json
+      - name: Remove temporary images
+        if: always()
+        run: rm -rf survey-frames
+      - name: Upload text reports only
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -62,23 +74,28 @@ jobs:
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, subprocess
-          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'job_result': os.environ['SURVEY_RESULT'], 'scope': 'Discovery only. Module readiness is not a verified connection; raw fields are not semantic proofs.'}
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'job_result': os.environ['SURVEY_RESULT'], 'scope': 'Discovery only. OCR may be wrong; module readiness and raw fields are not semantic proof.'}
+          ocr_path = pathlib.Path('reports/ocr.json')
+          ocr = {}
+          if ocr_path.exists():
+              for row in json.loads(ocr_path.read_text()).get('runs', []):
+                  samples = row.get('samples', [])
+                  selected = samples[:2] + samples[max(2, len(samples)-3):]
+                  for sample in selected:
+                      sample['lines'] = sample.get('lines', [])[:6]
+                  ocr[(row['firmware'], row['plan'])] = selected
           p = pathlib.Path('reports/survey.json')
           if p.exists():
               source = json.loads(p.read_text())
               rows = []
               for row in source.get('runs', []):
                   obs = row.get('observations', [])
-                  transitions = []
-                  previous = None
-                  for item in obs:
-                      current = (item.get('stage_raw'), item.get('radio_setup_done'))
-                      if current != previous:
-                          transitions.append(item)
-                          previous = current
-                  rows.append({'firmware': row['firmware'], 'plan': row['plan'], 'stop_reason': row['stop_reason'], 'stopped_code': row['stopped_code'], 'observations_count': len(obs), 'stage_or_setup_changes': transitions[:8], 'final': obs[-1] if obs else None})
+                  final = dict(obs[-1]) if obs else None
+                  if final: final.pop('frame_file', None)
+                  rows.append({'firmware': row['firmware'], 'plan': row['plan'], 'stop_reason': row['stop_reason'], 'stopped_code': row['stopped_code'], 'observations_count': len(obs), 'final': final, 'screen_text_samples': ocr.get((row['firmware'], row['plan']), [])})
               report['runs'] = rows
               report['full_report_sha256'] = hashlib.sha256(p.read_bytes()).hexdigest()
+              report['ocr_report_available'] = ocr_path.exists()
           else:
               report['error'] = 'No survey JSON produced'
               log = pathlib.Path('reports/run.txt')

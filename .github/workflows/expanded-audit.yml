@@ -1,0 +1,61 @@
+name: Expanded IR and notification policy audit
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/firmware-grounded-validation]
+permissions:
+  contents: read
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: ir
+            os: ubuntu-latest
+          - kind: policy
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run source-backed test group
+        run: python3 tools/run_expanded_audit.py ${{ matrix.kind }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: expanded-${{ matrix.kind }}
+          path: expanded-results/
+          if-no-files-found: warn
+          retention-days: 7
+  publish:
+    needs: checks
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: expanded-*
+          path: reports
+          merge-multiple: true
+      - name: Publish combined expanded results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          groups = {}
+          for kind in ['ir', 'policy']:
+              path = pathlib.Path('reports') / (kind + '.json')
+              groups[kind] = json.loads(path.read_text()) if path.exists() else {'passed': False, 'error': 'No report produced'}
+          report = {'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'groups': groups, 'limits': 'No app code changed; no Bluetooth/IR gameplay or iOS delivery guarantee. Existing headless audit remains separate.'}
+          body = pathlib.Path('expanded-report.md')
+          body.write_text('```json\n' + json.dumps(report, indent=2) + '\n```\n')
+          subprocess.run(['gh', 'issue', 'create', '--repo', os.environ['GITHUB_REPOSITORY'], '--title', 'TamaiOS expanded audit ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(body)], check=True)
+          PY

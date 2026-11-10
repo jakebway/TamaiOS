@@ -1,8 +1,14 @@
 name: Headless firmware smoke audit
 on:
   workflow_dispatch:
+  push:
+    branches: [audit/firmware-grounded-validation]
 permissions:
   contents: read
+  issues: write
+concurrency:
+  group: firmware-audit-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   smoke:
     runs-on: ubuntu-latest
@@ -11,7 +17,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
+          persist-credentials: false
       - name: Prepare pinned patched core
+        id: prepare
         shell: bash
         run: |
           set -euo pipefail
@@ -20,23 +28,41 @@ jobs:
           git -C upstream apply ../patches/radio.patch
           git -C upstream apply ../patches/ir_partner.patch
           cargo build --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --bin tg18cli
-      - name: Native timer and same-checkpoint regression tests
+          mkdir -p upstream/core/tests audit-results
+          cp tools/native_timer_audit.rs upstream/core/tests/tamaios_timer_audit.rs
+          cp tools/native_isolation_audit.rs upstream/core/tests/tamaios_isolation_audit.rs
+      - name: Timer and firmware continuation tests
+        id: timer
+        if: always() && steps.prepare.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p upstream/core/tests audit-results
-          cp tools/native_timer_audit.rs upstream/core/tests/tamaios_timer_audit.rs
-          TAMAIOS_AUDIT_FIRMWARE="$GITHUB_WORKSPACE/firmware" timeout 300 cargo test --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --test tamaios_timer_audit -- --nocapture --test-threads=1 2>&1 | tee audit-results/native-tests.txt
-      - name: Run snapshot validation and timer diagnostics
-        if: always()
+          TAMAIOS_AUDIT_FIRMWARE="$GITHUB_WORKSPACE/firmware" timeout 300 cargo test --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --test tamaios_timer_audit -- --nocapture --test-threads=1 2>&1 | tee audit-results/timer-tests.txt
+      - name: Instance isolation and snapshot characterization
+        id: isolation
+        if: always() && steps.prepare.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 180 cargo test --locked --release --manifest-path upstream/Cargo.toml -p tg18-core --test tamaios_isolation_audit -- --nocapture --test-threads=1 2>&1 | tee audit-results/isolation-tests.txt
+      - name: Snapshot validation and timer diagnostics
+        id: snapshot
+        if: always() && steps.prepare.outcome == 'success'
         run: python3 tools/timer_diagnostics.py
+      - name: Publish sanitized results issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARE: ${{ steps.prepare.outcome }}
+          TIMER: ${{ steps.timer.outcome }}
+          ISOLATION: ${{ steps.isolation.outcome }}
+          SNAPSHOT: ${{ steps.snapshot.outcome }}
+        run: python3 tools/publish_audit.py
       - name: Upload diagnostic summaries
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: headless-smoke-summary
-          path: |
-            audit-results/summary.json
-            audit-results/native-tests.txt
+          path: audit-results/
           if-no-files-found: warn
           retention-days: 7

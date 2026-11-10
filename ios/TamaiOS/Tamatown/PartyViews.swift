@@ -194,8 +194,6 @@ struct DesignView: View {
     @ObservedObject var town = Town.shared
     @State private var s = Suitor(name: "", body: 0, face: 0, head: 0, back: 0, bodyColor: 0, headColor: 0, backColor: 0, blurb: "Made just for you.")
     @State private var part = 0
-    @State private var wall = 0
-
     private let names = ["Body", "Face", "Head", "Back"]
 
     var body: some View {
@@ -224,7 +222,7 @@ struct DesignView: View {
                     }.fontWeight(.bold).disabled(town.image(s) == nil)
                 }
             }
-            .onAppear { surprise(first: true); wall = town.niceWallpapers.contains(2) ? 2 : 0 }
+            .onAppear { surprise(first: true) }
         }
     }
 
@@ -235,7 +233,7 @@ struct DesignView: View {
             ZStack(alignment: .topTrailing) {
                 GeometryReader { g in
                     ZStack(alignment: .bottom) {
-                        Backdrop(index: wall)
+                        DressingRoom()
                         CharacterPicture(image: town.image(s))
                             .frame(width: g.size.width * 0.62, height: g.size.width * 0.62)
                             .padding(.bottom, g.size.width * 0.04)
@@ -245,10 +243,6 @@ struct DesignView: View {
                 .frame(width: 190, height: 190)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 HStack(spacing: 8) {
-                    Button { nextWall() } label: {
-                        Image(systemName: "photo").font(.body).padding(9).background(Circle().fill(.thinMaterial))
-                    }
-                    .accessibilityLabel("Change wallpaper")
                     Button { surprise(first: false) } label: {
                         Image(systemName: "dice.fill").font(.body).padding(9).background(Circle().fill(.thinMaterial))
                     }
@@ -293,19 +287,10 @@ struct DesignView: View {
     // MARK: below: colours and genes for the chosen part
 
     private var colours: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(0..<13, id: \.self) { p in
-                    Button { setColor(p) } label: {
-                        Circle().fill(Town.swatch(p)).frame(width: 34, height: 34)
-                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 1))
-                            .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: colour(part) == p ? 3 : 0).padding(-4))
-                            .padding(5)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
+        ColourWheel(selected: Binding(get: { colour(part) }, set: { setColor($0) }))
+            .frame(width: 220, height: 220)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
     }
 
     private var genesGrid: some View {
@@ -341,17 +326,163 @@ struct DesignView: View {
         switch part { case 0: s.bodyColor = p; case 2: s.headColor = p; case 3: s.backColor = p; default: break }
         tick()
     }
-    private func nextWall() {
-        let list = town.niceWallpapers
-        guard !list.isEmpty else { return }
-        let i = list.firstIndex(of: wall) ?? -1
-        wall = list[(i + 1) % list.count]
-        tick()
-    }
     private func surprise(first: Bool) {
         guard let r = town.randomSuitor(mix: true) else { return }
         s.body = r.body; s.face = r.face; s.head = r.head; s.back = r.back
         s.bodyColor = first ? 0 : r.bodyColor; s.headColor = first ? 0 : r.headColor; s.backColor = first ? 0 : r.backColor
         if !first { tick() }
+    }
+}
+
+
+// MARK: - dressing room and colour wheel
+
+/// The same backdrop every time a partner is made: a boutique fitting room (wall, curtain, mirror, wooden floor and a rug).
+struct DressingRoom: View {
+    var body: some View {
+        GeometryReader { g in
+            let w = g.size.width, h = g.size.height
+            ZStack {
+                LinearGradient(colors: [Color(red: 1.0, green: 0.94, blue: 0.95), Color(red: 0.98, green: 0.86, blue: 0.90)],
+                               startPoint: .top, endPoint: .bottom)
+                // wall panels
+                HStack(spacing: 0) {
+                    ForEach(0..<6, id: \.self) { i in
+                        Rectangle().fill(Color.white.opacity(i % 2 == 0 ? 0.0 : 0.16))
+                    }
+                }.frame(height: h * 0.72).frame(maxHeight: .infinity, alignment: .top)
+                // curtain on the left
+                HStack(spacing: 0) {
+                    ForEach(0..<4, id: \.self) { i in
+                        Rectangle().fill(Color(red: 0.86, green: 0.38, blue: 0.58).opacity(i % 2 == 0 ? 1 : 0.82))
+                    }
+                }
+                .frame(width: w * 0.2, height: h * 0.72)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                Rectangle().fill(Color(red: 0.55, green: 0.2, blue: 0.35))
+                    .frame(width: w * 0.2, height: 4).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .offset(y: 0)
+                // mirror on the right
+                RoundedRectangle(cornerRadius: w * 0.07, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(red: 0.88, green: 0.95, blue: 1.0), Color(red: 0.72, green: 0.86, blue: 0.98)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay(RoundedRectangle(cornerRadius: w * 0.07, style: .continuous).stroke(Color(red: 0.85, green: 0.62, blue: 0.3), lineWidth: 4))
+                    .frame(width: w * 0.24, height: h * 0.5)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(.top, h * 0.08).padding(.trailing, w * 0.07)
+                // floor
+                VStack(spacing: 0) {
+                    Spacer()
+                    ZStack(alignment: .top) {
+                        Rectangle().fill(Color(red: 0.86, green: 0.66, blue: 0.48))
+                        VStack(spacing: 0) {
+                            ForEach(0..<4, id: \.self) { _ in
+                                Rectangle().fill(Color.black.opacity(0.08)).frame(height: 1)
+                                Spacer()
+                            }
+                        }
+                        Rectangle().fill(Color(red: 0.62, green: 0.42, blue: 0.3)).frame(height: 3)
+                    }.frame(height: h * 0.28)
+                }
+                // rug
+                Ellipse().fill(Color(red: 1.0, green: 0.78, blue: 0.86))
+                    .overlay(Ellipse().stroke(Color.white.opacity(0.8), lineWidth: 3).padding(5))
+                    .frame(width: w * 0.62, height: h * 0.13)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, h * 0.03)
+            }
+        }
+    }
+}
+
+/// A round colour picker. A Tama's body, head and back can only be painted in the 13 colours the toy knows, so
+/// the wheel is made of exactly those: bright colours go around the ring in rainbow order, whites, greys and
+/// blacks sit in the middle. Tap or drag to choose.
+struct ColourWheel: View {
+    @Binding var selected: Int
+
+    private struct Entry { let index: Int; let color: Color; let hue: Double; let sat: Double; let bri: Double }
+    private static let entries: [Entry] = (0..<13).map { i in
+        let c = Town.swatch(i)
+        var h: CGFloat = 0, sa: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(c).getHue(&h, saturation: &sa, brightness: &b, alpha: &a)
+        return Entry(index: i, color: c, hue: Double(h), sat: Double(sa), bri: Double(b))
+    }
+    private static let ring: [Entry] = entries.filter { $0.sat >= 0.2 }.sorted { $0.hue < $1.hue }
+    private static let centre: [Entry] = entries.filter { $0.sat < 0.2 }.sorted { $0.bri > $1.bri }
+
+    var body: some View {
+        GeometryReader { g in
+            let side = min(g.size.width, g.size.height)
+            let outer = side / 2, inner = outer * 0.5
+            let n = Double(Self.ring.count)
+            ZStack {
+                ForEach(Array(Self.ring.enumerated()), id: \.element.index) { k, e in
+                    let a0 = Angle.degrees(Double(k) / n * 360 - 90 - 180 / n), a1 = Angle.degrees(Double(k + 1) / n * 360 - 90 - 180 / n)
+                    let on = selected == e.index
+                    WheelWedge(start: a0, end: a1, innerRatio: 0.5)
+                        .fill(e.color)
+                        .overlay(WheelWedge(start: a0, end: a1, innerRatio: 0.5).stroke(Color.white, lineWidth: on ? 4 : 1.5))
+                        .scaleEffect(on ? 1.06 : 1)
+                        .zIndex(on ? 1 : 0)
+                }
+                // the neutrals in the middle
+                let cols = Self.centre.count <= 3 ? Self.centre.count : 3
+                let rows = (Self.centre.count + cols - 1) / max(1, cols)
+                VStack(spacing: 6) {
+                    ForEach(0..<rows, id: \.self) { r in
+                        HStack(spacing: 6) {
+                            ForEach(0..<cols, id: \.self) { c in
+                                let i = r * cols + c
+                                if i < Self.centre.count {
+                                    let e = Self.centre[i]
+                                    Circle().fill(e.color)
+                                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 1))
+                                        .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: selected == e.index ? 3 : 0).padding(-3))
+                                        .frame(width: inner * 0.5, height: inner * 0.5)
+                                } else { Color.clear.frame(width: inner * 0.5, height: inner * 0.5) }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(width: side, height: side)
+            .position(x: g.size.width / 2, y: g.size.height / 2)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+                let cx = g.size.width / 2, cy = g.size.height / 2
+                let dx = Double(v.location.x - cx), dy = Double(v.location.y - cy)
+                let r = (dx * dx + dy * dy).squareRoot()
+                guard r <= Double(outer) * 1.1 else { return }
+                var pick: Int?
+                if r < Double(inner) {
+                    // nearest of the neutral circles
+                    let cols = Self.centre.count <= 3 ? Self.centre.count : 3
+                    let rows = (Self.centre.count + cols - 1) / max(1, cols)
+                    let cell = Double(inner) * 0.5 + 6
+                    let col = Int(((dx + cell * Double(cols) / 2) / cell).rounded(.down)), row = Int(((dy + cell * Double(rows) / 2) / cell).rounded(.down))
+                    let i = max(0, min(rows - 1, row)) * cols + max(0, min(cols - 1, col))
+                    if i < Self.centre.count { pick = Self.centre[i].index }
+                } else if !Self.ring.isEmpty {
+                    var deg = atan2(dy, dx) * 180 / .pi + 90 + 180 / n      // 0 at the top of the first wedge
+                    deg = deg.truncatingRemainder(dividingBy: 360); if deg < 0 { deg += 360 }
+                    pick = Self.ring[min(Self.ring.count - 1, Int(deg / 360 * n))].index
+                }
+                if let pick, pick != selected { selected = pick; UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+            })
+        }
+        .accessibilityLabel("Colour wheel")
+    }
+}
+
+private struct WheelWedge: Shape {
+    var start: Angle, end: Angle, innerRatio: CGFloat
+    func path(in r: CGRect) -> Path {
+        let c = CGPoint(x: r.midX, y: r.midY), o = min(r.width, r.height) / 2, i = o * innerRatio
+        var p = Path()
+        p.addArc(center: c, radius: o, startAngle: start, endAngle: end, clockwise: false)
+        p.addArc(center: c, radius: i, startAngle: end, endAngle: start, clockwise: true)
+        p.closeSubpath()
+        return p
     }
 }

@@ -186,6 +186,12 @@ struct TownSquare: View {
     @EnvironmentObject var emu: Emulator
     @ObservedObject var town = Town.shared
     private var away: Bool { emu.toy.map { town.state($0).away } ?? false }
+    /// Tama ♥ Party is for grown-ups only (like the official app); a child or teen can't even go in.
+    private var tooYoung: Bool { emu.toy.flatMap { town.visitInfo($0) }.map { !$0.adult } ?? false }
+    @State private var gateAlert = false
+    private func enter(_ p: TownPlace) {
+        if p == .party && tooYoung { gateAlert = true } else { open(p) }
+    }
     private var sceneAspect: CGFloat {
         if town.customBG == nil, TownScene.builtIn == nil, town.wallpaper(town.activeWallpaper) != nil { return 1.0 }
         guard let bg = town.customBG ?? TownScene.builtIn, bg.size.height > 0 else { return 1.25 }
@@ -196,7 +202,7 @@ struct TownSquare: View {
         ScrollView {
             VStack(spacing: 14) {
                 TownScene(open: away) { p in
-                    if p != .depa && (away || p == .home || p == .settings) { open(p) }
+                    if p != .depa && (away || p == .home || p == .settings) { enter(p) }
                 }
                     .aspectRatio(sceneAspect, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -204,7 +210,7 @@ struct TownSquare: View {
                 statusBanner
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     ForEach(away ? [TownPlace.party, .arcade, .home] : [TownPlace.home], id: \.self) { p in
-                        Button { open(p) } label: { PlaceTile(place: p) }.buttonStyle(.plain)
+                        Button { enter(p) } label: { PlaceTile(place: p).opacity(p == .party && tooYoung ? 0.45 : 1) }.buttonStyle(.plain)
                     }
                 }
                 Button { path.append(.settings) } label: {
@@ -215,6 +221,9 @@ struct TownSquare: View {
             .padding(16)
         }
         .background(LinearGradient(colors: [Color(red: 1, green: 0.93, blue: 0.97), Color(red: 0.93, green: 0.92, blue: 1)], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
+        .alert("Tama ♥ Party is for grown-ups", isPresented: $gateAlert) {
+            Button("OK") {}
+        } message: { Text("\(town.name(emu.toy)) can go to Tama ♥ Party once grown up. The Arcade is open meanwhile.") }
     }
 
     private var statusBanner: some View {
@@ -230,7 +239,7 @@ struct TownSquare: View {
                 Text(emu.appWaiting ? "\(name) is connected" : (away ? "\(name) is in town" : "\(name) is at home"))
                     .font(.system(.headline, design: .rounded))
                 Text(emu.appWaiting ? "Your device will wait for you here." :
-                        (away ? "Go to Tama ♥ Party to find a partner." : "On the device: Connection › App › Visit to come to town, or Download to shop."))
+                        (away ? (tooYoung ? "Play in the Arcade. Tama ♥ Party opens once grown up." : "Go to Tama ♥ Party to find a partner.") : "On the device: Connection › App › Visit to come to town, or Download to shop."))
                     .font(.system(.subheadline, design: .rounded)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)

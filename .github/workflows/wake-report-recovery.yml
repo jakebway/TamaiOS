@@ -1,0 +1,99 @@
+name: Recover original controlled-wake evidence
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/firmware-grounded-validation]
+    paths: [.github/workflows/wake-report-recovery.yml]
+permissions:
+  contents: read
+  actions: read
+  issues: write
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Inspect original run and recover existing text artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          repo = os.environ['GITHUB_REPOSITORY']
+          original_sha = 'a304ba3f4a89de84f4ab22e355e38ec860667e1b'
+          out = pathlib.Path('recovery-results')
+          out.mkdir(exist_ok=True)
+          report = {'recovery_commit': os.environ['GITHUB_SHA'], 'original_commit': original_sha, 'scope': 'Artifact and workflow-metadata recovery only; no firmware rerun, no room or gameplay success inferred.'}
+          def command(args):
+              return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+          def api(path, fields=()):
+              args = ['gh', 'api', '--method', 'GET', path]
+              for name, value in fields:
+                  args += ['-f', name + '=' + str(value)]
+              p = command(args)
+              if p.returncode: raise RuntimeError('GitHub metadata request failed with exit ' + str(p.returncode))
+              return json.loads(p.stdout)
+          keys = ['action', 'phase', 'target_seconds_after_wake', 'interval_completed', 'tick_error', 'asleep', 'dark_return', 'stage_raw', 'view_raw', 'mode_raw', 'radio_setup_done', 'call_chain', 'frame_fnv32']
+          def observation(item):
+              return {key: item[key] for key in keys if key in item}
+          try:
+              response = api('repos/' + repo + '/actions/workflows/fixture-survey.yml/runs', [('head_sha', original_sha), ('per_page', 10)])
+              matches = [r for r in response.get('workflow_runs', []) if r.get('head_sha') == original_sha and r.get('head_branch') == 'audit/firmware-grounded-validation']
+              if not matches: raise RuntimeError('Original workflow run not found')
+              run = matches[0]
+              run_id = str(run['id'])
+              attempt = str(run.get('run_attempt', 1))
+              report['original_run'] = {key: run.get(key) for key in ['id', 'run_attempt', 'status', 'conclusion', 'created_at', 'run_started_at', 'updated_at', 'html_url']}
+              jobs = api('repos/' + repo + '/actions/runs/' + run_id + '/attempts/' + attempt + '/jobs', [('per_page', 100)])
+              report['original_jobs'] = [{'name': j.get('name'), 'status': j.get('status'), 'conclusion': j.get('conclusion'), 'failed_steps': [{'name': s.get('name'), 'conclusion': s.get('conclusion')} for s in j.get('steps', []) if s.get('conclusion') in ['failure', 'cancelled', 'timed_out']]} for j in jobs.get('jobs', [])]
+              if run.get('status') == 'completed' and run.get('conclusion') != 'success':
+                  failed = command(['gh', 'run', 'view', run_id, '--repo', repo, '--log-failed'])
+                  text = failed.stdout.lower()
+                  report['failed_log_signals'] = {marker: marker in text for marker in ['body is too long', 'maximum is 65536', 'validation failed', 'timed out']}
+                  report['failed_log_read_exit_code'] = failed.returncode
+              downloaded = command(['gh', 'run', 'download', run_id, '--repo', repo, '--name', 'fixture-survey', '--dir', 'recovered'])
+              report['artifact_download_exit_code'] = downloaded.returncode
+              source_path = pathlib.Path('recovered/survey.json')
+              ocr_path = pathlib.Path('recovered/ocr.json')
+              report['survey_available'] = source_path.exists()
+              report['ocr_available'] = ocr_path.exists()
+              ocr = {}
+              if ocr_path.exists():
+                  report['ocr_sha256'] = hashlib.sha256(ocr_path.read_bytes()).hexdigest()
+                  for row in json.loads(ocr_path.read_text()).get('runs', []):
+                      samples = []
+                      for item in row.get('samples', [])[-3:]:
+                          sample = observation(item)
+                          sample['lines'] = [{'text': str(line.get('text', ''))[:80], 'confidence': line.get('confidence')} for line in item.get('lines', [])[:4]]
+                          if 'error' in item: sample['ocr_error'] = str(item['error'])[:160]
+                          samples.append(sample)
+                      ocr[(row.get('firmware'), row.get('plan'))] = samples
+              if source_path.exists():
+                  report['survey_sha256'] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+                  rows = []
+                  for row in json.loads(source_path.read_text()).get('runs', []):
+                      if row.get('plan') not in ['confirm_name_then_wait', 'confirm_name_then_wake']: continue
+                      observations = row.get('observations', [])
+                      baseline = next((observation(item) for item in observations if item.get('phase') == 'post_wait'), None)
+                      rows.append({'firmware': row.get('firmware'), 'plan': row.get('plan'), 'stop_reason': row.get('stop_reason'), 'stopped_code': row.get('stopped_code'), 'completed_input_free_wait_seconds': row.get('completed_input_free_wait_seconds'), 'wake_attempted': row.get('wake_attempted'), 'post_wait_baseline': baseline, 'post_wake': [observation(item) for item in observations if item.get('phase') == 'post_wake'][:3], 'final': observation(observations[-1]) if observations else None, 'ocr_samples': ocr.get((row.get('firmware'), row.get('plan')), [])})
+                  report['runs'] = rows
+          except Exception as exc:
+              report['recovery_error'] = type(exc).__name__ + ': ' + str(exc)[:200]
+          (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+          body = '```json\n' + json.dumps(report, indent=2) + '\n```\n'
+          if len(body) > 50000:
+              compact = {key: value for key, value in report.items() if key != 'runs'}
+              compact['details_omitted_from_issue'] = 'Recovered run details retained in the text artifact; issue summary bounded to 50000 characters.'
+              body = '```json\n' + json.dumps(compact, indent=2) + '\n```\n'
+          target = out / 'report.md'
+          target.write_text(body)
+          subprocess.run(['gh', 'issue', 'create', '--repo', repo, '--title', 'TamaiOS original wake evidence recovery ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(target)], check=True)
+          PY
+      - name: Retain recovery text only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: original-wake-recovery
+          path: recovery-results/
+          retention-days: 7
+          if-no-files-found: warn

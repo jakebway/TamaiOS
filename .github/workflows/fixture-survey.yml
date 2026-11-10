@@ -1,4 +1,5 @@
 name: Headless firmware fixture discovery
+run-name: Controlled post-wake survey (${{ github.sha }})
 on:
   workflow_dispatch:
   push:

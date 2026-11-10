@@ -46,3 +46,61 @@
                  throw LinkError.noAnswer
              }
              Thread.sleep(forTimeInterval: 0.002)
+--- a/ios/TamaiOS/Core/Emulator.swift
++++ b/ios/TamaiOS/Core/Emulator.swift
+@@ -101,2 +101,2 @@
+-        guard let toy, !clockChanging, !loading, !linkBusy, !appWaiting else {
++        guard let toy, canReplaceDevice else {
+             say("Please wait a moment, then try again.")
+--- a/ios/TamaiOS/Core/Emulator.swift
++++ b/ios/TamaiOS/Core/Emulator.swift
+@@ -101,2 +101,18 @@
++    var canReplaceDevice: Bool {
++        !loading && !linkBusy && !clockChanging && !IRLink.shared.busy
++            && !AppLink.shared.busy && !AppLink.shared.openForDownload
++            && !appWaiting && !holdForApp
++    }
++
+     func load(_ toy: Toy, completion: ((Bool) -> Void)? = nil) {
++        guard Thread.isMainThread else {
++            DispatchQueue.main.async { self.load(toy, completion: completion) }
++            return
++        }
++        guard canReplaceDevice else {
++            say("Finish the current operation before changing devices.")
++            completion?(false)
++            return
++        }
++        loading = true
+         unload()
+--- a/ios/TamaiOS/App.swift
++++ b/ios/TamaiOS/App.swift
+@@ -101,2 +101,3 @@
+     func play(_ toy: Toy) {
++        guard emu.canReplaceDevice else { emu.say("Finish the current operation before changing devices."); return }
+         Prefs.d.set(toy.id, forKey: "currentToy")
+--- a/ios/TamaiOS/App.swift
++++ b/ios/TamaiOS/App.swift
+@@ -101,2 +101,3 @@
+     func remove(_ toy: Toy) {
++        guard emu.canReplaceDevice else { emu.say("Finish the current operation before deleting a device."); return }
+         if emu.toy?.id == toy.id { emu.unload(); emu.toy = nil }
+--- a/ios/TamaiOS/App.swift
++++ b/ios/TamaiOS/App.swift
+@@ -101,2 +101,3 @@
+     func restoreBackup(_ data: Data, into toy: Toy) -> Bool {
++        guard emu.canReplaceDevice else { emu.say("Finish the current operation before restoring a device."); return false }
+         if emu.toy?.id == toy.id { let ok = emu.restoreBackup(data); if ok { forgetName(toy.id) }; return ok }
+--- a/ios/TamaiOS/App.swift
++++ b/ios/TamaiOS/App.swift
+@@ -101,2 +101,3 @@
+     func reset(_ toy: Toy) throws {
++        guard emu.canReplaceDevice else { throw ImportError.unreadable("Finish the current operation before resetting.") }
+         if emu.toy?.id == toy.id { try resetCurrentDevice(); return }
+--- a/ios/TamaiOS/App.swift
++++ b/ios/TamaiOS/App.swift
+@@ -101,3 +101,3 @@
+     func resetCurrentDevice() throws {
+-        guard let toy = emu.toy, !emu.loading, !AppLink.shared.busy else { throw ImportError.unreadable("Finish the current operation before resetting.") }
++        guard let toy = emu.toy, emu.canReplaceDevice else { throw ImportError.unreadable("Finish the current operation before resetting.") }
+         let fm = FileManager.default

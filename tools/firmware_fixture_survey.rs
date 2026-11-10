@@ -44,6 +44,7 @@ fn main() {
             ("cycle_then_confirm", (0..20).flat_map(|_| [0, 1]).collect()),
             ("confirm_name_then_wait", [vec![2; 4], vec![1; 31]].concat()),
             ("confirm_name_then_wake", [vec![2; 4], vec![1; 31]].concat()),
+            ("birthday_separated_then_wake", [vec![2; 4], vec![1; 4], vec![0], vec![1; 27]].concat()),
         ];
         for (plan, keys) in plans {
             let tag = format!("{}-{plan}", path.file_name().unwrap().to_string_lossy());
@@ -66,14 +67,19 @@ fn main() {
                     let pressed = advance(&h, 8);
                     tg_release(h.0, *key);
                     let result = pressed.and_then(|_| advance(&h, 22));
-                    observations.push(sample(&h, &tag, index + 1));
+                    let mut observation = sample(&h, &tag, index + 1);
+                    if plan == "birthday_separated_then_wake" && (8..=11).contains(&(index + 1)) {
+                        observation["phase"] = json!("birthday_selection");
+                        observation["input_key"] = json!(key);
+                    }
+                    observations.push(observation);
                     if let Err(code) = result { stopped_code = Some(code); reason = "non_ok_tick"; break; }
                 }
             }
             tg_release_all(h.0);
             let mut completed_input_free_wait_seconds = 0;
             let mut wake_attempted = false;
-            if matches!(plan, "confirm_name_then_wait" | "confirm_name_then_wake") && stopped_code.is_none() && reason == "action_budget_reached" {
+            if matches!(plan, "confirm_name_then_wait" | "confirm_name_then_wake" | "birthday_separated_then_wake") && stopped_code.is_none() && reason == "action_budget_reached" {
                 match advance(&h, 15000) {
                     Ok(()) => {
                         completed_input_free_wait_seconds = 300;
@@ -85,7 +91,7 @@ fn main() {
                 observation["phase"] = json!("post_wait");
                 observations.push(observation);
             }
-            if plan == "confirm_name_then_wake" && completed_input_free_wait_seconds == 300 && stopped_code.is_none() {
+            if matches!(plan, "confirm_name_then_wake" | "birthday_separated_then_wake") && completed_input_free_wait_seconds == 300 && stopped_code.is_none() {
                 if tg_is_asleep(h.0) == 1 {
                     wake_attempted = true;
                     tg_wake(h.0);
@@ -106,6 +112,6 @@ fn main() {
             runs.push(json!({"firmware": path.file_name().unwrap().to_string_lossy(), "plan": plan, "planned_keys": keys, "completed_input_free_wait_seconds": completed_input_free_wait_seconds, "wake_attempted": wake_attempted, "stop_reason": reason, "stopped_code": stopped_code, "observations": observations}));
         }
     }
-    let report = json!({"scope": "Exploratory fresh devices. Wait controls retained; wake plan calls tg_wake once only after a completed 300-second wait and asleep baseline, then targets 0.5, 2, 10, 30, 60 and 120 seconds without further input. Never-sleep unchanged; a later return to sleep is recorded without another wake. No RAM edits, verified room semantics, connection or gameplay pass claimed", "runs": runs});
+    let report = json!({"scope": "Exploratory fresh devices. Original controls retained; birthday-separated variant adds one A after original setup action 8, verified as selecting birthday 2/1 in the short trace. Wait and wake timing unchanged: 300-second wait, one wake only if asleep, then observations at 0.5, 2, 10, 30, 60 and 120 seconds without further input. Never-sleep unchanged. No RAM edits, verified room semantics, connection or gameplay pass claimed", "runs": runs});
     std::fs::write(std::env::var("TAMAIOS_SURVEY_OUTPUT").expect("output path"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 }

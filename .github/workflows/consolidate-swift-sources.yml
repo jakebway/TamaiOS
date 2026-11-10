@@ -1,0 +1,55 @@
+name: One-time tracked Swift consolidation
+on:
+  push:
+    branches: [audit/firmware-grounded-validation]
+    paths:
+      - .github/workflows/consolidate-swift-sources.yml
+      - tools/consolidate_swift_sources.py
+permissions:
+  contents: write
+concurrency:
+  group: tracked-swift-consolidation
+  cancel-in-progress: false
+jobs:
+  consolidate:
+    if: github.repository == 'jakebway/TamaiOS'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: true
+      - name: Materialize exact patch, retire it, and create a local candidate commit
+        run: python3 tools/consolidate_swift_sources.py
+      - name: Validate tracked Swift and compile the timer-fixed iOS variant
+        run: |
+          set -euo pipefail
+          export GITHUB_SHA="$(git rev-parse HEAD)"
+          python3 tools/run_expanded_audit.py policy
+          python3 tools/run_expanded_audit.py transport
+          python3 tools/partner_reply_audit.py
+          TAMAIOS_TIMER_VARIANT=candidate python3 tools/run_integration_audit.py ios
+          python3 tools/consolidate_swift_sources.py --verify
+      - name: Push only the validated consolidation commit to the audit branch
+        env:
+          BOOTSTRAP_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BRANCH=audit/firmware-grounded-validation
+          REMOTE=$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)
+          test "$REMOTE" = "$BOOTSTRAP_SHA"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "Consolidated commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Swift source equivalence and local regression/compilation checks passed. No main merge, installation, IPA upload or notification-delivery claim." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swift-consolidation-reports
+          path: |
+            expanded-results/
+            partner-results/
+            integration-results/
+            docs/swift-source-consolidation.json
+          if-no-files-found: warn
+          retention-days: 7

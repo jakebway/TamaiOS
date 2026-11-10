@@ -214,3 +214,46 @@
              // you backed out of the WAITING screen: the next time you open it, try again right away
              if now >= lastEnd + 3 { cooldownUntil = 0 }
              return
+--- a/ios/TamaiOS/Core/IRLink.swift
++++ b/ios/TamaiOS/Core/IRLink.swift
+@@ -101,10 +101,15 @@
+         if tg_peek(h, 0xF80178FC, &menuCursor, 1) == 1, menuCursor == 1 {
+             cooldownUntil = now + 8
+             emu.muteUntil = CACurrentMediaTime() + 1.5
+             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
++                guard emu.toy?.id == deviceID, !emu.loading else { return }
++                emu.say("This Download connection isn’t supported in TamaiOS. Use Connection › App › Download for items.", seconds: 7)
+                 emu.press(.c)
+-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
++                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
++                    guard emu.toy?.id == deviceID, !emu.loading else { return }
++                    emu.release(.c)
++                }
+             }
+             return
+         }
+         guard let model = AppModel.current, let me = emu.toy else { return }
+--- a/ios/TamaiOS/Core/IRLink.swift
++++ b/ios/TamaiOS/Core/IRLink.swift
+@@ -101,15 +101,20 @@
+         if mode == 3 && role == 0 {
+             // Only the Tama you play can INVITE; the other one visits by itself. Choosing VISIT here would leave
+             // this Tama "out", so back out of it and say what to do.
+             emu.linkFreezeUntil = 0
+             starting = false
+             cooldownUntil = now + 8
+             emu.muteUntil = CACurrentMediaTime() + 1.5
+             // a single C goes back to the INVITE / VISIT list, so it looks as if the button did nothing
+             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
++                guard emu.toy?.id == deviceID, !emu.loading else { return }
++                emu.say("Only Invite is supported on the active Tama. Choose Invite; the other Tama will visit.", seconds: 7)
+                 emu.press(.c)
+-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { emu.release(.c) }
++                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
++                    guard emu.toy?.id == deviceID, !emu.loading else { return }
++                    emu.release(.c)
++                }
+             }
+             return
+         }
+         let begin: (Toy) -> Void = { [self] partner in

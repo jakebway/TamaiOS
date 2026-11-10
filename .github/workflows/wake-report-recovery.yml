@@ -1,4 +1,4 @@
-name: Recover original controlled-wake evidence
+name: Recover setup and controlled-wake evidence
 on:
   workflow_dispatch:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Inspect original run and recover existing text artifacts
+      - name: Recover early setup checkpoints and original wake evidence
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -23,7 +23,7 @@ jobs:
           original_sha = 'a304ba3f4a89de84f4ab22e355e38ec860667e1b'
           out = pathlib.Path('recovery-results')
           out.mkdir(exist_ok=True)
-          report = {'recovery_commit': os.environ['GITHUB_SHA'], 'original_commit': original_sha, 'scope': 'Artifact and workflow-metadata recovery only; no firmware rerun, no room or gameplay success inferred.'}
+          report = {'recovery_commit': os.environ['GITHUB_SHA'], 'original_commit': original_sha, 'scope': 'Existing artifact and metadata recovery only. Early setup OCR and keys are observations, not verified date semantics. No firmware rerun or date mutation.'}
           def command(args):
               return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
           def api(path, fields=()):
@@ -36,6 +36,8 @@ jobs:
           keys = ['action', 'phase', 'target_seconds_after_wake', 'interval_completed', 'tick_error', 'asleep', 'dark_return', 'stage_raw', 'view_raw', 'mode_raw', 'radio_setup_done', 'call_chain', 'frame_fnv32']
           def observation(item):
               return {key: item[key] for key in keys if key in item}
+          def lines(item):
+              return [{'text': str(line.get('text', ''))[:80], 'confidence': line.get('confidence')} for line in item.get('lines', [])[:4]]
           try:
               response = api('repos/' + repo + '/actions/workflows/fixture-survey.yml/runs', [('head_sha', original_sha), ('per_page', 10)])
               matches = [r for r in response.get('workflow_runs', []) if r.get('head_sha') == original_sha and r.get('head_branch') == 'audit/firmware-grounded-validation']
@@ -58,20 +60,25 @@ jobs:
               report['survey_available'] = source_path.exists()
               report['ocr_available'] = ocr_path.exists()
               ocr = {}
+              setup_ocr = {}
               if ocr_path.exists():
                   report['ocr_sha256'] = hashlib.sha256(ocr_path.read_bytes()).hexdigest()
                   for row in json.loads(ocr_path.read_text()).get('runs', []):
+                      key = (row.get('firmware'), row.get('plan'))
+                      setup_ocr[key] = [{'action': item.get('action'), 'frame_fnv32': item.get('frame_fnv32'), 'lines': lines(item)} for item in row.get('samples', []) if 0 < item.get('action', -1) <= 20]
                       samples = []
                       for item in row.get('samples', [])[-3:]:
                           sample = observation(item)
-                          sample['lines'] = [{'text': str(line.get('text', ''))[:80], 'confidence': line.get('confidence')} for line in item.get('lines', [])[:4]]
+                          sample['lines'] = lines(item)
                           if 'error' in item: sample['ocr_error'] = str(item['error'])[:160]
                           samples.append(sample)
-                      ocr[(row.get('firmware'), row.get('plan'))] = samples
+                      ocr[key] = samples
               if source_path.exists():
                   report['survey_sha256'] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+                  source_rows = json.loads(source_path.read_text()).get('runs', [])
+                  report['setup_date_trace'] = [{'firmware': row.get('firmware'), 'plan': row.get('plan'), 'key_legend': {'0': 'A', '1': 'B', '2': 'C'}, 'planned_keys_prefix': row.get('planned_keys', [])[:20], 'early_ocr_samples': setup_ocr.get((row.get('firmware'), row.get('plan')), [])} for row in source_rows if row.get('plan') == 'back_then_confirm']
                   rows = []
-                  for row in json.loads(source_path.read_text()).get('runs', []):
+                  for row in source_rows:
                       if row.get('plan') not in ['confirm_name_then_wait', 'confirm_name_then_wake']: continue
                       observations = row.get('observations', [])
                       baseline = next((observation(item) for item in observations if item.get('phase') == 'post_wait'), None)
@@ -83,11 +90,12 @@ jobs:
           body = '```json\n' + json.dumps(report, indent=2) + '\n```\n'
           if len(body) > 50000:
               compact = {key: value for key, value in report.items() if key != 'runs'}
-              compact['details_omitted_from_issue'] = 'Recovered run details retained in the text artifact; issue summary bounded to 50000 characters.'
+              compact['details_omitted_from_issue'] = 'Wake details retained in text artifact; early setup evidence prioritized.'
               body = '```json\n' + json.dumps(compact, indent=2) + '\n```\n'
+          assert len(body) <= 50000
           target = out / 'report.md'
           target.write_text(body)
-          subprocess.run(['gh', 'issue', 'create', '--repo', repo, '--title', 'TamaiOS original wake evidence recovery ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(target)], check=True)
+          subprocess.run(['gh', 'issue', 'create', '--repo', repo, '--title', 'TamaiOS setup and wake evidence recovery ' + os.environ['GITHUB_SHA'][:12] + ' run ' + os.environ['GITHUB_RUN_ID'] + '.' + os.environ['GITHUB_RUN_ATTEMPT'], '--body-file', str(target)], check=True)
           PY
       - name: Retain recovery text only
         if: always()

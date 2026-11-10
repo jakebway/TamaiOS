@@ -7,9 +7,13 @@ struct TransportAudit {
             ("valid three-byte reply", [[0xF0,0x0C,0,0],[0xF0,0x0D,3,0],[1,2,3],[0xF0,0x4D]], [1,2,3]),
             ("valid split payload", [[0xF0,0x0D,3,0],[1],[2,3],[0xF0,0x4D]], [1,2,3]),
             ("valid zero-length reply", [[0xF0,0x0D,0,0],[0xF0,0x4D]], []),
+            ("finished acknowledgment only", [[0xF0,0x0C,0,2]], []),
+            ("ordinary acknowledgment timeout compatibility", [[0xF0,0x0C,0,0]], []),
+            ("payload resembling acknowledgment", [[0xF0,0x0D,2,0],[0xF0,0x0C],[0xF0,0x4D]], [0xF0,0x0C]),
             ("truncated payload must reject", [[0xF0,0x0D,3,0],[1],[0xF0,0x4D]], nil),
             ("oversized payload must reject", [[0xF0,0x0D,3,0],[1,2,3,4],[0xF0,0x4D]], nil),
             ("short length header must reject", [[0xF0,0x0D,3],[0xF0,0x4D]], nil),
+            ("short acknowledgment must reject", [[0xF0,0x0C,0]], nil),
             ("acknowledged incomplete timeout must reject", [[0xF0,0x0C,0,0],[0xF0,0x0D,3,0],[1]], nil),
             ("missing reply must reject", [], nil)
         ]
@@ -28,7 +32,7 @@ struct TransportAudit {
             }
         }
         print("TRANSPORT SUMMARY: \(cases.count - failures) passed; \(failures) failed")
-        print("Scope: actual answer method with synthetic message replay; not firmware transport validation")
+        print("Scope: build-patched answer method with synthetic replay; ack-only compatibility does not prove command acceptance")
         if failures > 0 { exit(1) }
     }
 }

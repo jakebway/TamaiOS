@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import pathlib
@@ -10,7 +11,7 @@ root = pathlib.Path.cwd()
 kind = sys.argv[1]
 out = root / 'expanded-results'
 out.mkdir(exist_ok=True)
-scopes = {'ir': 'IR context/model checks only', 'policy': 'Actual Swift policies; firmware semantics and iOS delivery unverified', 'transport': 'Actual TamaLink.answer method with synthetic replies; not firmware protocol validation'}
+scopes = {'ir': 'IR context/model checks only', 'policy': 'Actual Swift policies; firmware semantics and iOS delivery unverified', 'transport': 'Build-patched TamaLink.answer method with synthetic replies; not firmware protocol validation'}
 report = {'group': kind, 'commit': os.environ['GITHUB_SHA'], 'passed': False, 'scope': scopes.get(kind, 'unknown')}
 log = []
 def run(args, timeout=180):
@@ -45,6 +46,11 @@ try:
                 dependency.write_text('import Foundation\n' + store[start:end])
                 files = [str(dependency), 'ios/TamaiOS/Core/CareEventPolicy.swift', 'tools/expanded_policy_audit.swift']
             else:
+                patch = root / 'tamaios_changes.patch'
+                if patch.exists():
+                    run(['git', 'apply', '--check', str(patch)])
+                    run(['git', 'apply', str(patch)])
+                    report['app_patch_sha256'] = hashlib.sha256(patch.read_bytes()).hexdigest()
                 source = (root / 'ios/TamaiOS/Tamatown/TamaLink.swift').read_text()
                 start = source.index('    func answer(firstTimeout:')
                 opening = source.index('{', start)

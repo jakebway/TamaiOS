@@ -90,7 +90,7 @@ fn main() {
                     wake_attempted = true;
                     tg_wake(h.0);
                     reason = "bounded_wake_observations_complete_not_room_proof";
-                    for (index, (ticks, seconds)) in [(25usize, 0.5f64), (75, 2.0), (400, 10.0)].iter().enumerate() {
+                    for (index, (ticks, seconds)) in [(25usize, 0.5f64), (75, 2.0), (400, 10.0), (1000, 30.0), (1500, 60.0), (3000, 120.0)].iter().enumerate() {
                         let error = advance(&h, *ticks).err();
                         let mut observation = sample(&h, &tag, keys.len() + 2 + index);
                         observation["phase"] = json!("post_wake");
@@ -106,6 +106,6 @@ fn main() {
             runs.push(json!({"firmware": path.file_name().unwrap().to_string_lossy(), "plan": plan, "planned_keys": keys, "completed_input_free_wait_seconds": completed_input_free_wait_seconds, "wake_attempted": wake_attempted, "stop_reason": reason, "stopped_code": stopped_code, "observations": observations}));
         }
     }
-    let report = json!({"scope": "Exploratory fresh devices. Wait controls retained; wake plan calls tg_wake once only after a completed 300-second wait and asleep baseline, then targets 0.5, 2 and 10 seconds without further input. Never-sleep unchanged. No RAM edits, verified room semantics, connection or gameplay pass claimed", "runs": runs});
+    let report = json!({"scope": "Exploratory fresh devices. Wait controls retained; wake plan calls tg_wake once only after a completed 300-second wait and asleep baseline, then targets 0.5, 2, 10, 30, 60 and 120 seconds without further input. Never-sleep unchanged; a later return to sleep is recorded without another wake. No RAM edits, verified room semantics, connection or gameplay pass claimed", "runs": runs});
     std::fs::write(std::env::var("TAMAIOS_SURVEY_OUTPUT").expect("output path"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 }

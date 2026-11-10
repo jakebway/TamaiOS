@@ -152,12 +152,9 @@ print("Scope: actual buffer methods with synthetic samples and native locks; not
     return {'exit_code': p.returncode, 'output': p.stdout.splitlines(), 'source_sha256': hashlib.sha256(audio.encode()).hexdigest(), 'scope': 'Source-extracted buffer replay only; no battery saving or iOS background-execution guarantee'}
 try:
     with tempfile.TemporaryDirectory() as work:
-        report['before'] = replay(work, 'before', method())
-        patch = root / 'tamaios_changes.patch'
-        command(['git', 'apply', '--check', str(patch)])
-        command(['git', 'apply', str(patch)])
-        report['app_patch_sha256'] = hashlib.sha256(patch.read_bytes()).hexdigest()
-        report['after'] = replay(work, 'after', method())
+        report['source_mode'] = 'tracked-source'
+        report['app_source_tree_sha256'] = hashlib.sha256(json.dumps({str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((root / 'ios/TamaiOS').rglob('*.swift'))}, sort_keys=True).encode()).hexdigest()
+        report['current'] = replay(work, 'after', method())
         watch = method('    func watch(')
         assert watch.index('guard !active, !starting') < watch.index('let room =') < watch.index('quietUntil = 0')
         assert 'ToyScreen.isRoom(chain: ToyScreen.chain(core: h), deviceID: deviceID)' in watch
@@ -168,7 +165,7 @@ try:
         p = subprocess.run([str(binary)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         report['scene_release'] = {'exit_code': p.returncode, 'output': p.stdout.splitlines(), 'scope': 'Actual release policy with synthetic observations plus source-placement assertions; not a firmware, save-completion or concurrency test'}
         report['audio_buffer'] = audio_buffer_replay(work)
-        report['passed'] = report['after']['exit_code'] == 0 and p.returncode == 0 and report['audio_buffer']['exit_code'] == 0
+        report['passed'] = report['current']['exit_code'] == 0 and p.returncode == 0 and report['audio_buffer']['exit_code'] == 0
 except Exception as exc:
     report['error'] = type(exc).__name__ + ': ' + str(exc)
 report['log_tail'] = log[-30:]

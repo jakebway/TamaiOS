@@ -103,6 +103,10 @@ final class TamaLink {
         var buffer: [UInt8] = []
         var expected = -1
         var acked = false
+        func completed() throws -> [UInt8] {
+            guard expected < 0 || buffer.count == expected else { throw LinkError.noAnswer }
+            return buffer
+        }
         let start = Date()
         var last = Date()
         while true {
@@ -114,18 +118,26 @@ final class TamaLink {
                 last = Date()
                 let tag = n.count >= 2 ? UInt16(n[0]) | UInt16(n[1]) << 8 : 0
                 if expected >= 0 && buffer.count < expected && tag != 0x4DF0 {
-                    buffer += n                                  // data chunk
+                    let remaining = expected - buffer.count
+                    guard n.count <= remaining || (n.count == 20 && remaining < 20) else { throw LinkError.noAnswer }
+                    if n.count > remaining {
+                        trace("RX final transport chunk: kept=\(remaining) ignored=\(n.count - remaining)")
+                    }
+                    buffer += n.prefix(remaining)
                 } else if tag == 0x0CF0 {                        // received / finished
+                    guard n.count >= 4 else { throw LinkError.noAnswer }
                     acked = true
                     let status = n.count >= 4 ? UInt16(n[2]) | UInt16(n[3]) << 8 : 0
-                    if status == 0x0200 { return buffer }
+                    if status == 0x0200 { return try completed() }
                     try write([0xF0, 0x8E, 0x0D])                // "send me your data"
                 } else if tag == 0x0DF0 {                        // data follows
-                    expected = n.count >= 4 ? Int(UInt16(n[2]) | UInt16(n[3]) << 8) : 0
+                    guard n.count >= 4 else { throw LinkError.noAnswer }
+                    expected = Int(UInt16(n[2]) | UInt16(n[3]) << 8)
                     buffer.removeAll(keepingCapacity: true)
                 } else if tag == 0x4DF0 || tag == 0x5CF0 {      // data done
-                    return buffer
+                    return try completed()
                 } else if expected >= 0 {
+                    guard n.count <= expected - buffer.count else { throw LinkError.noAnswer }
                     buffer += n
                 }
                 continue
@@ -134,7 +146,7 @@ final class TamaLink {
             if !gotAny && now.timeIntervalSince(start) > firstTimeout { throw LinkError.noAnswer }
             if gotAny && now.timeIntervalSince(last) > idleTimeout {
                 trace("IDLE TIMEOUT acked=\(acked) received=\(buffer.count) expected=\(expected)")
-                if acked { return buffer }
+                if acked { return try completed() }
                 throw LinkError.noAnswer
             }
             Thread.sleep(forTimeInterval: 0.002)

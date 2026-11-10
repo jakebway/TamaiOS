@@ -39,11 +39,8 @@ try:
         run(['git', '-C', 'upstream', 'apply', '--check', str(candidate)])
         run(['git', '-C', 'upstream', 'apply', str(candidate)])
         report['candidate_patch_sha256'] = hashlib.sha256(candidate.read_bytes()).hexdigest()
-    patch = root / 'tamaios_changes.patch'
-    if patch.exists():
-        run(['git', 'apply', '--check', str(patch)])
-        run(['git', 'apply', str(patch)])
-        report['app_patch_sha256'] = hashlib.sha256(patch.read_bytes()).hexdigest()
+    report['source_mode'] = 'tracked-source'
+    report['app_source_tree_sha256'] = hashlib.sha256(json.dumps({str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((root / 'ios/TamaiOS').rglob('*.swift'))}, sort_keys=True).encode()).hexdigest()
     if kind == 'ffi':
         firmware = sorted((root / 'firmware').glob('*.bin'))
         report['firmware'] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in firmware}

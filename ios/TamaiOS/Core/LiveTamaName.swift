@@ -128,6 +128,17 @@ final class LiveTamaName: ObservableObject {
         }
     }
     func observe(deviceID: String, stage: Int, character: Int, signature: String) {
+        guard stage == 0 || ((1...255).contains(stage) && character >= 0 && !signature.isEmpty) else {
+            if deviceID != self.deviceID {
+                self.deviceID = deviceID; self.stage = -1; self.character = -1; self.signature = ""
+                identity = nil; scheduled = nil; probeName = ""; directName = nil
+                resolve()
+                probeStatus = "Waiting for complete identity sample for selected device"
+            } else {
+                probeStatus = "Ignored incomplete live identity sample; retained verified name"
+            }
+            return
+        }
         self.deviceID = deviceID; self.stage = stage; self.character = character; self.signature = signature
         let key = LiveNamePolicy.key(deviceID: deviceID, stage: stage, character: character, signature: signature)
         if identity != key {

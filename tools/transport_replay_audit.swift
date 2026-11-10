@@ -46,7 +46,7 @@ struct TransportAudit {
             }
         }
         print("TRANSPORT SUMMARY: \(cases.count - failures) passed; \(failures) failed")
-        print("Scope: build-patched answer method with synthetic replay; 512-byte cases reproduce reported framing, not captured payload contents or full Visit/Download gameplay; ack-only compatibility does not prove command acceptance")
+        print("Scope: tracked-source answer method with synthetic replay; 512-byte cases reproduce reported framing, not captured payload contents or full Visit/Download gameplay; ack-only compatibility does not prove command acceptance")
         if failures > 0 { exit(1) }
     }
 }

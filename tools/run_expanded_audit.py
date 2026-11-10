@@ -11,7 +11,7 @@ root = pathlib.Path.cwd()
 kind = sys.argv[1]
 out = root / 'expanded-results'
 out.mkdir(exist_ok=True)
-scopes = {'ir': 'IR context/model checks only', 'policy': 'Actual Swift policies, ownership predicate, and patched identity methods/observation guard with stub state holders; firmware semantics, UIKit concurrency and iOS delivery unverified', 'transport': 'Build-patched TamaLink.answer method with synthetic replies; not firmware protocol validation'}
+scopes = {'ir': 'IR context/model checks only', 'policy': 'Actual Swift policies, ownership predicate, and tracked identity methods/observation guard with stub state holders; firmware semantics, UIKit concurrency and iOS delivery unverified', 'transport': 'Tracked-source TamaLink.answer method with synthetic replies; not firmware protocol validation'}
 report = {'group': kind, 'commit': os.environ['GITHUB_SHA'], 'passed': False, 'scope': scopes.get(kind, 'unknown')}
 log = []
 def run(args, timeout=180):
@@ -46,11 +46,8 @@ try:
         run(['cargo', 'test', '--locked', '--release', '--manifest-path', 'upstream/Cargo.toml', '-p', 'tg18-core', '--test', 'tamaios_expanded_ir', '--', '--nocapture', '--test-threads=1'], 300)
     elif kind in ['policy', 'transport']:
         run(['swiftc', '--version'])
-        patch = root / 'tamaios_changes.patch'
-        if patch.exists():
-            run(['git', 'apply', '--check', str(patch)])
-            run(['git', 'apply', str(patch)])
-            report['app_patch_sha256'] = hashlib.sha256(patch.read_bytes()).hexdigest()
+        report['source_mode'] = 'tracked-source'
+        report['app_source_tree_sha256'] = hashlib.sha256(json.dumps({str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((root / 'ios/TamaiOS').rglob('*.swift'))}, sort_keys=True).encode()).hexdigest()
         with tempfile.TemporaryDirectory() as work:
             dependency = pathlib.Path(work) / 'Dependency.swift'
             binary = pathlib.Path(work) / 'audit'
@@ -195,7 +192,7 @@ struct LiveNameHandoffAudit {
         expect(gate.counters["skipped: stale observation device"] == 3, "all unavailable-device rejections counted")
         for failure in failures { print("HANDOFF FAIL: " + failure) }
         print("LIVE NAME HANDOFF CHECKS: \(checks - failures.count) passed; \(failures.count) failed")
-        print("Scope: extracted patched identity methods and observation guard prefix, with in-memory preferences and synchronous state holders; not UIKit queue scheduling, FFI reads, probe callbacks or notification delivery")
+        print("Scope: extracted tracked identity methods and observation guard prefix, with in-memory preferences and synchronous state holders; not UIKit queue scheduling, FFI reads, probe callbacks or notification delivery")
         if !failures.isEmpty { exit(1) }
     }
 }

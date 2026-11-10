@@ -295,7 +295,7 @@ struct DevicesSection: View {
         if LiveTamaName.savedName(t.id) != nil, let img = UIImage(contentsOfFile: ToyStore.spriteURL(t.id).path) {
             Image(uiImage: Self.pixelSharp(img.trimmedToArt()))
                 .interpolation(.high).resizable().scaledToFit()
-                .padding(7)
+                .padding(11)
                 .frame(width: 58, height: 58)
                 .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(LinearGradient(colors: [theme.top, theme.bottom.opacity(0.75)], startPoint: .top, endPoint: .bottom)))

@@ -439,7 +439,15 @@ final class Emulator: ObservableObject {
                     }
                     var pressed = 0
                     var reached = false
-                    attempts: for _ in 0..<(untilWaiting ? 3 : 1) {
+                    if untilWaiting {
+                        // a toy whose screen went dark (it was left alone for a while) only wakes on the first press:
+                        // wake it with C (which does nothing else on the I'M OUT screen) before the real answer
+                        tg_press(h, TGKey.c.rawValue, CACurrentMediaTime())
+                        for _ in 0..<8 { _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100) }
+                        tg_release(h, TGKey.c.rawValue)
+                        for _ in 0..<75 { _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100) }
+                    }
+                    attempts: for _ in 0..<(untilWaiting ? 4 : 1) {
                         for k in keys {
                             tg_press(h, k.rawValue, CACurrentMediaTime())
                             for _ in 0..<8 { _ = tg_tick(h, 0.02); _ = tg_take_audio(h, audioBuf, 44100) }

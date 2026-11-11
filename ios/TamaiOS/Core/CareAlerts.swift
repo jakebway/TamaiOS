@@ -396,7 +396,6 @@ final class CareAlerts: ObservableObject {
                     content.body = LiveTamaName.shared.verifiedName.map { "Meet " + $0 + "." } ?? "Open TamaiOS to see your Tama’s new look."
                 case .sickness: content.title = event.raw >= 0 && event.raw & 0x100 != 0 ? "\(event.name) has a toothache" : "\(event.name) is sick"; content.body = "Open TamaiOS to check on them."
                 case .tummy: content.title = "\(event.name) has to go to the bathroom"; content.body = "Their tummy is rumbling. Open TamaiOS and take them before they go."
-                case .tummy: content.title = "\(event.name) has to go to the bathroom"; content.body = "Their tummy is rumbling. Open TamaiOS and take them before they go."
                 case .bathroom: content.title = "\(event.name) went to the bathroom"; content.body = "Open TamaiOS to help them clean up."
                 case .death: content.title = "\(event.name) passed away"; content.body = "Open TamaiOS to start a new egg."
                 case .hatch: content.title = "\(event.name) is hatching!"; content.body = "Open TamaiOS to meet your new Tama."

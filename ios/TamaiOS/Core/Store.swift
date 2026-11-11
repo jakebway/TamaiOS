@@ -72,6 +72,8 @@ enum ToyStore {
     static func dir(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
     static func romURL(_ id: String) -> URL { dir(id).appendingPathComponent("rom.bin") }
     static func spriteURL(_ id: String) -> URL { dir(id).appendingPathComponent("sprite.png") }
+    /// The second twin of the latest marriage, taken the moment the toy shows both babies.
+    static func twinSpriteURL(_ id: String) -> URL { dir(id).appendingPathComponent("sprite-twin.png") }
     /// The last picture of the toy's screen: shown while it wakes up, instead of a black screen.
     static func lastFrameURL(_ id: String) -> URL { dir(id).appendingPathComponent("lastframe.png") }
     static func snapURL(_ id: String) -> URL { dir(id).appendingPathComponent("autosave.t18s") }

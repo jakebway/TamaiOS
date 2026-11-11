@@ -243,16 +243,19 @@ struct DevicesSection: View {
                 HStack(spacing: 14) {
                     portrait(t, theme)
                     VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(tamaName(t) ?? t.name)
-                                .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
-                            if Prefs.d.bool(forKey: "twins.v1." + t.id) {
-                                Text("Twins")
-                                    .font(.system(.caption2, design: .rounded).weight(.bold))
-                                    .foregroundStyle(.primary)
-                                    .padding(.horizontal, 7).padding(.vertical, 2)
-                                    .background(Capsule().fill(theme.bottom.opacity(0.35)))
-                            }
+                        Text(tamaName(t) ?? t.name)
+                            .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                        if twinImage(t) != nil {
+                            Text("& their twin")
+                                .font(.system(.subheadline, design: .rounded)).foregroundStyle(.primary.opacity(0.75))
+                                .lineLimit(1)
+                        } else if Prefs.d.bool(forKey: "twins.v1." + t.id) {
+                            Text("Twins")
+                                .font(.system(.caption2, design: .rounded).weight(.bold))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(Capsule().fill(theme.bottom.opacity(0.35)))
                         }
                         Text(tamaName(t) == nil || t.romName.lowercased().hasPrefix(t.name.lowercased()) ? t.romName : "\(t.name) · \(t.romName)")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -298,19 +301,33 @@ struct DevicesSection: View {
         )
     }
 
+    /// The second twin's picture, once the toy has shown both babies.
+    private func twinImage(_ t: Toy) -> UIImage? {
+        guard Prefs.d.bool(forKey: "twins.v1." + t.id), LiveTamaName.savedName(t.id) != nil else { return nil }
+        return UIImage(contentsOfFile: ToyStore.twinSpriteURL(t.id).path)
+    }
+
     /// The Tama's own picture (taken from its profile page and kept up to date), or the egg until it is known.
     @ViewBuilder private func portrait(_ t: Toy, _ theme: Theme) -> some View {
         // a picture only counts once this Tama's own name has been read (an egg has neither yet)
         if LiveTamaName.savedName(t.id) != nil, let img = UIImage(contentsOfFile: ToyStore.spriteURL(t.id).path) {
-            Image(uiImage: Self.pixelSharp(img.trimmedToArt()))
-                .interpolation(.high).resizable().scaledToFit()
-                .padding(11)
-                .frame(width: 58, height: 58)
-                .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(LinearGradient(colors: [theme.top, theme.bottom.opacity(0.75)], startPoint: .top, endPoint: .bottom)))
+            let twin = twinImage(t)
+            HStack(spacing: twin == nil ? 0 : 6) {
+                tile(img, theme, size: twin == nil ? 58 : 50)
+                if let twin { tile(twin, theme, size: 50) }
+            }
         } else {
             EggBadge(theme: theme).frame(width: 38, height: 48).frame(width: 58, height: 58)
         }
+    }
+
+    private func tile(_ img: UIImage, _ theme: Theme, size: CGFloat) -> some View {
+        Image(uiImage: Self.pixelSharp(img.trimmedToArt()))
+            .interpolation(.high).resizable().scaledToFit()
+            .padding(size > 54 ? 11 : 9)
+            .frame(width: size, height: size)
+            .background(RoundedRectangle(cornerRadius: size > 54 ? 16 : 14, style: .continuous)
+                .fill(LinearGradient(colors: [theme.top, theme.bottom.opacity(0.75)], startPoint: .top, endPoint: .bottom)))
     }
 
     /// Pixel art looks ragged when a small picture is stretched by a non-whole factor. Blow it up by a whole factor

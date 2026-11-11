@@ -1651,7 +1651,14 @@ fn pal16<B: Bus>(s: &mut B, a: u32) -> Vec<u16> {
 /// The profile picture of the current built-in Tama, decoded straight from firmware data.
 /// rom: 0 Wonder Garden, 1 Magic, 2 Fairy. `out` holds 64*64 ARGB pixels. Returns (w<<8)|h, or 0 when not a built-in Tama.
 #[no_mangle]
-pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32 {
+pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32 { profile_sprite(e, rom, false, out) }
+
+/// The second twin's picture (only while the toy still keeps the twin's colours, flag F800DBE8 = 1): the same baby art
+/// in the colour the toy stores at F800DC04.
+#[no_mangle]
+pub extern "C" fn tg_twin_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32 { profile_sprite(e, rom, true, out) }
+
+fn profile_sprite(e: *mut Emu, rom: i32, twin: bool, out: *mut u32) -> i32 {
     if e.is_null() || out.is_null() { return 0; }
     // (character table, colour strips table, grey reference palette image)
     const T: [(u32, u32, u32); 3] = [
@@ -1668,7 +1675,8 @@ pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32
         if stage < 1 || gen == 0 || (gen >= 2 && stage > 3) { return 0; }
         let key = u32::from(s.read8(0xF800_D864)) | u32::from(s.read8(0xF800_D865)) << 8;
         if key >= 200 { return 0; }
-        let cidx = u32::from(s.read8(0xF800_BF68));
+        if twin && (s.read8(0xF800_DBE8) != 1 || gen < 2) { return 0; }
+        let cidx = u32::from(s.read8(if twin { 0xF800_DC04 } else { 0xF800_BF68 }));
         if cidx > 11 { return 0; }
         let img = s.read32(chars + key * 14 * 4);
         if !(0x2020_0000..0x2080_0000).contains(&img) { return 0; }

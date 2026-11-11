@@ -32,11 +32,11 @@ final class LiveTamaName: ObservableObject {
     /// Reads the Tama's name straight from firmware memory: the key at F800D864 indexes the firmware's own name table.
     /// Returns nil for anything unexpected so the screen reader stays the fallback.
     /// The profile picture decoded from firmware data (built-in Tamas). Transparent PNG, trimmed to the picture.
-    static func spritePNG(core h: OpaquePointer, deviceID: String) -> Data? {
+    static func spritePNG(core h: OpaquePointer, deviceID: String, twin: Bool = false) -> Data? {
         let rom = deviceID.contains("wondergarden") ? 0 : deviceID.contains("magic") ? 1 : deviceID.contains("fairy") ? 2 : -1
         guard rom >= 0 else { return nil }
         var px = [UInt32](repeating: 0, count: 64 * 64)
-        let r = tg_profile_sprite(h, Int32(rom), &px)
+        let r = twin ? tg_twin_sprite(h, Int32(rom), &px) : tg_profile_sprite(h, Int32(rom), &px)
         guard r > 0 else { return nil }
         let w = Int(r >> 8), hh = Int(r & 255)
         var rows = [UInt32]()

@@ -578,7 +578,7 @@ final class Emulator: ObservableObject {
                 // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.
                 let raw: [UInt8]? = withCore { h in
                     var out = [UInt8]()
-                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16), (0xF800DBE8, 1)] as [(UInt32, Int)] {
+                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16), (0xF800DBE8, 1), (0xF800DC04, 1)] as [(UInt32, Int)] {
                         var b = [UInt8](repeating: 0, count: n)
                         out += tg_peek(h, addr, &b, n) == 1 ? b : [UInt8](repeating: 0xEE, count: n)
                     }
@@ -588,6 +588,10 @@ final class Emulator: ObservableObject {
                 // Twins: the toy sets F800DBE8 to 1 when two babies hatch (the second one's colours are kept at F800DBFC) and
                 // clears it once the first is named, after which the other twin lives on the toy's Family page.
                 if let raw, raw.count > 33, raw[33] == 1 {
+                    if sig != lastNameSig, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy, twin: true) }) ?? nil {
+                        try? png.write(to: ToyStore.twinSpriteURL(toy), options: .atomic)
+                        DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
+                    }
                     DispatchQueue.main.async {
                         guard let t = self.toy, t.id == toy else { return }
                         Town.shared.noteTwins(t)
@@ -1005,6 +1009,7 @@ enum EggWatch {
     private static let window = 1800.0
     static func mark(_ deviceID: String) {
         Prefs.d.set(Date().timeIntervalSince1970, forKey: "eggWatch.v1." + deviceID)
+        try? FileManager.default.removeItem(at: ToyStore.twinSpriteURL(deviceID))
         Prefs.d.removeObject(forKey: "twins.v1." + deviceID)      // a new marriage: twins are only known again once they hatch
     }
     static func pending(_ deviceID: String) -> Bool {

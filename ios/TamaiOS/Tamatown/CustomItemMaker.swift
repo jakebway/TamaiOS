@@ -89,6 +89,7 @@ struct CustomItemMaker: View {
     /// The saved creation this drawing belongs to (set once it's saved, or when editing one).
     @State private var savedID: UUID?
     @State private var seed: UInt64
+    @State private var anim: Int
     @ObservedObject private var creations = Creations.shared
     @State private var history: [[UInt32]] = []
     @State private var image: CGImage?
@@ -121,6 +122,7 @@ struct CustomItemMaker: View {
         _bitmap = State(initialValue: bm)
         _savedID = State(initialValue: c?.id)
         _seed = State(initialValue: c?.seed ?? UInt64.random(in: 1...UInt64.max))
+        _anim = State(initialValue: c?.anim ?? ItemAnimation.all[0].code)
         _brush = State(initialValue: k == .wallpaper ? 2 : 1)
     }
 
@@ -156,7 +158,7 @@ struct CustomItemMaker: View {
             .onAppear { if image == nil { image = bitmap.cgImage() } }
             .onChange(of: kind) { _ in
                 if kind.size != bitmap.size {            // wallpaper <-> food: a different canvas
-                    name = kind == .wallpaper ? "MY ROOM" : kind.title.uppercased()
+                    name = kind == .wallpaper ? "MY ROOM" : kind == .item ? "MY ITEM" : kind.title.uppercased()
                     brush = kind == .wallpaper ? 2 : 1
                     savedID = nil
                     seed = UInt64.random(in: 1...UInt64.max)
@@ -173,13 +175,45 @@ struct CustomItemMaker: View {
 
     /// Big, clear choice of what you're making (it decides how the device files it).
     private var kindPicker: some View {
-        HStack(spacing: 10) {
+        VStack(spacing: 12) {
+            kindTiles
+            if kind == .item { animationPicker }
+        }
+    }
+
+    /// The animation your item plays when your Tama uses it from the Item Box.
+    private var animationPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Animation").font(.headline)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(ItemAnimation.all) { a in
+                        Button { anim = a.code; seed = UInt64.random(in: 1...UInt64.max) } label: {
+                            VStack(spacing: 4) {
+                                Image(systemName: a.symbol).font(.title3)
+                                Text(a.title).font(.system(.caption, design: .rounded).weight(.semibold)).lineLimit(1)
+                            }
+                            .frame(width: 84, height: 62)
+                            .background(RoundedRectangle(cornerRadius: 12).fill(anim == a.code ? Color.purple.opacity(0.18) : Color(.secondarySystemBackground)))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(anim == a.code ? Color.purple : .clear, lineWidth: 2))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            Text((ItemAnimation.named(anim)?.blurb ?? "") + ". Your drawing takes the place of the real item in the scene. Use it from your Tama's Item Box.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var kindTiles: some View {
+        HStack(spacing: 8) {
             ForEach(Kind.allCases, id: \.self) { k in
                 Button { kind = k } label: {
                     VStack(spacing: 4) {
-                        Image(systemName: k == .wallpaper ? "photo.fill" : k == .meal ? "fork.knife" : "birthday.cake.fill").font(.title2)
+                        Image(systemName: k == .wallpaper ? "photo.fill" : k == .meal ? "fork.knife" : k == .item ? "gift.fill" : "birthday.cake.fill").font(.title2)
                         Text(k.title).font(.system(.headline, design: .rounded))
-                        Text(k == .wallpaper ? "A room background" : k == .meal ? "Fills hunger hearts" : "Fills happy hearts")
+                        Text(k == .wallpaper ? "Room look" : k == .meal ? "Hunger" : k == .item ? "Item Box" : "Happy")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, minHeight: 78)
@@ -378,7 +412,7 @@ struct CustomItemMaker: View {
         let argb: [UInt32] = bitmap.px.map { v in
             (v & 0xFF00_0000) | ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF)
         }
-        var c = Creation(name: label, kind: kind, price: kind == .wallpaper ? price : 0, seed: seed)
+        var c = Creation(name: label, kind: kind, price: kind == .wallpaper ? price : 0, seed: seed, anim: kind == .item ? anim : nil)
         if let id = savedID { c.id = id }
         guard let pkt = Creations.packet(c, pixels: argb) else { return nil }
         let saved = creations.save(c, pixels: argb)

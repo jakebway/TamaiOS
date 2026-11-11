@@ -116,7 +116,7 @@ struct TamaDepaView: View {
                             .frame(width: 44, height: 44).background(Circle().fill(Color.purple.gradient))
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Make your own").font(.system(.headline, design: .rounded))
-                            Text("Draw a snack, a meal or a wallpaper. It stays here until you delete it").font(.caption).foregroundStyle(.secondary)
+                            Text("Draw a snack, meal, item or wallpaper. It stays here until you delete it").font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         Image(systemName: "chevron.right").foregroundStyle(.secondary)
@@ -294,7 +294,8 @@ struct TamaDepaView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         VStack(alignment: .leading, spacing: 2) {
                             Text(c.name).font(.system(.subheadline, design: .rounded).weight(.semibold)).lineLimit(1)
-                            Text(c.kind.title).font(.caption).foregroundStyle(.secondary)
+                            Text(c.kind == .item ? "Item · " + (ItemAnimation.named(c.anim)?.title ?? "") : c.kind.title)
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 4)
                         Button { sendCreation(c) } label: {

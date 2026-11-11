@@ -1100,11 +1100,21 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
     }
     // "food"/"snack" -> oyatsu (_oy, a snack), "meal" -> gohan (_gh, a meal). The device decides
     // snack or meal from the template's food type, so each takes a real file of its own type.
-    let want_prefix = match kind { "wallpaper" => "_bg", "meal" => "_gh", _ => "_oy" };
-    let template = lib.items.iter().find(|it| {
+    // kinds: "wallpaper", "food"/"snack" (_oy), "meal" (_gh), and "item:<animation>" (_as) where the animation code is
+    // the byte at 0x78 of real item files: it picks how the item plays when you use it from the Item Box.
+    let (base, anim) = match kind.split_once(':') {
+        Some((b, a)) => (b, a.parse::<u8>().ok()),
+        None => (kind, None),
+    };
+    let is_item = base == "item";
+    let want_prefix = match base { "wallpaper" => "_bg", "meal" => "_gh", "item" => "_as", _ => "_oy" };
+    let mut cands: Vec<&ShopItem> = lib.items.iter().filter(|it| {
         it.lang == "en" && it.id.contains(want_prefix) && !it.name.chars().any(|c| ('\u{3040}'..'\u{3100}').contains(&c))
             && it.data.len() > 0x210 && image_size(&it.data[0x204..]) > 0
-    })?;
+            && (!is_item || anim.map_or(true, |a| it.data[0x78] == a))
+    }).collect();
+    if is_item { cands.sort_by_key(|it| !it.id.starts_with("tg18")); }
+    let template = *cands.first()?;
     let mut d = template.data.clone();
     let end = d.len() - 2;
     // replace every picture in the file with the drawing (same size and colour count)
@@ -1119,11 +1129,12 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
         if n > 16 || w * h % 2 != 0 {
             break;
         }
-        let key = kind != "wallpaper";
+        let key = base != "wallpaper";
+        let food = !is_item && key;
         let mut scaled = if key { fit(px, sw, sh, w, h) } else { scale(px, sw, sh, w, h) };
         // Food has three pictures: whole, bitten, nearly gone. Take bites out of
         // the drawing for the later ones so the eating animation looks right.
-        if key && replaced > 0 {
+        if food && replaced > 0 {
             let keep = if replaced == 1 { w * 2 / 3 } else { w / 3 };
             for y in 0..h {
                 for x in keep..w {
@@ -1154,8 +1165,10 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
     // The device files an item by its kind byte (0x4F: 01 food, 07 wallpaper) AND
     // its number range (wallpapers live at 50000+), so keep both right for the kind,
     // with a number no real item uses so it never replaces one you own.
-    d[0x4F] = if kind == "wallpaper" { 0x07 } else { 0x01 };
-    let num: u16 = if kind == "wallpaper" { 50900 + (seed % 90) as u16 } else { 9000 + (seed % 900) as u16 };
+    if !is_item {
+        d[0x4F] = if base == "wallpaper" { 0x07 } else { 0x01 };
+    }
+    let num: u16 = if base == "wallpaper" { 50900 + (seed % 90) as u16 } else if is_item { 17000 + (seed % 900) as u16 } else { 9000 + (seed % 900) as u16 };
     let id_old: String = d[0x34..0x48].iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
     let prefix_end = id_old.find(want_prefix).map(|i| i + want_prefix.len()).unwrap_or(0);
     let suffix = if id_old.ends_with("_1") { "_1" } else { "" };

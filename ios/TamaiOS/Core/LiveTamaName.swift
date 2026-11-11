@@ -63,19 +63,6 @@ final class LiveTamaName: ObservableObject {
         typed = typed.trimmingCharacters(in: .whitespaces)
         return typed.isEmpty ? nil : typed.prefix(1).uppercased() + typed.dropFirst() + "tchi"
     }
-    /// The first twin's name: while twins are being named the toy keeps it in an eight-slot list at F800DA7A (two bytes per
-    /// letter, little-endian, A = 0x8E; FFFF marks an empty slot). The twin named second goes to F800DADE like any single baby.
-    static func twinSlotName(_ b: [UInt8]) -> String? {
-        guard b.count >= 16 else { return nil }
-        var typed = ""
-        for i in stride(from: 0, to: 16, by: 2) {
-            let c = Int(b[i]) | Int(b[i + 1]) << 8
-            if c == 0 || c == 0xffff { break }
-            guard (0x8e...0xa7).contains(c), let u = UnicodeScalar(c - 0x8e + 0x61) else { return nil }
-            typed.unicodeScalars.append(u)
-        }
-        return typed.isEmpty ? nil : typed.prefix(1).uppercased() + typed.dropFirst() + "tchi"
-    }
     enum Direct: Equatable { case name(String), unnamed, unknown }
     static func directName(core h: OpaquePointer, deviceID: String) -> String? {
         if case .name(let n) = direct(core: h, deviceID: deviceID) { return n }

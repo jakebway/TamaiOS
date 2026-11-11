@@ -73,12 +73,7 @@ struct PixelBitmap {
 /// Fast, drag-friendly pixel maker for wallpapers and food.
 /// The canvas stays put; only the tools below it scroll, so drawing never fights scrolling.
 struct CustomItemMaker: View {
-    enum Kind: String, CaseIterable, Identifiable {
-        case wallpaper = "Wallpaper"
-        case food = "Food"
-        var id: String { rawValue }
-        var size: Int { self == .wallpaper ? 128 : 24 }
-    }
+    typealias Kind = Creation.Kind
     enum Tool { case pencil, eraser, fill }
 
     @Environment(\.dismiss) private var dismiss
@@ -87,14 +82,18 @@ struct CustomItemMaker: View {
     @State private var custom = Color.pink
     @State private var sending = false
     @State private var resultText: String?
-    @State private var kind: Kind = .wallpaper
-    @State private var name = "MY ROOM"
-    @State private var price = 10
-    @State private var bitmap = PixelBitmap(size: 128)
+    @State private var kind: Kind
+    @State private var name: String
+    @State private var price: Int
+    @State private var bitmap: PixelBitmap
+    /// The saved creation this drawing belongs to (set once it's saved, or when editing one).
+    @State private var savedID: UUID?
+    @State private var seed: UInt64
+    @ObservedObject private var creations = Creations.shared
     @State private var history: [[UInt32]] = []
     @State private var image: CGImage?
     @State private var tool: Tool = .pencil
-    @State private var brush = 2
+    @State private var brush: Int
     @State private var selected = 3
     @State private var showSent = false
     @State private var sentOK = false
@@ -108,6 +107,23 @@ struct CustomItemMaker: View {
         UIColor(red: 0.9, green: 0.9, blue: 0.9, alpha: 1),
         UIColor(red: 0.3, green: 0.3, blue: 0.3, alpha: 1)
     ]
+    /// Pass a saved creation to keep editing it; otherwise starts a blank wallpaper.
+    init(editing c: Creation? = nil) {
+        let k = c?.kind ?? .wallpaper
+        var bm = PixelBitmap(size: k.size)
+        if let c, let px = Creations.shared.pixels(c) {
+            // saved as 0xAARRGGBB, the canvas keeps RGBA
+            bm.px = px.map { v in (v & 0xFF00_0000) | ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF) }
+        }
+        _kind = State(initialValue: k)
+        _name = State(initialValue: c?.name ?? "MY ROOM")
+        _price = State(initialValue: c?.price ?? 10)
+        _bitmap = State(initialValue: bm)
+        _savedID = State(initialValue: c?.id)
+        _seed = State(initialValue: c?.seed ?? UInt64.random(in: 1...UInt64.max))
+        _brush = State(initialValue: k == .wallpaper ? 2 : 1)
+    }
+
     private let packed: [UInt32] = CustomItemMaker.paletteColors.map(PixelBitmap.pack)
 
     var body: some View {
@@ -137,11 +153,18 @@ struct CustomItemMaker: View {
                 Button("OK") { if sentOK { dismiss() } }
             }
             .overlay { if sending { BusyOverlay(text: "Sending…") } }
-            .onAppear { if image == nil { resetCanvas() } }
+            .onAppear { if image == nil { image = bitmap.cgImage() } }
             .onChange(of: kind) { _ in
-                name = kind == .wallpaper ? "MY ROOM" : "SNACK"
-                brush = kind == .wallpaper ? 2 : 1
-                resetCanvas()
+                if kind.size != bitmap.size {            // wallpaper <-> food: a different canvas
+                    name = kind == .wallpaper ? "MY ROOM" : kind.title.uppercased()
+                    brush = kind == .wallpaper ? 2 : 1
+                    savedID = nil
+                    seed = UInt64.random(in: 1...UInt64.max)
+                    resetCanvas()
+                } else {                                  // snack <-> meal keeps your drawing
+                    if name == "SNACK" || name == "MEAL" { name = kind.title.uppercased() }
+                    seed = UInt64.random(in: 1...UInt64.max)
+                }
             }
         }
         // Drawing near the edge or pulling down must not close or pop this screen.
@@ -151,12 +174,12 @@ struct CustomItemMaker: View {
     /// Big, clear choice of what you're making (it decides how the device files it).
     private var kindPicker: some View {
         HStack(spacing: 10) {
-            ForEach(Kind.allCases) { k in
+            ForEach(Kind.allCases, id: \.self) { k in
                 Button { kind = k } label: {
                     VStack(spacing: 4) {
-                        Image(systemName: k == .food ? "fork.knife" : "photo.fill").font(.title2)
-                        Text(k.rawValue).font(.system(.headline, design: .rounded))
-                        Text(k == .food ? "Your Tama can eat it" : "A room background")
+                        Image(systemName: k == .wallpaper ? "photo.fill" : k == .meal ? "fork.knife" : "birthday.cake.fill").font(.title2)
+                        Text(k.title).font(.system(.headline, design: .rounded))
+                        Text(k == .wallpaper ? "A room background" : k == .meal ? "Fills hunger hearts" : "Fills happy hearts")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, minHeight: 78)
@@ -332,7 +355,48 @@ struct CustomItemMaker: View {
             .buttonStyle(.borderedProminent)
             .tint(.purple)
             .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button { saveOnly() } label: {
+                Label("Save to TamaDepa", systemImage: "tray.and.arrow.down.fill")
+                    .frame(maxWidth: .infinity, minHeight: 24)
+            }
+            .buttonStyle(.bordered)
+            .tint(.purple)
+            .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            Text("Everything you send is also kept in TamaDepa › My creations until you delete it.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
+    }
+
+    /// Turn the drawing into a real item file (like WebMeets' custom items) and
+    /// send it: straight to the device if it's connected with Download, otherwise
+    /// into the bag so it arrives with the next Download or when your Tama comes home.
+    /// Keep the drawing in TamaDepa (My creations) until you delete it.
+    @discardableResult
+    private func keep() -> (Creation, [UInt8])? {
+        let label = name.trimmingCharacters(in: .whitespaces)
+        // PixelBitmap is RGBA in memory; the item builder wants 0xAARRGGBB
+        let argb: [UInt32] = bitmap.px.map { v in
+            (v & 0xFF00_0000) | ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF)
+        }
+        var c = Creation(name: label, kind: kind, price: kind == .wallpaper ? price : 0, seed: seed)
+        if let id = savedID { c.id = id }
+        guard let pkt = Creations.packet(c, pixels: argb) else { return nil }
+        let saved = creations.save(c, pixels: argb)
+        savedID = saved.id
+        return (saved, pkt)
+    }
+
+    private func saveOnly() {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        guard keep() != nil else {
+            sentOK = false
+            resultText = "Couldn't save it. Download the character pack in Tamatown › Settings first."
+            showSent = true
+            return
+        }
+        sentOK = true
+        resultText = "Saved in TamaDepa under My creations. It stays there until you delete it."
+        showSent = true
     }
 
     /// Turn the drawing into a real item file (like WebMeets' custom items) and
@@ -340,31 +404,14 @@ struct CustomItemMaker: View {
     /// into the bag so it arrives with the next Download or when your Tama comes home.
     private func send() {
         guard let toy = emu.toy else { return }
-        let n = kind.size
-        // PixelBitmap is RGBA in memory; the item builder wants 0xAARRGGBB
-        let argb: [UInt32] = bitmap.px.map { v in
-            (v & 0xFF00_0000) | ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF)
-        }
         let label = name.trimmingCharacters(in: .whitespaces)
-        let kindName = kind == .wallpaper ? "wallpaper" : "food"
-        var p: UnsafeMutablePointer<UInt8>? = nil
-        var len = 0
-        let ok = argb.withUnsafeBufferPointer { buf in
-            kindName.withCString { k in
-                label.withCString { nm in
-                    tg_mm_custom_item(k, nm, UInt16(kind == .wallpaper ? max(0, min(price, 9999)) : 0), buf.baseAddress, n, n,
-                                      UInt64.random(in: 1...UInt64.max), 0, &p, &len)
-                }
-            }
-        }
-        guard ok == 1, let p else {
+        let kindName = kind.bagKind
+        guard let (_, pkt) = keep() else {
             sentOK = false
             resultText = "Couldn't make the item. Download the character pack in Tamatown › Settings first."
             showSent = true
             return
         }
-        let pkt = Array(UnsafeBufferPointer(start: p, count: len))
-        tg_free(p, len)
         let town = Town.shared
         let tama = town.name(toy)
         if link.openForDownload {

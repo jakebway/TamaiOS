@@ -1098,7 +1098,9 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
     if px.len() < sw * sh || sw == 0 || sh == 0 {
         return None;
     }
-    let want_prefix = if kind == "wallpaper" { "_bg" } else { "_oy" };
+    // "food"/"snack" -> oyatsu (_oy, a snack), "meal" -> gohan (_gh, a meal). The device decides
+    // snack or meal from the template's food type, so each takes a real file of its own type.
+    let want_prefix = match kind { "wallpaper" => "_bg", "meal" => "_gh", _ => "_oy" };
     let template = lib.items.iter().find(|it| {
         it.lang == "en" && it.id.contains(want_prefix) && !it.name.chars().any(|c| ('\u{3040}'..'\u{3100}').contains(&c))
             && it.data.len() > 0x210 && image_size(&it.data[0x204..]) > 0

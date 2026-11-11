@@ -31,6 +31,9 @@ struct TamaDepaView: View {
     @State private var importing = false
     @State private var drawing = false
     @State private var custom: (name: String, data: Data)?
+    @ObservedObject private var creations = Creations.shared
+    @State private var editing: Creation?
+    @State private var deleting: Creation?
 
     private var isJP: Bool { emu.toy?.romName.contains("(JP") ?? false }
     private var lang: String { isJP ? "jp" : "en" }
@@ -113,7 +116,7 @@ struct TamaDepaView: View {
                             .frame(width: 44, height: 44).background(Circle().fill(Color.purple.gradient))
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Make your own").font(.system(.headline, design: .rounded))
-                            Text("Draw a food or a wallpaper and send it").font(.caption).foregroundStyle(.secondary)
+                            Text("Draw a snack, a meal or a wallpaper. It stays here until you delete it").font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         Image(systemName: "chevron.right").foregroundStyle(.secondary)
@@ -124,6 +127,7 @@ struct TamaDepaView: View {
                 .buttonStyle(.plain)
                 connectionCard
                 bagCard
+                creationsCard
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(WebMeets.categories, id: \.key) { c in
@@ -178,6 +182,11 @@ struct TamaDepaView: View {
             }.ignoresSafeArea()
         }
         .background(Color.clear.fullScreenCover(isPresented: $drawing) { CustomItemMaker().environmentObject(emu) })
+        .background(Color.clear.fullScreenCover(item: $editing) { c in CustomItemMaker(editing: c).environmentObject(emu) })
+        .confirmationDialog("Delete \(deleting?.name ?? "this")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+            Button("Delete from TamaDepa", role: .destructive) { if let d = deleting { creations.delete(d) }; deleting = nil }
+            Button("Keep", role: .cancel) { deleting = nil }
+        } message: { Text("This removes your drawing. Copies already on your Tama stay there.") }
         .alert(result?.ok == true ? "TamaDepa" : "Not delivered", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
             Button("OK") {}
         } message: { Text(result?.text ?? "") }
@@ -261,6 +270,61 @@ struct TamaDepaView: View {
                 Text("In-store pickup: connect with Download to collect items. Returning from Visit does not deliver items.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// Your own drawings: they stay here until you delete them.
+    @ViewBuilder
+    private var creationsCard: some View {
+        if !creations.list.isEmpty {
+            TownCard(tint: .purple) {
+                Label("My creations", systemImage: "paintbrush.pointed.fill")
+                    .font(.system(.headline, design: .rounded)).foregroundStyle(.purple)
+                ForEach(creations.list) { c in
+                    HStack(spacing: 12) {
+                        Group {
+                            if let img = creations.thumbnail(c) {
+                                Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
+                            } else {
+                                Image(systemName: "photo").foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(width: 48, height: 48)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(.tertiarySystemFill)))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(c.name).font(.system(.subheadline, design: .rounded).weight(.semibold)).lineLimit(1)
+                            Text(c.kind.title).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        Button { sendCreation(c) } label: {
+                            Image(systemName: "paperplane.fill").frame(width: 36, height: 36).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.purple)
+                        Menu {
+                            Button { editing = c } label: { Label("Edit drawing", systemImage: "pencil") }
+                            if c.kind.isFood {
+                                Button { creations.setKind(c, c.kind == .snack ? .meal : .snack) } label: {
+                                    Label(c.kind == .snack ? "Change to a Meal" : "Change to a Snack", systemImage: "arrow.triangle.2.circlepath")
+                                }
+                            }
+                            Button(role: .destructive) { deleting = c } label: { Label("Delete", systemImage: "trash") }
+                        } label: {
+                            Image(systemName: "ellipsis.circle").font(.title3).frame(width: 36, height: 36).contentShape(Rectangle())
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                Text("Kept here until you delete them. Send again any time.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func sendCreation(_ c: Creation) {
+        deliver(name: c.name, kind: c.kind.bagKind) { _ in
+            guard let pk = Creations.shared.packet(c) else { throw URLError(.cannotDecodeContentData) }
+            return pk
         }
     }
 

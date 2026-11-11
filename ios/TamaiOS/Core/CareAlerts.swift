@@ -35,6 +35,14 @@ final class CareAlerts: ObservableObject {
     private var lastPollAttempt: [String: Double] = [:]
     private var lastMask: [String: Int] = [:]
     private var bathroomRaw: [String: Int] = [:]
+    /// The Tama is taking a nap (F800D806 = 1). The toy itself clears its care calls while it naps and raises them
+    /// again when it wakes, so hunger/unhappy alerts wait until then.
+    private(set) var napping: [String: Bool] = [:]
+    func observeNap(_ on: Bool, deviceID: String) {
+        guard CareSupport.supports(deviceID), napping[deviceID] != on else { return }
+        napping[deviceID] = on
+        record(on ? "NAP started (F800D806=1); care alerts wait until the Tama wakes" : "NAP ended")
+    }
     private var bathroomRequests: [String: String] = [:]
     private var samples: [String: String] = [:]
     private var counters: [String: Int] = [:]
@@ -165,6 +173,11 @@ final class CareAlerts: ObservableObject {
                 return
             }
             self.policy.observe(mask: careMask, deviceID: deviceID)
+            if self.napping[deviceID] == true {
+                if careMask > 0 { self.count("skipped: napping") }
+                if source == .sound { self.record("SKIP care sound while napping") }
+                return
+            }
             if source == .poll {
                 guard careMask > 0 else { return }
                 if self.policy.blockReason(mask: careMask, deviceID: deviceID, source: .poll, now: observedAt) == "poll same episode" {
@@ -362,7 +375,7 @@ final class CareAlerts: ObservableObject {
         if event.source == .tummy { return tummyEpisode[event.deviceID] == event.episode && bathroomRaw[event.deviceID] != 1 }
         if event.source == .hatch { return hatchTokens[event.deviceID] == event.id }
         if event.source == .death { return deathTokens[event.deviceID] == event.id }
-        return true
+        return napping[event.deviceID] != true      // hungry/unhappy: never while the Tama naps
     }
     private func removeRequest(_ identifier: String) {
         let center = UNUserNotificationCenter.current()

@@ -657,10 +657,11 @@ final class Emulator: ObservableObject {
                     } else { self.deadPolls = 0 }
                 }
                 recordMemoryChanges()
-                let sample = careSample(), bathroomRaw = bathroomSample(), tummyRaw = tummySample()
+                let sample = careSample(), bathroomRaw = bathroomSample(), tummyRaw = tummySample(), nap = napSample()
                 let observedAt = ProcessInfo.processInfo.systemUptime, expectedID = toyID
                 DispatchQueue.main.async {
                     guard let toy = self.toy, toy.id == expectedID else { return }
+                    if nap >= 0 { CareAlerts.shared.observeNap(nap == 1, deviceID: toy.id) }
                     CareAlerts.shared.observe(mask: sample.mask, deviceID: toy.id, name: toy.name,
                         source: .poll, observedAt: observedAt, raw: sample.raw, stage: sample.stage,
                         character: sample.character, signature: sample.signature)
@@ -792,6 +793,16 @@ final class Emulator: ObservableObject {
             guard tg_profile_attention(h) >= 0 else { return -1 }
             var raw: UInt8 = 0
             return tg_peek(h, 0xF800_D88A, &raw, 1) == 1 ? Int(raw) : -1
+        } ?? -1
+    }
+    /// F800D806 is 1 only while the Tama naps (2 in the room awake, 0 after menus). Found in the test harness on
+    /// Wonder Garden and Fairy: it flips with the closed-eyes nap pose, and the toy clears its care calls (F800D870) for it.
+    private func napSample() -> Int {
+        guard CareSupport.supports(toyID ?? "") else { return -1 }
+        return withCore { h -> Int in
+            guard tg_profile_attention(h) >= 0 else { return -1 }
+            var raw: UInt8 = 0
+            return tg_peek(h, 0xF800_D806, &raw, 1) == 1 ? Int(raw) : -1
         } ?? -1
     }
     private func bathroomSample() -> Int {

@@ -251,11 +251,11 @@ final class CareAlerts: ObservableObject {
     private var tummyArmed: [String: Bool] = [:]
     private var tummyEpisode: [String: Int] = [:]
     /// The toy's digestion countdown (F800D88A, about 19 down to 0) ends with the bathroom visit. The last stretch of it
-    /// (7 or less, roughly a minute and a half) is the warning to take the Tama to the bathroom before it goes.
+    /// (6 or less, roughly 70 seconds) is the warning to take the Tama to the bathroom before it goes.
     func observeTummy(timer: Int, bathroom: Int, deviceID: String, observedAt: Double) {
         DispatchQueue.main.async {
             guard CareSupport.supports(deviceID), timer >= 0 else { return }
-            if timer == 0 || timer > 7 { self.tummyArmed[deviceID] = true; return }
+            if timer == 0 || timer > 6 { self.tummyArmed[deviceID] = true; return }
             guard self.tummyArmed[deviceID] == true, bathroom == 0 else { return }
             self.tummyArmed[deviceID] = false
             self.tummyEpisode[deviceID, default: 0] += 1

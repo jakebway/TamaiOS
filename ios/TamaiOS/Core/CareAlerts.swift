@@ -64,6 +64,8 @@ final class CareAlerts: ObservableObject {
         }
     }
     private func count(_ key: String) { counters[key, default: 0] += 1 }
+    /// The newest few care events (warnings, skips because the app was open, sends), for the short diagnostics.
+    func recentEvents(_ n: Int) -> String { history.suffix(n).joined(separator: "\n") }
     private func record(_ text: String) {
         history.append(String(format: "%.3f", ProcessInfo.processInfo.systemUptime) + " " + text)
         if history.count > 240 { history.removeFirst(history.count - 240) }

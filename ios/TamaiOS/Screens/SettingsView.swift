@@ -243,8 +243,17 @@ struct DevicesSection: View {
                 HStack(spacing: 14) {
                     portrait(t, theme)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(tamaName(t) ?? t.name)
-                            .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
+                        HStack(spacing: 6) {
+                            Text(tamaName(t) ?? t.name)
+                                .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
+                            if Prefs.d.bool(forKey: "twins.v1." + t.id) {
+                                Text("Twins")
+                                    .font(.system(.caption2, design: .rounded).weight(.bold))
+                                    .foregroundStyle(.primary)
+                                    .padding(.horizontal, 7).padding(.vertical, 2)
+                                    .background(Capsule().fill(theme.bottom.opacity(0.35)))
+                            }
+                        }
                         Text(tamaName(t) == nil || t.romName.lowercased().hasPrefix(t.name.lowercased()) ? t.romName : "\(t.name) · \(t.romName)")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }

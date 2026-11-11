@@ -999,7 +999,10 @@ enum Notifier {
 /// Devices whose Tama just married: the new egg hatches the next time the device is open, in front of you.
 enum EggWatch {
     private static let window = 1800.0
-    static func mark(_ deviceID: String) { Prefs.d.set(Date().timeIntervalSince1970, forKey: "eggWatch.v1." + deviceID) }
+    static func mark(_ deviceID: String) {
+        Prefs.d.set(Date().timeIntervalSince1970, forKey: "eggWatch.v1." + deviceID)
+        Prefs.d.removeObject(forKey: "twins.v1." + deviceID)      // a new marriage: twins are only known again once they hatch
+    }
     static func pending(_ deviceID: String) -> Bool {
         let t = Prefs.d.double(forKey: "eggWatch.v1." + deviceID)
         return t > 0 && Date().timeIntervalSince1970 - t < window

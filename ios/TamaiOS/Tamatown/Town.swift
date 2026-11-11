@@ -455,6 +455,10 @@ final class Town: ObservableObject {
 
     /// Two babies hatched after the latest marriage: say so in its entry (once).
     func noteTwins(_ toy: Toy) {
+        if !Prefs.d.bool(forKey: "twins.v1." + toy.id) {
+            Prefs.d.set(true, forKey: "twins.v1." + toy.id)
+            objectWillChange.send()
+        }
         var s = state(toy)
         guard let last = s.married.last, !last.hasSuffix("(twins)") else { return }
         s.married[s.married.count - 1] = last + " (twins)"

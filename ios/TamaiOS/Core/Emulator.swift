@@ -578,7 +578,7 @@ final class Emulator: ObservableObject {
                 // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.
                 let raw: [UInt8]? = withCore { h in
                     var out = [UInt8]()
-                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16), (0xF800DBE8, 1), (0xF800DC04, 1), (0xF800DBEA, 16), (0xF800DBFC, 8), (0xF800DC05, 2)] as [(UInt32, Int)] {
+                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16), (0xF800DBE8, 1), (0xF800DC04, 1), (0xF800DBEA, 16), (0xF800DBFC, 8), (0xF800DC05, 2), (0xF800DA80, 8), (0xF800DA92, 3)] as [(UInt32, Int)] {
                         var b = [UInt8](repeating: 0, count: n)
                         out += tg_peek(h, addr, &b, n) == 1 ? b : [UInt8](repeating: 0xEE, count: n)
                     }
@@ -618,7 +618,12 @@ final class Emulator: ObservableObject {
                     // A child (born from a marriage, past the baby stage) is drawn by the toy from its inherited parts, which the built-in
                     // Tama table doesn't know (a head from the other parent, say), so its picture is read from the toy's own profile page.
                     let inheritedLook = raw.count > 1 && raw[1] >= 2 && raw[0] >= 2
-                    if raw[0] >= 1, !inheritedLook, let png = genes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
+                    // The child's own pieces: parts at F800DA80 (body, face, head, back), colours at F800DA92 (body, head, back).
+                    let own: Data? = inheritedLook && raw.count >= 72 ? LiveTamaName.genePNG(parts: Array(raw[61..<69]), colours: Array(raw[69..<72])) : nil
+                    if raw[0] >= 1, let png = own {
+                        try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
+                        DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
+                    } else if raw[0] >= 1, !inheritedLook, let png = genes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
                         try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                     } else if raw[0] >= 1 {

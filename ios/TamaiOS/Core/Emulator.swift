@@ -615,7 +615,10 @@ final class Emulator: ObservableObject {
                     // The picture comes straight from the toy's own data the moment the stage, colour or name changes (a hatch, a
                     // growth, a new baby): built-in Tamas at any stage and marriage babies up to the teen stage.
                     let genes: Data? = Emulator.useGenePicture && raw.count >= 17 && raw[1] >= 2 && raw[0] >= 1 ? LiveTamaName.genePNG(parts: Array(raw[9..<17]), colours: [raw[5], raw[6], raw[7]]) : nil
-                    if raw[0] >= 1, let png = genes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
+                    // A child (born from a marriage, past the baby stage) is drawn by the toy from its inherited parts, which the built-in
+                    // Tama table doesn't know (a head from the other parent, say), so its picture is read from the toy's own profile page.
+                    let inheritedLook = raw.count > 1 && raw[1] >= 2 && raw[0] >= 2
+                    if raw[0] >= 1, !inheritedLook, let png = genes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
                         try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                     } else if raw[0] >= 1 {

@@ -382,6 +382,13 @@ final class CareAlerts: ObservableObject {
             if pass == 0 { record("DEFER event=\(event.id) waiting for background transition") }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.attempt(event, pass: pass + 1) }; return
         }
+        // iOS 27 reports the app as "background" while the iPhone's Notification Center is pulled down over it. Wait a few
+        // seconds in the background before sending, so a quick look at Notification Center doesn't produce an alert.
+        if state == .background, let since = AppModel.current?.emu.backgroundAt, pass < 40,
+           Date().timeIntervalSince(since) < (event.source == .tummy ? 2.0 : 4.0) {
+            if pass == 0 { record("DEFER event=\(event.id) just entered background; waiting out a Notification Center peek") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.attempt(event, pass: pass + 1) }; return
+        }
         guard state == .background else { skip(event, "not in background"); return }
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             DispatchQueue.main.async {

@@ -174,7 +174,7 @@ final class Emulator: ObservableObject {
     }
 
     private var visible = true
-    private var backgroundAt: Date?
+    private(set) var backgroundAt: Date?
     private var lastCall = Date.distantPast
     private var lastCode: Int32 = 0
     private let wake = DispatchSemaphore(value: 0)

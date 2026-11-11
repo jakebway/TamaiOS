@@ -284,7 +284,7 @@ struct TamaDepaView: View {
                     HStack(spacing: 12) {
                         Group {
                             if let img = creations.thumbnail(c) {
-                                Image(uiImage: img).interpolation(.none).resizable().scaledToFit()
+                                Image(uiImage: img).interpolation(.none).resizable().scaledToFit().padding(6)
                             } else {
                                 Image(systemName: "photo").foregroundStyle(.secondary)
                             }

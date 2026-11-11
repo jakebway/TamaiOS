@@ -986,11 +986,11 @@ pub fn back_packet(item_or_packet: Option<&[u8]>, gotchi_points: u32) -> Vec<u8>
 
 /// Reduce RGBA pixels (0xAARRGGBB) to exactly `n` palette colours (nearest colour
 /// for the rest). With `key` set, index 0 is the transparent key colour.
-fn quantize(px: &[u32], n: usize, key: bool) -> (Vec<u32>, Vec<u8>) {
+fn quantize(px: &[u32], n: usize, key: bool, palette_from: Option<&[u32]>) -> (Vec<u32>, Vec<u8>) {
     use std::collections::HashMap;
     let opaque = |c: u32| (c >> 24) >= 128;
     let mut count: HashMap<u32, usize> = HashMap::new();
-    for &c in px {
+    for &c in palette_from.unwrap_or(px) {
         if opaque(c) {
             *count.entry(c | 0xFF00_0000).or_insert(0) += 1;
         }
@@ -1077,14 +1077,36 @@ fn fit(px: &[u32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<u32> {
         return scale(px, sw, sh, w, h);
     }
     let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
-    let (tw, th) = (w - 2, h - 2); // a pixel of breathing room all round
-    // output size with the same aspect, as big as fits
+    let (tw, th) = (w.saturating_sub(2).max(1), h.saturating_sub(2).max(1)); // a pixel of breathing room all round
+    // output size with the same aspect, as big as fits; never blown up past whole-pixel steps of a small drawing
     let (ow, oh) = if bw * th >= bh * tw { (tw, (bh * tw / bw).max(1)) } else { ((bw * th / bh).max(1), th) };
     let (ox, oy) = ((w - ow) / 2, (h - oh) / 2);
     let mut out = vec![0u32; w * h];
+    // Box filter: each output pixel averages the block of drawing pixels it covers. Thin lines and single stray
+    // pixels fade out (not enough coverage) instead of being picked or dropped at random, and edges stay clean.
     for y in 0..oh {
+        let ya = y0 + y * bh / oh;
+        let yb = (y0 + ((y + 1) * bh + oh - 1) / oh).clamp(ya + 1, y1 + 1);
         for x in 0..ow {
-            out[(oy + y) * w + ox + x] = px[(y0 + y * bh / oh) * sw + x0 + x * bw / ow];
+            let xa = x0 + x * bw / ow;
+            let xb = (x0 + ((x + 1) * bw + ow - 1) / ow).clamp(xa + 1, x1 + 1);
+            let (mut n, mut op, mut r, mut g, mut b) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for yy in ya..yb {
+                for xx in xa..xb {
+                    let c = px[yy * sw + xx];
+                    n += 1;
+                    if (c >> 24) >= 128 {
+                        op += 1;
+                        r += (c >> 16) & 255;
+                        g += (c >> 8) & 255;
+                        b += c & 255;
+                    }
+                }
+            }
+            // upscaling (a block of one pixel) keeps the pixel as is
+            if op * 2 > n || (n == 1 && op == 1) {
+                out[(oy + y) * w + ox + x] = 0xFF00_0000 | ((r / op) << 16) | ((g / op) << 8) | (b / op);
+            }
         }
     }
     out
@@ -1146,7 +1168,7 @@ pub fn custom_item(lib: &Library, kind: &str, name: &str, price: u16, px: &[u32]
                 }
             }
         }
-        let (pal, mut idx) = quantize(&scaled, n, key);
+        let (pal, mut idx) = quantize(&scaled, n, key, if key { Some(px) } else { None });
         if key {
             idx[0] = 0; // pixel (0,0) is the see-through key
         }

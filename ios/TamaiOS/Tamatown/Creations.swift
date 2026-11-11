@@ -46,24 +46,24 @@ struct ItemAnimation: Identifiable, Hashable {
     var id: Int { code }
 
     static let all: [ItemAnimation] = [
-        ItemAnimation(code: 4, title: "Kitchen", blurb: "Cooks a treat in the room", symbol: "fork.knife"),
-        ItemAnimation(code: 5, title: "Rocket", blurb: "Blasts off over the snow", symbol: "airplane"),
-        ItemAnimation(code: 6, title: "Snowboard", blurb: "Rides across the snow", symbol: "snowflake"),
-        ItemAnimation(code: 9, title: "Plush toy", blurb: "Plays with a crowd of them", symbol: "heart.fill"),
-        ItemAnimation(code: 13, title: "Boat", blurb: "Floats along on a snowy trip", symbol: "water.waves"),
-        ItemAnimation(code: 20, title: "Throwing", blurb: "Tosses it at a target", symbol: "scope"),
-        ItemAnimation(code: 23, title: "Phone", blurb: "Chats away over the snow", symbol: "phone.fill"),
-        ItemAnimation(code: 24, title: "Snow dome", blurb: "Shakes it up in the room", symbol: "snowflake.circle.fill"),
-        ItemAnimation(code: 26, title: "Keyboard", blurb: "Plays a tune with music notes", symbol: "pianokeys"),
-        ItemAnimation(code: 27, title: "Trumpet", blurb: "Toots a cloud of music notes", symbol: "music.note"),
-        ItemAnimation(code: 30, title: "Ribbon", blurb: "Twirls it through the snow", symbol: "sparkles"),
-        ItemAnimation(code: 31, title: "Carriage", blurb: "Rides off in a carriage", symbol: "car.fill"),
-        ItemAnimation(code: 34, title: "Bicycle", blurb: "Pedals across the snow", symbol: "bicycle"),
-        ItemAnimation(code: 37, title: "Robot cook", blurb: "Serves up dishes in the room", symbol: "tray.fill"),
-        ItemAnimation(code: 41, title: "Clover", blurb: "Flowers bloom all around", symbol: "leaf.fill"),
-        ItemAnimation(code: 42, title: "Violin", blurb: "Plays a song in the room", symbol: "music.quarternote.3"),
-        ItemAnimation(code: 43, title: "Computer", blurb: "Tinkers on a screen", symbol: "desktopcomputer"),
-        ItemAnimation(code: 44, title: "Wind chime", blurb: "Chimes tinkle in the snow", symbol: "bell.fill"),
+        ItemAnimation(code: 4, title: "Cook", blurb: "Whips something up in the room", symbol: "fork.knife"),
+        ItemAnimation(code: 5, title: "Blast off", blurb: "Streaks off into the distance", symbol: "airplane"),
+        ItemAnimation(code: 6, title: "Glide", blurb: "Rides it along, whooshing by", symbol: "wind"),
+        ItemAnimation(code: 9, title: "Party", blurb: "A whole crowd of them appears", symbol: "gift.fill"),
+        ItemAnimation(code: 13, title: "Float", blurb: "Sets off for a relaxed ride", symbol: "water.waves"),
+        ItemAnimation(code: 20, title: "Throw", blurb: "Flings it at a target", symbol: "scope"),
+        ItemAnimation(code: 23, title: "Chat", blurb: "Pops up with speech bubbles", symbol: "bubble.left.and.bubble.right.fill"),
+        ItemAnimation(code: 24, title: "Shake", blurb: "Shakes it up and shows it off", symbol: "sparkles"),
+        ItemAnimation(code: 26, title: "Play keys", blurb: "Plays a tune, notes floating up", symbol: "music.note.list"),
+        ItemAnimation(code: 27, title: "Fanfare", blurb: "Blasts out a cloud of music notes", symbol: "music.note"),
+        ItemAnimation(code: 30, title: "Twirl", blurb: "Spins it around with a flourish", symbol: "sparkles"),
+        ItemAnimation(code: 31, title: "Parade", blurb: "Rides along in style", symbol: "car.fill"),
+        ItemAnimation(code: 34, title: "Ride", blurb: "Pedals off for a spin", symbol: "bicycle"),
+        ItemAnimation(code: 37, title: "Serve", blurb: "Dishes out food in the room", symbol: "tray.fill"),
+        ItemAnimation(code: 41, title: "Bloom", blurb: "Flowers burst out all around", symbol: "leaf.fill"),
+        ItemAnimation(code: 42, title: "Perform", blurb: "Plays a song, notes drifting by", symbol: "music.quarternote.3"),
+        ItemAnimation(code: 43, title: "Tinker", blurb: "Fiddles with it on a screen", symbol: "desktopcomputer"),
+        ItemAnimation(code: 44, title: "Jingle", blurb: "Hangs it up and it tinkles", symbol: "bell.fill"),
     ]
     static func named(_ code: Int?) -> ItemAnimation? { all.first { $0.code == code } }
 }
@@ -146,16 +146,24 @@ final class Creations: ObservableObject {
         return Array(UnsafeBufferPointer(start: p, count: len))
     }
 
-    /// A small picture of the drawing for lists.
+    /// A small picture of the drawing for lists, cropped to what you drew so it sits centred and fills the tile.
     func thumbnail(_ c: Creation) -> UIImage? {
         guard let argb = pixels(c) else { return nil }
         let n = c.kind.size
-        let rgba = argb.map { v -> UInt32 in
-            (v & 0xFF00_0000) | ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF)
-        }
+        var x0 = n, y0 = n, x1 = -1, y1 = -1
+        for y in 0..<n { for x in 0..<n where (argb[y * n + x] >> 24) >= 128 {
+            x0 = min(x0, x); x1 = max(x1, x); y0 = min(y0, y); y1 = max(y1, y)
+        } }
+        if c.kind == .wallpaper || x1 < x0 { x0 = 0; y0 = 0; x1 = n - 1; y1 = n - 1 }
+        let w = x1 - x0 + 1, h = y1 - y0 + 1
+        var rgba = [UInt32](repeating: 0, count: w * h)
+        for y in 0..<h { for x in 0..<w {
+            let v = argb[(y0 + y) * n + x0 + x]
+            rgba[y * w + x] = (v & 0xFF00_0000) | ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF)
+        } }
         let data = rgba.withUnsafeBufferPointer { Data(buffer: $0) }
         guard let prov = CGDataProvider(data: data as CFData),
-              let cg = CGImage(width: n, height: n, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: n * 4,
+              let cg = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
                                space: CGColorSpaceCreateDeviceRGB(),
                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
                                provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent)

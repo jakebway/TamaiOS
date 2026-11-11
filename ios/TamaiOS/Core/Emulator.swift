@@ -588,6 +588,10 @@ final class Emulator: ObservableObject {
                 // Twins: the toy sets F800DBE8 to 1 when two babies hatch (the second one's colours are kept at F800DBFC) and
                 // clears it once the first is named, after which the other twin lives on the toy's Family page.
                 if let raw, raw.count > 33, raw[33] == 1 {
+                    // The toy asks for a name for each twin in turn and keeps the typed name at F800DADE: take each as it is confirmed.
+                    if let n = LiveTamaName.typedName(Array(raw[17..<33])) {
+                        DispatchQueue.main.async { Town.shared.noteTwinName(toy, n) }
+                    }
                     if sig != lastNameSig, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy, twin: true) }) ?? nil {
                         try? png.write(to: ToyStore.twinSpriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
@@ -1010,6 +1014,7 @@ enum EggWatch {
     static func mark(_ deviceID: String) {
         Prefs.d.set(Date().timeIntervalSince1970, forKey: "eggWatch.v1." + deviceID)
         try? FileManager.default.removeItem(at: ToyStore.twinSpriteURL(deviceID))
+        Prefs.d.removeObject(forKey: "twins.names.v1." + deviceID)
         Prefs.d.removeObject(forKey: "twins.v1." + deviceID)      // a new marriage: twins are only known again once they hatch
     }
     static func pending(_ deviceID: String) -> Bool {

@@ -49,6 +49,20 @@ final class LiveTamaName: ObservableObject {
                                 provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
         return UIImage(cgImage: img).pngData()
     }
+    /// A name typed on the toy (16 bytes of glyph codes at F800DADE) as shown everywhere in the app, or nil while it is empty or half-typed.
+    static func typedName(_ cn: [UInt8]) -> String? {
+        guard cn.count >= 16, !(cn[0] == 0 && cn[1] == 0) else { return nil }
+        var typed = ""
+        for i in stride(from: 0, to: 16, by: 2) {
+            let c = Int(cn[i]) << 8 | Int(cn[i + 1])
+            if c == 0 { break }
+            if c == 0x86c { typed += " "; continue }
+            guard (0x8e0...0x8f9).contains(c), let u = UnicodeScalar(c - 0x87f) else { return nil }
+            typed.unicodeScalars.append(u)
+        }
+        typed = typed.trimmingCharacters(in: .whitespaces)
+        return typed.isEmpty ? nil : typed.prefix(1).uppercased() + typed.dropFirst() + "tchi"
+    }
     enum Direct: Equatable { case name(String), unnamed, unknown }
     static func directName(core h: OpaquePointer, deviceID: String) -> String? {
         if case .name(let n) = direct(core: h, deviceID: deviceID) { return n }

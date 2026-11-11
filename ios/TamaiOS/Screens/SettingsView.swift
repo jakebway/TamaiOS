@@ -247,7 +247,7 @@ struct DevicesSection: View {
                             .font(.system(.headline, design: .rounded)).foregroundStyle(.primary)
                             .lineLimit(1).minimumScaleFactor(0.8)
                         if twinImage(t) != nil {
-                            Text("& their twin")
+                            Text("& " + (Town.twinNames(t.id).first(where: { $0 != tamaName(t) }) ?? "their twin"))
                                 .font(.system(.subheadline, design: .rounded)).foregroundStyle(.primary.opacity(0.75))
                                 .lineLimit(1)
                         } else if Prefs.d.bool(forKey: "twins.v1." + t.id) {

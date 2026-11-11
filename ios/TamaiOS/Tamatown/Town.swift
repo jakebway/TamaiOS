@@ -456,10 +456,8 @@ final class Town: ObservableObject {
     /// The names given to the twins, in the order they were typed on the toy.
     static func twinNames(_ id: String) -> [String] { Prefs.d.stringArray(forKey: "twins.names.v1." + id) ?? [] }
     func noteTwinName(_ id: String, _ name: String) {
-        var n = Self.twinNames(id)
-        guard n.last != name, n.count < 2, !n.contains(name) else { return }
-        n.append(name)
-        Prefs.d.set(n, forKey: "twins.names.v1." + id)
+        guard Self.twinNames(id) != [name] else { return }
+        Prefs.d.set([name], forKey: "twins.names.v1." + id)
         objectWillChange.send()
     }
 

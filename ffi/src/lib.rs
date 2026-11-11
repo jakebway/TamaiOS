@@ -1662,7 +1662,10 @@ pub extern "C" fn tg_profile_sprite(e: *mut Emu, rom: i32, out: *mut u32) -> i32
     let Some(&(chars, strips, refimg)) = T.get(rom as usize) else { return 0 };
     with(e, |e| {
         let s = &mut e.m.sys;
-        if s.read8(0xF800_D89E) != 1 || s.read8(0xF800_D8B6) < 1 { return 0; }
+        // built-in Tamas (generation 1) at any stage, and the babies of a marriage (generation 2+, stages 1 to 3), whose
+        // profile picture the toy takes from the same table (row 0, in the colour the toy keeps at F800BF68)
+        let (gen, stage) = (s.read8(0xF800_D89E), s.read8(0xF800_D8B6));
+        if stage < 1 || gen == 0 || (gen >= 2 && stage > 3) { return 0; }
         let key = u32::from(s.read8(0xF800_D864)) | u32::from(s.read8(0xF800_D865)) << 8;
         if key >= 200 { return 0; }
         let cidx = u32::from(s.read8(0xF800_BF68));

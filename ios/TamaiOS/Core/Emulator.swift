@@ -598,24 +598,28 @@ final class Emulator: ObservableObject {
                     if let d = withCore({ LiveTamaName.direct(core: $0, deviceID: toy) }) {
                         DispatchQueue.main.async { LiveTamaName.shared.applyDirect(d, deviceID: toy) }
                     }
-                    var look = [Int32](repeating: 0, count: 7)
-                    if withCore({ tg_profile_look($0, &look) }) == 1 {
-                        // A Tama born from a marriage is drawn by the toy itself (a baby is not the grown-up picture built from
-                        // its parts), so the card picture is taken from the profile page: drop the old one and read it again.
-                        try? FileManager.default.removeItem(at: ToyStore.spriteURL(toy))
-                        DispatchQueue.main.async {
-                            NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy)
-                            for d in [6.0, 25.0, 70.0] {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + d) {
-                                    guard AppModel.current?.emu.toy?.id == toy,
-                                          !FileManager.default.fileExists(atPath: ToyStore.spriteURL(toy).path) else { return }
-                                    IRLink.refreshActiveName()
+                    // The picture comes straight from the toy's own data the moment the stage, colour or name changes (a hatch, a
+                    // growth, a new baby): built-in Tamas at any stage and marriage babies up to the teen stage.
+                    if raw[0] >= 1, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
+                        try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
+                        DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
+                    } else if raw[0] >= 1 {
+                        // A grown-up born from a marriage is drawn from a different table: the old picture is dropped and the
+                        // profile page is read instead (slower, but it is what the toy shows).
+                        var look = [Int32](repeating: 0, count: 7)
+                        if withCore({ tg_profile_look($0, &look) }) == 1 {
+                            try? FileManager.default.removeItem(at: ToyStore.spriteURL(toy))
+                            DispatchQueue.main.async {
+                                NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy)
+                                for d in [3.0, 15.0, 60.0] {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + d) {
+                                        guard AppModel.current?.emu.toy?.id == toy,
+                                              !FileManager.default.fileExists(atPath: ToyStore.spriteURL(toy).path) else { return }
+                                        IRLink.refreshActiveName()
+                                    }
                                 }
                             }
                         }
-                    } else if raw[0] >= 1, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
-                        try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
-                        DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                     }
                 }
                 if lastNameSigReset { lastNameSigReset = false; lastNameSig = "" }

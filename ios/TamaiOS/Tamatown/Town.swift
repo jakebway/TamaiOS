@@ -25,6 +25,8 @@ final class Town: ObservableObject {
     enum Pack: Equatable { case missing, loading, ready(Int), failed(String) }
     enum Pending: String, Codable { case none, marry, back }
 
+    /// Set once the character pack is in memory (readable from any thread).
+    static var packLoaded = false
     @Published var pack: Pack = .missing
     @Published var ids: [UInt16] = []
     /// Characters with a real body (a few are only accessories: a bow, a hat). Only these can be a Body.
@@ -112,6 +114,7 @@ final class Town: ObservableObject {
                     self.bodyIDs = bodies.isEmpty ? all : bodies
                     self.items = Town.readItems()
                     self.imageCache = [:]
+                    Town.packLoaded = true
                     self.pack = .ready(Int(n))
                     if self.suitors.isEmpty { self.shuffle() }
                 } else {

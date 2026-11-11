@@ -49,6 +49,27 @@ final class LiveTamaName: ObservableObject {
                                 provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
         return UIImage(cgImage: img).pngData()
     }
+    /// A marriage baby is drawn from its four genes (body, face, head, back: 4 x u16 little-endian at F800DAC6, colours of
+    /// body/head/back at F800DAC2..4; the second twin's are at F800DBFC and F800DC04..6). The built-in Tama table only knows the
+    /// base character, so a head gene from the other parent (a hat, ears) would be missing. nil = no genes here (or the
+    /// character pack isn't loaded), and the caller falls back to the table picture.
+    static func genePNG(parts: [UInt8], colours: [UInt8]) -> Data? {
+        guard parts.count >= 8, colours.count >= 3 else { return nil }
+        let g = (0..<4).map { UInt16(parts[$0 * 2]) | UInt16(parts[$0 * 2 + 1]) << 8 }
+        guard g.allSatisfy({ $0 != 0 && $0 < 1000 }), colours.allSatisfy({ $0 < 16 }) else { return nil }
+        var px = [UInt32](repeating: 0, count: 64 * 64)
+        let ok = px.withUnsafeMutableBufferPointer {
+            tg_mm_compose(g[0], Int32(colours[0]), g[1], g[2], Int32(colours[1]), g[3], Int32(colours[2]), $0.baseAddress)
+        }
+        guard ok == 1 else { return nil }
+        let data = px.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let prov = CGDataProvider(data: data as CFData),
+              let img = CGImage(width: 64, height: 64, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 256,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                                provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
+        return UIImage(cgImage: img).trimmedToArt().pngData()
+    }
     /// A name typed on the toy (16 bytes of glyph codes at F800DADE) as shown everywhere in the app, or nil while it is empty or half-typed.
     static func typedName(_ cn: [UInt8]) -> String? {
         guard cn.count >= 16, !(cn[0] == 0 && cn[1] == 0) else { return nil }

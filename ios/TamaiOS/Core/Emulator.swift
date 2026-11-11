@@ -578,13 +578,13 @@ final class Emulator: ObservableObject {
                 // Cheap check first (a few bytes); the name and picture are only rebuilt when something changed.
                 let raw: [UInt8]? = withCore { h in
                     var out = [UInt8]()
-                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16), (0xF800DBE8, 1), (0xF800DC04, 1), (0xF800DBEA, 16)] as [(UInt32, Int)] {
+                    for (addr, n) in [(0xF800D8B6, 1), (0xF800D89E, 1), (0xF800D864, 2), (0xF800BF68, 1), (0xF800DAC2, 12), (0xF800DADE, 16), (0xF800DBE8, 1), (0xF800DC04, 1), (0xF800DBEA, 16), (0xF800DBFC, 8), (0xF800DC05, 2)] as [(UInt32, Int)] {
                         var b = [UInt8](repeating: 0, count: n)
                         out += tg_peek(h, addr, &b, n) == 1 ? b : [UInt8](repeating: 0xEE, count: n)
                     }
                     return out
                 }
-                let sig = toy + ":" + (raw ?? []).map(String.init).joined(separator: ",")
+                let sig = toy + (Town.packLoaded ? "+" : "-") + ":" + (raw ?? []).map(String.init).joined(separator: ",")
                 // Twins: the toy sets F800DBE8 to 1 when two babies hatch (the second one's colours are kept at F800DBFC) and
                 // clears it once the first is named, after which the other twin lives on the toy's Family page.
                 // Once the twins were seen, the second twin's data is read live for as long as the toy keeps it (name block F800DBEA).
@@ -595,7 +595,8 @@ final class Emulator: ObservableObject {
                     if raw.count >= 51, let n = LiveTamaName.typedName(Array(raw[35..<51])) {
                         DispatchQueue.main.async { Town.shared.noteTwinName(toy, n) }
                     }
-                    if sig != lastNameSig, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy, twin: true) }) ?? nil {
+                    let twinGenes: Data? = raw.count >= 61 && raw[1] >= 2 ? LiveTamaName.genePNG(parts: Array(raw[51..<59]), colours: [raw[34], raw[59], raw[60]]) : nil
+                    if sig != lastNameSig, let png = twinGenes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy, twin: true) }) ?? nil {
                         try? png.write(to: ToyStore.twinSpriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                     }
@@ -613,7 +614,8 @@ final class Emulator: ObservableObject {
                     }
                     // The picture comes straight from the toy's own data the moment the stage, colour or name changes (a hatch, a
                     // growth, a new baby): built-in Tamas at any stage and marriage babies up to the teen stage.
-                    if raw[0] >= 1, let png = withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
+                    let genes: Data? = raw.count >= 17 && raw[1] >= 2 && raw[0] >= 1 ? LiveTamaName.genePNG(parts: Array(raw[9..<17]), colours: [raw[5], raw[6], raw[7]]) : nil
+                    if raw[0] >= 1, let png = genes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
                         try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                     } else if raw[0] >= 1 {

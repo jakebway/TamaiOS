@@ -595,7 +595,7 @@ final class Emulator: ObservableObject {
                     if raw.count >= 51, let n = LiveTamaName.typedName(Array(raw[35..<51])) {
                         DispatchQueue.main.async { Town.shared.noteTwinName(toy, n) }
                     }
-                    let twinGenes: Data? = raw.count >= 61 && raw[1] >= 2 ? LiveTamaName.genePNG(parts: Array(raw[51..<59]), colours: [raw[34], raw[59], raw[60]]) : nil
+                    let twinGenes: Data? = Emulator.useGenePicture && raw.count >= 61 && raw[1] >= 2 ? LiveTamaName.genePNG(parts: Array(raw[51..<59]), colours: [raw[34], raw[59], raw[60]]) : nil
                     if sig != lastNameSig, let png = twinGenes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy, twin: true) }) ?? nil {
                         try? png.write(to: ToyStore.twinSpriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
@@ -614,7 +614,7 @@ final class Emulator: ObservableObject {
                     }
                     // The picture comes straight from the toy's own data the moment the stage, colour or name changes (a hatch, a
                     // growth, a new baby): built-in Tamas at any stage and marriage babies up to the teen stage.
-                    let genes: Data? = raw.count >= 17 && raw[1] >= 2 && raw[0] >= 1 ? LiveTamaName.genePNG(parts: Array(raw[9..<17]), colours: [raw[5], raw[6], raw[7]]) : nil
+                    let genes: Data? = Emulator.useGenePicture && raw.count >= 17 && raw[1] >= 2 && raw[0] >= 1 ? LiveTamaName.genePNG(parts: Array(raw[9..<17]), colours: [raw[5], raw[6], raw[7]]) : nil
                     if raw[0] >= 1, let png = genes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
                         try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
@@ -743,6 +743,9 @@ final class Emulator: ObservableObject {
         }
     }
 
+    /// The four genes at F800DAC6 turned out to be the partner's, not the child's own look, so drawing from them showed the
+    /// wrong parent. Off until the child's own genes are found (diag now prints the gene block).
+    static let useGenePicture = false
     private func careSample() -> (mask: Int, raw: Int, stage: Int, character: Int, signature: String) {
         let sample = withCore { h -> (Int, Int, Int, Int, String) in
             var mask = Int(tg_profile_attention(h))

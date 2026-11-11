@@ -399,7 +399,7 @@ final class Console: ObservableObject {
             }
             func hx(_ a: UInt32, _ n: Int) -> String { var x = [UInt8](repeating: 0, count: n); return tg_peek(h, a, &x, n) == 1 ? x.map { String(format: "%02x", $0) }.joined() : "?" }
             func b(_ a: UInt32) -> String { var x: UInt8 = 0; return tg_peek(h, a, &x, 1) == 1 ? String(x) : "?" }
-            let bedBlock = "state block @F800D800 (256 bytes, for finding the in-bed flag): " + hx(0xF800D800, 256) + "\n"
+            let bedBlock = "gene block @F800DA80 (448 bytes, for finding the child's own look; partner genes sit at DAC6): " + hx(0xF800DA80, 448) + "\nbase @F800D8B0: " + hx(0xF800D8B0, 48) + "\n"
             var nm = [UInt8](repeating: 0, count: 48)
             let nameHex = tg_peek(h, 0xF800DC30, &nm, 48) == 1 ? nm.map { String(format: "%02x", $0) }.joined() : "?"
             var kb = [UInt8](repeating: 0, count: 2)

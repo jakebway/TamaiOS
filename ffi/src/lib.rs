@@ -1675,7 +1675,7 @@ fn profile_sprite(e: *mut Emu, rom: i32, twin: bool, out: *mut u32) -> i32 {
         if stage < 1 || gen == 0 || (gen >= 2 && stage > 3) { return 0; }
         let key = u32::from(s.read8(0xF800_D864)) | u32::from(s.read8(0xF800_D865)) << 8;
         if key >= 200 { return 0; }
-        if twin && (s.read8(0xF800_DBE8) != 1 || gen < 2) { return 0; }
+        if twin && ((s.read8(0xF800_DBE8) != 1 && s.read16(0xF800_DBEA) == 0) || gen < 2) { return 0; }
         let cidx = u32::from(s.read8(if twin { 0xF800_DC04 } else { 0xF800_BF68 }));
         if cidx > 11 { return 0; }
         let img = s.read32(chars + key * 14 * 4);

@@ -587,7 +587,9 @@ final class Emulator: ObservableObject {
                 let sig = toy + ":" + (raw ?? []).map(String.init).joined(separator: ",")
                 // Twins: the toy sets F800DBE8 to 1 when two babies hatch (the second one's colours are kept at F800DBFC) and
                 // clears it once the first is named, after which the other twin lives on the toy's Family page.
-                if let raw, raw.count > 33, raw[33] == 1 {
+                // Once the twins were seen, the second twin's data is read live for as long as the toy keeps it (name block F800DBEA).
+                let twinKept = Prefs.d.bool(forKey: "twins.v1." + toy) && (raw?.count ?? 0) >= 51 && LiveTamaName.typedName(Array(raw![35..<51])) != nil
+                if let raw, raw.count > 33, raw[33] == 1 || twinKept {
                     // The toy asks for a name for each twin in turn: the first goes to F800DADE like any baby, the second is kept in the
                     // twin block at F800DBEA (16 bytes of glyph codes), next to the second twin's colours.
                     if raw.count >= 51, let n = LiveTamaName.typedName(Array(raw[35..<51])) {
@@ -597,9 +599,11 @@ final class Emulator: ObservableObject {
                         try? png.write(to: ToyStore.twinSpriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
                     }
-                    DispatchQueue.main.async {
-                        guard let t = self.toy, t.id == toy else { return }
-                        Town.shared.noteTwins(t)
+                    if raw[33] == 1 {
+                        DispatchQueue.main.async {
+                            guard let t = self.toy, t.id == toy else { return }
+                            Town.shared.noteTwins(t)
+                        }
                     }
                 }
                 if let raw, sig != lastNameSig {

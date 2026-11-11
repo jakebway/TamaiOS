@@ -623,6 +623,8 @@ final class Emulator: ObservableObject {
                     if raw[0] >= 1, let png = own {
                         try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }
+                    } else if raw[0] >= 1, inheritedLook, !Town.packLoaded {
+                        // The picture pack is still loading after a launch: keep the saved picture; it is rebuilt (only if it changed) once the pack is ready.
                     } else if raw[0] >= 1, !inheritedLook, let png = genes ?? withCore({ LiveTamaName.spritePNG(core: $0, deviceID: toy) }) ?? nil {
                         try? png.write(to: ToyStore.spriteURL(toy), options: .atomic)
                         DispatchQueue.main.async { NotificationCenter.default.post(name: .init("TamaiOSSpriteChanged"), object: toy) }

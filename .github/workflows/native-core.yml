@@ -1,0 +1,42 @@
+name: Native core (prebuilt Rust library for iOXcode)
+
+# iOXcode builds the app on the iPhone but cannot run Rust there. This builds libtamaios.a once per version of
+# the Rust sources and publishes it as release native-<key>; iOXcode downloads the matching one when it builds.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["ffi/**", "patches/**", "tools/prepare_core.py", "tools/timer_snapshot_history.patch"]
+
+permissions:
+  contents: write
+
+jobs:
+  core:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Key
+        id: key
+        run: echo "key=$(python3 tools/native_key.py)" >> "$GITHUB_OUTPUT"
+      - name: Already published?
+        id: have
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          if gh release view "native-${{ steps.key.outputs.key }}" >/dev/null 2>&1; then echo "have=yes" >> "$GITHUB_OUTPUT"; fi
+      - name: Build the Rust library
+        if: steps.have.outputs.have != 'yes'
+        run: |
+          set -euo pipefail
+          python3 tools/prepare_core.py --variant promoted
+          rustup target add aarch64-apple-ios
+          cd ffi
+          IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --release --target aarch64-apple-ios
+      - name: Publish
+        if: steps.have.outputs.have != 'yes'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release create "native-${{ steps.key.outputs.key }}" ffi/target/aarch64-apple-ios/release/libtamaios.a \
+            --title "Native core ${{ steps.key.outputs.key }}" --notes "Prebuilt Rust library for iOXcode (key ${{ steps.key.outputs.key }})."

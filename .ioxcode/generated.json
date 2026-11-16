@@ -1,0 +1,45 @@
+{
+ "notes": [],
+ "manifest": {
+  "name": "TamaiOS",
+  "minOS": "16.0",
+  "bundleId": "com.jakebway.tamaios",
+  "version": "beta",
+  "build": "1",
+  "swiftVersion": "5",
+  "bridgingHeader": "TamaiOS/Bridge.h",
+  "optimization": "none",
+  "infoPlistFile": "TamaiOS/Info.plist",
+  "sources": [
+   "TamaiOS"
+  ],
+  "resources": [
+   "TamaiOS/BundledFirmware",
+   "TamaiOS/BundledAssets"
+  ],
+  "excludes": [
+   "TamaiOS/BundledFirmware",
+   "TamaiOS/BundledAssets"
+  ],
+  "sourceResources": true,
+  "libraries": [
+   "tamaios"
+  ],
+  "frameworks": [],
+  "libraryDirs": [
+   "lib"
+  ],
+  "linkerFlags": [],
+  "packages": [],
+  "scripts": []
+ },
+ "root": "ios",
+ "scripts": [
+  {
+   "name": "GitHub workflow: build (build-fallback.yml)",
+   "script": "# from .github/workflows/build-fallback.yml, job 'build'\nioxcode-step 'Apply tamaios_changes.patch if it is in the repo' '.' '' c2V0IC1ldW8gcGlwZWZhaWwKUD10YW1haW9zX2NoYW5nZXMucGF0Y2gKaWYgWyAhIC1mICIkUCIgXTsgdGhlbgogIGVjaG8gIk5vICRQIGluIHRoZSByZXBvLCBidWlsZGluZyB0aGUgY29kZSBhcyBpdCBpcy4iCmVsaWYgZ2l0IGFwcGx5IC0tY2hlY2sgIiRQIiAyPi9kZXYvbnVsbDsgdGhlbgogIGdpdCBhcHBseSAiJFAiCiAgZWNobyAiQXBwbGllZCAkUCIKZWxpZiBnaXQgYXBwbHkgLS1jaGVjayAtUiAiJFAiIDI+L2Rldi9udWxsOyB0aGVuCiAgZWNobyAiJFAgaXMgYWxyZWFkeSBwYXJ0IG9mIHRoZSBjb2RlLCBza2lwcGluZyBpdC4iCmVsc2UKICBlY2hvICI6OmVycm9yOjokUCBkb2VzIG5vdCBhcHBseSB0byB0aGlzIGNvZGUuIFJlbW92ZSBpdCBvciBhc2sgZm9yIGEgZnJlc2ggb25lLiIKICBleGl0IDEKZmkK\nioxcode-step 'Install XcodeGen' '.' '' YnJldyBpbnN0YWxsIHhjb2RlZ2Vu\nioxcode-step 'Prepare promoted hash-verified emulator core' '.' '' c2V0IC1ldW8gcGlwZWZhaWwKcHl0aG9uMyB0b29scy9wcmVwYXJlX2NvcmUucHkgLS12YXJpYW50IHByb21vdGVkCg==\nioxcode-step 'Build Rust static library for iOS' '.' '' c2V0IC1ldW8gcGlwZWZhaWwKcnVzdHVwIHRhcmdldCBhZGQgYWFyY2g2NC1hcHBsZS1pb3MKY2QgZmZpCklQSE9ORU9TX0RFUExPWU1FTlRfVEFSR0VUPTE2LjAgY2FyZ28gYnVpbGQgLS1yZWxlYXNlIC0tdGFyZ2V0IGFhcmNoNjQtYXBwbGUtaW9zCm1rZGlyIC1wIC4uL2lvcy9saWIKY3AgdGFyZ2V0L2FhcmNoNjQtYXBwbGUtaW9zL3JlbGVhc2UvbGlidGFtYWlvcy5hIC4uL2lvcy9saWIvCmxzIC1saCAuLi9pb3MvbGliLwo=\nioxcode-step 'Fetch firmware and assets from the private repo (if configured)' '.' 'PRIVATE_TOKEN='\\'''\\''' c2V0IC1ldW8gcGlwZWZhaWwKaWYgWyAtbiAiJHtQUklWQVRFX1RPS0VOOi19IiBdOyB0aGVuCiAgZ2l0IGNsb25lIC0tZGVwdGggMSAiaHR0cHM6Ly94LWFjY2Vzcy10b2tlbjoke1BSSVZBVEVfVE9LRU59QGdpdGh1Yi5jb20vamFrZWJ3YXkvVGFtYWlPUy1wcml2YXRlLmdpdCIgcHJpdmF0ZQogIG1rZGlyIC1wIGZpcm13YXJlIGFzc2V0cwogIGNwIHByaXZhdGUvZmlybXdhcmUvKi5iaW4gZmlybXdhcmUvIDI+L2Rldi9udWxsIHx8IHRydWUKICBjcCBwcml2YXRlL2Fzc2V0cy8qLnppcCBhc3NldHMvIDI+L2Rldi9udWxsIHx8IHRydWUKICBybSAtcmYgcHJpdmF0ZQplbHNlCiAgZWNobyAiTm8gUFJJVkFURV9SRVBPX1RPS0VOIHNlY3JldDogdXNpbmcgZmlybXdhcmUvIGFuZCBhc3NldHMvIGZyb20gdGhpcyByZXBvLCBpZiBhbnkuIgpmaQo=\nioxcode-step 'Bundle firmware and MyMeets assets into the app' '.' '' c2V0IC1ldW8gcGlwZWZhaWwKbWtkaXIgLXAgaW9zL1RhbWFpT1MvQnVuZGxlZEZpcm13YXJlIGlvcy9UYW1haU9TL0J1bmRsZWRBc3NldHMKZm9yIGYgaW4gZmlybXdhcmUvKi5iaW47IGRvCiAgWyAtZiAiJGYiIF0gJiYgY3AgIiRmIiBpb3MvVGFtYWlPUy9CdW5kbGVkRmlybXdhcmUvIHx8IHRydWUKZG9uZQppZiBbIC1mIGFzc2V0cy9NeU1lZXRzMl8zXzcuemlwIF07IHRoZW4KICBjcCBhc3NldHMvTXlNZWV0czJfM183LnppcCBpb3MvVGFtYWlPUy9CdW5kbGVkQXNzZXRzLwpmaQpscyAtbGggaW9zL1RhbWFpT1MvQnVuZGxlZEZpcm13YXJlIGlvcy9UYW1haU9TL0J1bmRsZWRBc3NldHMgfHwgdHJ1ZQo=\nioxcode-step 'Draw the app icon' '.' '' cHl0aG9uMyAtbSBwaXAgaW5zdGFsbCAtLXF1aWV0IHBpbGxvdyB8fCBweXRob24zIC1tIHBpcCBpbnN0YWxsIC0tcXVpZXQgLS1icmVhay1zeXN0ZW0tcGFja2FnZXMgcGlsbG93CnB5dGhvbjMgdG9vbHMvaWNvbi5weSBpb3MvVGFtYWlPUy9Bc3NldHMueGNhc3NldHMvQXBwSWNvbi5hcHBpY29uc2V0L2ljb24ucG5nCnB5dGhvbjMgdG9vbHMvdG93bi5weSBpb3MvVGFtYWlPUy9Ub3duQmFja2dyb3VuZC5wbmcgMTY4MCB8fCB0cnVlCg==\nioxcode-step 'Generate Xcode project' '.' '' Y2QgaW9zCnhjb2RlZ2VuIGdlbmVyYXRlCg==\nioxcode-step 'Package the Xcode project (sources, generated project, Rust library)' '.' '' c2V0IC1ldW8gcGlwZWZhaWwKY2QgaW9zCnppcCAtcXJ5IC4uL1RhbWFpT1MtWGNvZGUtcHJvamVjdC56aXAgLiAteCAiYnVpbGQvKiIgIiouaXBhIiAiUGF5bG9hZC8qIiAiLkRTX1N0b3JlIgpscyAtbGggLi4vVGFtYWlPUy1YY29kZS1wcm9qZWN0LnppcAo=\necho 'note: skipping '\\''Upload Xcode project artifact'\\'' (actions/upload-artifact@v4): GitHub actions don'\\''t run on iPhone'\necho '== '\\''Build unsigned IPA'\\'' is the Xcode build: iOXcode takes over from here'\n",
+   "afterCompile": false,
+   "dir": "."
+  }
+ ]
+}
